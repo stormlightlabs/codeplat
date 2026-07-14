@@ -12,18 +12,24 @@ tags:
 
 ## Summary
 
-A good modern CLI is human-first and discoverable while preserving the stable streams, exit codes, and explicit behavior required for automation.
+A good modern CLI is human-first and discoverable while preserving the stable streams, exit codes,
+and explicit behavior required for automation.
 
 ## Source Boundary
 
-- **Command Line Interface Guidelines:** Principles and concrete conventions for conventional, composable command-line programs; it does not prescribe a language or framework.
+- **Command Line Interface Guidelines:** Principles and concrete conventions for conventional,
+  composable command-line programs; it does not prescribe a language or framework.
 
 ## Key Ideas
 
-- **Humans and programs both matter:** Composability through stdout, stderr, exit codes, signals, and structured output can coexist with clear, empathetic interactive use.
-- **Discovery is a core feature:** Concise no-argument help, thorough `--help`, examples, consistent names, and suggested next commands make the interface learnable.
-- **Output is a contract:** Keep successful human output brief, reserve stdout for primary and machine-readable data, reserve stderr for diagnostics, and provide JSON when the data is structured.
-- **Automation must not be surprised:** Disable decoration outside a TTY, make non-interactive behavior explicit, and never silently reinterpret an unknown command or abbreviation.
+- **Humans and programs both matter:** Composability through stdout, stderr, exit codes, signals, and
+  structured output can coexist with clear, empathetic interactive use.
+- **Discovery is a core feature:** Concise no-argument help, thorough `--help`, examples, consistent names,
+  and suggested next commands make the interface learnable.
+- **Output is a contract:** Keep successful human output brief, reserve stdout for primary and machine-readable data,
+  reserve stderr for diagnostics, and provide JSON when the data is structured.
+- **Automation must not be surprised:** Disable decoration outside a TTY, make non-interactive behavior explicit,
+  and never silently reinterpret an unknown command or abbreviation.
 
 ## What a Well-Behaved CLI Does
 
@@ -38,25 +44,33 @@ A good modern CLI is human-first and discoverable while preserving the stable st
 
 ### Interface shape
 
-Use subcommands when related capabilities share configuration, help conventions, and storage. Keep verbs and flag names consistent. Avoid catch-all subcommands and automatic abbreviation because either creates future compatibility traps.
+Use subcommands when related capabilities share configuration, help conventions, and storage. Keep verbs and flag
+names consistent. Avoid catch-all subcommands and automatic abbreviation because either creates future compatibility
+traps.
 
 ### Human and machine modes
 
-Terminal presentation can be concise, colored, and oriented around next steps. Machine mode should be deterministic structured output. Each output stream is decided separately: a piped stdout does not imply stderr must lose useful diagnostics or color.
+Terminal presentation can be concise, colored, and oriented around next steps. Machine mode should be deterministic
+structured output. Each output stream is decided separately: a piped stdout does not imply stderr must lose useful
+diagnostics or color.
 
 ### Interactivity and safety
 
-Only prompt when stdin is a TTY. `--no-input` must disable prompts. Any dangerous action needs an explicit confirmation or force flag, though read-only inspection generally should not prompt.
+Only prompt when stdin is a TTY. `--no-input` must disable prompts. Any dangerous action needs an explicit confirmation
+or force flag, though read-only inspection generally should not prompt.
 
 ### Configuration
 
-Apply configuration with this precedence: flags, environment variables, project configuration, user configuration, then system configuration. Put per-invocation choices in flags and stable project-wide choices in version-controlled configuration.
+Apply configuration with this precedence: flags, environment variables, project configuration, user configuration,
+then system configuration. Put per-invocation choices in flags and stable project-wide choices in version-controlled
+configuration.
 
 ## Claims & Evidence
 
 ### Stream discipline makes tools composable
 
-The guide recommends primary and machine-readable results on stdout, with errors and messages on stderr, so pipelines receive data rather than status chatter.
+The guide recommends primary and machine-readable results on stdout, with errors and messages on stderr,
+so pipelines receive data rather than status chatter.
 
 Confidence: high; it follows established terminal and UNIX interfaces.
 
@@ -97,7 +111,8 @@ Confidence: high; this follows directly from reserving future command names.
 
 - Related ideas: UNIX composition, API compatibility, accessible design, progressive disclosure.
 - Related sources: `NO_COLOR` convention and XDG Base Directory Specification.
-- Contradictions or tensions: rich terminal output improves scans for people, while scripts need strictly undecorated data; separate modes resolve the tension.
+- Contradictions or tensions: rich terminal output improves scans for people, while scripts need strictly undecorated data;
+  separate modes resolve the tension.
 - Useful applications: developer tools, CI automation, agent tool calls, and maintenance utilities.
 
 ## Open Questions

@@ -64,11 +64,11 @@ Confidence: medium; this is a practitioner workflow, not a complete audit method
 
 ## Important Terms
 
-| Term | Meaning |
-| --- | --- |
-| Churn | How often a path changed during a selected history window. |
-| Bus factor | The risk that knowledge concentrated in a small number of people becomes unavailable. |
-| Bug cluster | Paths repeatedly changed in commits whose messages indicate bug repair. |
+| Term           | Meaning                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------ |
+| Churn          | How often a path changed during a selected history window.                                 |
+| Bus factor     | The risk that knowledge concentrated in a small number of people becomes unavailable.      |
+| Bug cluster    | Paths repeatedly changed in commits whose messages indicate bug repair.                    |
 | Crisis pattern | Revert, hotfix, emergency, or rollback language in history, used as a release-health clue. |
 
 ## Lessons To Reuse

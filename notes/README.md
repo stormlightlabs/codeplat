@@ -1,4 +1,4 @@
-# Research notes
+# Research
 
 - [Git history as a codebase triage tool](git-history-triage.md)
 - [Command-line interface design guidelines](command-line-interface-guidelines.md)
