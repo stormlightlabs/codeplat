@@ -70,17 +70,17 @@ symbol locations, declaration snippets, references, worktree-state labels, and h
 
 **Acceptance criteria:**
 
-- [ ] The inventory includes every tracked eligible Rust file in scope, including tracked files that match an
+- [x] The inventory includes every tracked eligible Rust file in scope, including tracked files that match an
       ignore pattern.
-- [ ] Untracked, non-ignored Rust files are included and labelled; ignored untracked files are omitted with a
+- [x] Untracked, non-ignored Rust files are included and labelled; ignored untracked files are omitted with a
       recorded omission reason.
-- [ ] `ignore` is used for traversal and explicit ignore/glob matching, while `gix` provides repository and
+- [x] `ignore` is used for traversal and explicit ignore/glob matching, while `gix` provides repository and
       tracked/worktree-state data.
-- [ ] Rust Tree-sitter queries extract definitions and references with symbol kind, scope, source location, and
+- [x] Rust Tree-sitter queries extract definitions and references with symbol kind, scope, source location, and
       compact declaration/signature context.
-- [ ] Parse errors, unsupported files, and ambiguous lexical relationships are explicit findings rather than
+- [x] Parse errors, unsupported files, and ambiguous lexical relationships are explicit findings rather than
       silent omissions or false semantic claims.
-- [ ] Scope, supplied exclusions, analyzed/omitted counts, and tracked/modified/untracked state are available in
+- [x] Scope, supplied exclusions, analyzed/omitted counts, and tracked/modified/untracked state are available in
       both formats.
 
 **Verification:**

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{CommandRequest, OutputFormat};
-use crate::{history, utils};
+use crate::{history, map, utils};
 
 /// The current compatibility version of the JSON report envelope.
 pub const SCHEMA_VERSION: u16 = 1;
@@ -16,6 +16,14 @@ pub const DEFAULT_RECENT_WINDOW_DAYS: u32 = 180;
 pub const DEFAULT_BUG_KEYWORDS: &[&str] = &["fix", "bug", "broken"];
 /// The default case-insensitive firefighting commit-message keywords.
 pub const DEFAULT_FIREFIGHTING_KEYWORDS: &[&str] = &["revert", "hotfix", "emergency", "rollback"];
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReportError {
+    #[error("{0}")]
+    History(#[source] history::HistoryError),
+    #[error("{0}")]
+    Map(#[source] map::MapError),
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +72,132 @@ pub enum ReportStatus {
     Analyzed,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeState {
+    Tracked,
+    Modified,
+    Untracked,
+}
+
+impl WorktreeState {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tracked => "tracked",
+            Self::Modified => "modified",
+            Self::Untracked => "untracked",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileAnalysisStatus {
+    Complete,
+    Partial,
+}
+
+impl FileAnalysisStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolRole {
+    Definition,
+    Reference,
+}
+
+impl SymbolRole {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Definition => "definition",
+            Self::Reference => "reference",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolKind {
+    Function,
+    Struct,
+    Enum,
+    Trait,
+    Type,
+    Const,
+    Static,
+    Module,
+    Macro,
+    Field,
+    Identifier,
+    Other,
+}
+
+impl SymbolKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Function => "function",
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Trait => "trait",
+            Self::Type => "type",
+            Self::Const => "const",
+            Self::Static => "static",
+            Self::Module => "module",
+            Self::Macro => "macro",
+            Self::Field => "field",
+            Self::Identifier => "identifier",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OmissionReason {
+    IgnoredUntracked,
+    UnsupportedLanguage,
+    ExplicitExclusion,
+    Symlink,
+    ReadError,
+    TraversalError,
+}
+
+impl OmissionReason {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::IgnoredUntracked => "ignored_untracked",
+            Self::UnsupportedLanguage => "unsupported_language",
+            Self::ExplicitExclusion => "explicit_exclusion",
+            Self::Symlink => "symlink",
+            Self::ReadError => "read_error",
+            Self::TraversalError => "traversal_error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapFindingKind {
+    ParseError,
+    AmbiguousReference,
+}
+
+impl MapFindingKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ParseError => "parse_error",
+            Self::AmbiguousReference => "ambiguous_reference",
+        }
+    }
+}
+
 /// Typed history-analysis inputs that are also reported for reproducibility.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HistorySettings {
@@ -102,6 +236,8 @@ pub struct Report {
     pub limitations: Vec<Limitation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history: Option<HistoryReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map: Option<MapReport>,
 }
 
 impl Report {
@@ -133,30 +269,53 @@ impl Report {
             findings: Vec::new(),
             limitations,
             history: None,
+            map: None,
         }
     }
 
-    pub fn analyze(request: CommandRequest) -> Result<Self, history::HistoryError> {
-        if request.command.name != CommandName::History {
-            return Ok(Self::foundation(request));
+    pub fn analyze(request: CommandRequest) -> Result<Self, ReportError> {
+        match request.command.name {
+            CommandName::Briefing => Ok(Self::foundation(request)),
+            CommandName::History => {
+                let scope = ReportScope::from(request.command.path.clone());
+                let history_report =
+                    history::analyze(&request.command.path, request.history, request.command.operation)
+                        .map_err(ReportError::History)?;
+
+                Ok(Self {
+                    schema_version: SCHEMA_VERSION,
+                    scope,
+                    command: request.command,
+                    status: ReportStatus::Analyzed,
+                    summary: format!(
+                        "Analyzed {} reachable commits, including {} non-merge commits, within the selected history scope.",
+                        history_report.commits_seen, history_report.non_merge_commits_seen
+                    ),
+                    findings: Vec::new(),
+                    limitations: Vec::new(),
+                    history: Some(history_report),
+                    map: None,
+                })
+            }
+            CommandName::Map => {
+                let scope = ReportScope::from(request.command.path.clone());
+                let map_report = map::analyze(&request.command.path, &request.map).map_err(ReportError::Map)?;
+                Ok(Self {
+                    schema_version: SCHEMA_VERSION,
+                    scope,
+                    command: request.command,
+                    status: ReportStatus::Analyzed,
+                    summary: format!(
+                        "Analyzed {} Rust source files and recorded {} omitted paths within the selected source scope.",
+                        map_report.inventory.analyzed, map_report.inventory.omitted
+                    ),
+                    findings: Vec::new(),
+                    limitations: Vec::new(),
+                    history: None,
+                    map: Some(map_report),
+                })
+            }
         }
-
-        let scope = ReportScope::from(request.command.path.clone());
-        let history_report = history::analyze(&request.command.path, request.history, request.command.operation)?;
-
-        Ok(Self {
-            schema_version: SCHEMA_VERSION,
-            scope,
-            command: request.command,
-            status: ReportStatus::Analyzed,
-            summary: format!(
-                "Analyzed {} reachable commits, including {} non-merge commits, within the selected history scope.",
-                history_report.commits_seen, history_report.non_merge_commits_seen
-            ),
-            findings: Vec::new(),
-            limitations: Vec::new(),
-            history: Some(history_report),
-        })
     }
 
     /// Render a report from the shared typed model without parsing or transforming Markdown.
@@ -195,6 +354,10 @@ impl Report {
 
         if let Some(history) = &self.history {
             Render::history_markdown(&mut output, history);
+        }
+
+        if let Some(map) = &self.map {
+            Render::map_markdown(&mut output, map);
         }
 
         if !self.findings.is_empty() {
@@ -243,6 +406,87 @@ pub struct HistoryReport {
     pub activity: Option<ActivityReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub firefighting: Option<FirefightingReport>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapReport {
+    pub repository_root: String,
+    pub scope_path: String,
+    pub query_pack: String,
+    pub exclusions: Vec<String>,
+    pub inventory: MapInventory,
+    pub files: Vec<SourceFile>,
+    pub omissions: Vec<SourceOmission>,
+    pub findings: Vec<MapFinding>,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapInventory {
+    pub tracked: usize,
+    pub modified: usize,
+    pub untracked: usize,
+    pub analyzed: usize,
+    pub omitted: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceFile {
+    pub path: String,
+    pub language: String,
+    pub worktree_state: WorktreeState,
+    pub status: FileAnalysisStatus,
+    pub symbols: Vec<SourceSymbol>,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceSymbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub role: SymbolRole,
+    pub scope: Vec<String>,
+    pub location: SourceLocation,
+    pub context: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceLocation {
+    pub start: Position,
+    pub end: Position,
+}
+
+impl From<tree_sitter::Node<'_>> for SourceLocation {
+    fn from(node: tree_sitter::Node) -> Self {
+        let start = node.start_position();
+        let end = node.end_position();
+        SourceLocation {
+            start: Position { line: start.row + 1, column: start.column + 1 },
+            end: Position { line: end.row + 1, column: end.column + 1 },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Position {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceOmission {
+    pub path: String,
+    pub reason: OmissionReason,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapFinding {
+    pub kind: MapFindingKind,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -456,6 +700,122 @@ impl Render {
         }
     }
 
+    fn map_markdown(output: &mut String, map: &MapReport) {
+        writeln!(output).expect("writing to a string cannot fail");
+        writeln!(output, "## Source map").expect("writing to a string cannot fail");
+        writeln!(output).expect("writing to a string cannot fail");
+        writeln!(
+            output,
+            "Repository: `{}`",
+            utils::escape_inline_code(&map.repository_root)
+        )
+        .expect("writing to a string cannot fail");
+        writeln!(output, "Map scope: `{}`", utils::escape_inline_code(&map.scope_path))
+            .expect("writing to a string cannot fail");
+        writeln!(output, "Query pack: `{}`", utils::escape_inline_code(&map.query_pack))
+            .expect("writing to a string cannot fail");
+        writeln!(
+            output,
+            "Inventory: {} tracked ({} modified), {} untracked, {} analyzed, {} omitted",
+            map.inventory.tracked,
+            map.inventory.modified,
+            map.inventory.untracked,
+            map.inventory.analyzed,
+            map.inventory.omitted
+        )
+        .expect("writing to a string cannot fail");
+        if !map.exclusions.is_empty() {
+            writeln!(
+                output,
+                "Exclusions: `{}`",
+                utils::escape_inline_code(&map.exclusions.join("`, `"))
+            )
+            .expect("writing to a string cannot fail");
+        }
+
+        Render::section_heading(output, "Rust files");
+        if map.files.is_empty() {
+            writeln!(output, "No Rust files were analyzed.").expect("writing to a string cannot fail");
+        } else {
+            for file in &map.files {
+                writeln!(
+                    output,
+                    "- `{}` — {} {}, {} symbols",
+                    utils::escape_inline_code(&file.path),
+                    file.worktree_state.label(),
+                    file.status.label(),
+                    file.symbols.len()
+                )
+                .expect("writing to a string cannot fail");
+                for symbol in &file.symbols {
+                    let location = Self::format_location(&symbol.location);
+                    let scope = if symbol.scope.is_empty() { "root".to_owned() } else { symbol.scope.join("::") };
+                    writeln!(
+                        output,
+                        "  - `{}` {} `{}` at {} in `{}` — `{}`",
+                        symbol.kind.label(),
+                        symbol.role.label(),
+                        utils::escape_inline_code(&symbol.name),
+                        location,
+                        utils::escape_inline_code(&scope),
+                        utils::escape_inline_code(&symbol.context)
+                    )
+                    .expect("writing to a string cannot fail");
+                }
+                for limitation in &file.limitations {
+                    writeln!(output, "  - Limitation: {}", utils::sanitize_text(limitation))
+                        .expect("writing to a string cannot fail");
+                }
+            }
+        }
+
+        if !map.findings.is_empty() {
+            Render::section_heading(output, "Map findings");
+            for finding in &map.findings {
+                let location = finding
+                    .location
+                    .as_ref()
+                    .map(Self::format_location)
+                    .unwrap_or_else(|| "unknown location".to_owned());
+                writeln!(
+                    output,
+                    "- **{}** `{}`{} — {}",
+                    finding.kind.label(),
+                    utils::escape_inline_code(&finding.path),
+                    if finding.location.is_some() { format!(" at {location}") } else { String::new() },
+                    utils::sanitize_text(&finding.detail)
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
+
+        if !map.omissions.is_empty() {
+            Render::section_heading(output, "Omitted paths");
+            for omission in &map.omissions {
+                writeln!(
+                    output,
+                    "- `{}` — **{}:** {}",
+                    utils::escape_inline_code(&omission.path),
+                    omission.reason.label(),
+                    utils::sanitize_text(&omission.detail)
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
+
+        Render::section_heading(output, "Map limitations");
+        for limitation in &map.limitations {
+            writeln!(output, "- {}", utils::sanitize_text(limitation)).expect("writing to a string cannot fail");
+        }
+    }
+
+    fn format_location(location: &SourceLocation) -> String {
+        format!(
+            "{}:{}-{}:{}",
+            location.start.line, location.start.column, location.end.line, location.end.column
+        )
+    }
+
     fn churn_markdown(output: &mut String, churn: &ChurnReport) {
         Render::section_heading(output, "Churn hotspots");
         writeln!(output, "Window: {} days", churn.window_days).expect("writing to a string cannot fail");
@@ -578,6 +938,7 @@ mod tests {
             findings: vec![Finding { title: "title*".to_owned(), detail: "detail\u{7}".to_owned() }],
             limitations: vec![Limitation { detail: "limitation\u{1b}[0m".to_owned() }],
             history: None,
+            map: None,
         };
 
         let markdown = report.render(OutputFormat::Markdown).expect("markdown renders");

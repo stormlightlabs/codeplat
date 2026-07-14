@@ -25,6 +25,12 @@ struct HistoryFixtureRepository {
     temporary_root: PathBuf,
 }
 
+struct MapFixtureRepository {
+    root: PathBuf,
+    cache: PathBuf,
+    temporary_root: PathBuf,
+}
+
 impl FixtureRepository {
     fn new() -> Self {
         let suffix = format!(
@@ -199,6 +205,78 @@ impl Drop for HistoryFixtureRepository {
     }
 }
 
+impl MapFixtureRepository {
+    fn new() -> Self {
+        let suffix = format!(
+            "setaryb-map-{}-{}",
+            std::process::id(),
+            FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let temporary_root = env::temp_dir().join(suffix);
+        let root = temporary_root.join("repository");
+        let cache = temporary_root.join("xdg-cache");
+        fs::create_dir_all(root.join("src")).expect("create map fixture source scope");
+        fs::create_dir_all(&cache).expect("create map fixture cache");
+
+        let tracked_files = [
+            (".gitignore", "src/ignored.rs\n"),
+            ("README.md", "source map fixture\n"),
+            ("src/lib.rs", "pub fn parse() {}\n"),
+            ("src/tracked_ignored.rs", "pub fn tracked() {}\n"),
+            ("src/one.rs", "pub fn duplicate() {}\n"),
+            ("src/two.rs", "pub fn duplicate() {}\n"),
+            ("src/use.rs", "fn use_it() { duplicate(); }\n"),
+            ("src/broken.rs", "fn broken( {\n"),
+        ];
+        let repository = gix::init(&root).expect("initialize map fixture repository");
+        let tree = write_tree(&repository, &tracked_files);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after the Unix epoch")
+            .as_secs() as i64;
+        let commit = write_commit(
+            &repository,
+            tree,
+            &[],
+            "Map Fixture",
+            "map@example.com",
+            now,
+            "Initial source map fixture",
+        );
+        drop(repository);
+
+        write_file(root.join(".git/HEAD"), b"ref: refs/heads/main\n");
+        write_file(root.join(".git/refs/heads/main"), format!("{commit}\n").as_bytes());
+        for (path, contents) in tracked_files {
+            write_file(root.join(path), contents.as_bytes());
+        }
+        write_file(
+            root.join("src/lib.rs"),
+            b"pub fn parse() { let value = 1; let _ = value; }\n",
+        );
+        write_file(root.join("src/untracked.rs"), b"pub fn fresh() {}\n");
+        write_file(root.join("src/ignored.rs"), b"pub fn ignored() {}\n");
+        gix::open(&root).expect("open map fixture repository");
+
+        Self { root, cache, temporary_root }
+    }
+
+    fn run(&self, arguments: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
+        command
+            .args(arguments)
+            .current_dir(&self.root)
+            .env("XDG_CACHE_HOME", &self.cache);
+        command.output().expect("run map fixture command")
+    }
+}
+
+impl Drop for MapFixtureRepository {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.temporary_root);
+    }
+}
+
 fn write_tree(repository: &gix::Repository, files: &[(&str, &str)]) -> gix::ObjectId {
     let mut root_entries = Vec::new();
     let mut source_entries = Vec::new();
@@ -291,23 +369,23 @@ fn root_map_and_history_help_are_complete() {
         assert!(help.contains("Examples:"));
         assert!(help.contains("--format <FORMAT>"));
         assert!(help.contains("--json"));
+        if arguments.first().copied() == Some("map") {
+            assert!(help.contains("--exclude <GLOB>"));
+        }
     }
 }
 
 #[test]
 fn commands_parse_with_default_paths_and_emit_actionable_foundation_guidance() {
     let fixture = FixtureRepository::new();
+    let output = fixture.run(&[]);
+    let markdown = stdout(&output);
 
-    for arguments in [[].as_slice(), ["map"].as_slice()] {
-        let output = fixture.run(arguments);
-        let markdown = stdout(&output);
-
-        assert!(output.status.success(), "command failed: {markdown}");
-        assert!(output.stderr.is_empty());
-        assert!(markdown.contains("Status: Foundation"));
-        assert!(markdown.contains("not available in this build"));
-        assert_plain_report(&markdown);
-    }
+    assert!(output.status.success(), "command failed: {markdown}");
+    assert!(output.stderr.is_empty());
+    assert!(markdown.contains("Status: Foundation"));
+    assert!(markdown.contains("not available in this build"));
+    assert_plain_report(&markdown);
 }
 
 #[test]
@@ -525,6 +603,129 @@ fn every_history_operation_renders_in_markdown_and_json() {
 }
 
 #[test]
+fn map_inventory_and_rust_findings_are_reported_semantically() {
+    let fixture = MapFixtureRepository::new();
+    let output = fixture.run(&["map", "--json"]);
+    let json = stdout(&output);
+    let value: Value = serde_json::from_str(&json).expect("valid map JSON");
+
+    assert!(
+        output.status.success(),
+        "map failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_plain_report(&json);
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["status"], "analyzed");
+    assert_eq!(value["command"]["name"], "map");
+    assert_eq!(value["map"]["query_pack"], "rust-v1");
+    assert_eq!(value["map"]["inventory"]["tracked"], 8);
+    assert_eq!(value["map"]["inventory"]["modified"], 1);
+    assert_eq!(value["map"]["inventory"]["untracked"], 1);
+    assert_eq!(value["map"]["inventory"]["analyzed"], 7);
+    assert_eq!(value["map"]["inventory"]["omitted"], 3);
+
+    let files = value["map"]["files"].as_array().expect("map files");
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file["path"] == "src/lib.rs")
+            .expect("modified Rust file")["worktree_state"],
+        "modified"
+    );
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file["path"] == "src/tracked_ignored.rs")
+            .expect("tracked ignored Rust file")["worktree_state"],
+        "tracked"
+    );
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file["path"] == "src/untracked.rs")
+            .expect("untracked Rust file")["worktree_state"],
+        "untracked"
+    );
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file["path"] == "src/broken.rs")
+            .expect("malformed Rust file")["status"],
+        "partial"
+    );
+    assert!(
+        files
+            .iter()
+            .find(|file| file["path"] == "src/lib.rs")
+            .expect("parsed Rust file")["symbols"]
+            .as_array()
+            .expect("symbols")
+            .iter()
+            .any(|symbol| symbol["name"] == "parse" && symbol["role"] == "definition")
+    );
+
+    let omissions = value["map"]["omissions"].as_array().expect("map omissions");
+    assert!(
+        omissions
+            .iter()
+            .any(|omission| { omission["path"] == "src/ignored.rs" && omission["reason"] == "ignored_untracked" })
+    );
+    assert!(
+        omissions
+            .iter()
+            .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "unsupported_language" })
+    );
+
+    let findings = value["map"]["findings"].as_array().expect("map findings");
+    assert!(findings.iter().any(|finding| finding["kind"] == "parse_error"));
+    assert!(
+        findings
+            .iter()
+            .any(|finding| { finding["kind"] == "ambiguous_reference" && finding["path"] == "src/use.rs" })
+    );
+}
+
+#[test]
+fn map_scope_exclusions_and_markdown_limitations_are_preserved() {
+    let fixture = MapFixtureRepository::new();
+    let json_output = fixture.run(&["map", "src", "--exclude", "src/two.rs", "--json"]);
+    let json: Value = serde_json::from_str(&stdout(&json_output)).expect("valid scoped map JSON");
+
+    assert!(json_output.status.success());
+    assert!(json_output.stderr.is_empty());
+    assert_eq!(json["scope"]["selected_path"], "src");
+    assert_eq!(json["map"]["scope_path"], "src");
+    assert_eq!(json["map"]["exclusions"][0], "src/two.rs");
+    assert!(
+        json["map"]["files"]
+            .as_array()
+            .expect("scoped files")
+            .iter()
+            .all(|file| file["path"].as_str().expect("file path").starts_with("src/"))
+    );
+    assert!(
+        json["map"]["omissions"]
+            .as_array()
+            .expect("scoped omissions")
+            .iter()
+            .any(|omission| { omission["path"] == "src/two.rs" && omission["reason"] == "explicit_exclusion" })
+    );
+
+    let markdown_output = fixture.run(&["map", "src"]);
+    let markdown = stdout(&markdown_output);
+    assert!(markdown_output.status.success());
+    assert!(markdown_output.stderr.is_empty());
+    assert_plain_report(&markdown);
+    assert!(markdown.contains("Map scope: `src`"));
+    assert!(markdown.contains("Inventory:"));
+    assert!(markdown.contains("Map findings"));
+    assert!(markdown.contains("Map limitations"));
+    assert!(markdown.contains("lexically"));
+}
+
+#[test]
 fn format_json_and_json_alias_share_the_report_renderer() {
     let fixture = FixtureRepository::new();
     let format_output = fixture.run(&["--format", "json"]);
@@ -547,21 +748,39 @@ fn markdown_snapshot_is_direct_and_readable() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
+    let stable_markdown = stdout(&output)
+        .lines()
+        .filter(|line| !line.starts_with("Repository: `"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     assert_eq!(
-        stdout(&output),
+        stable_markdown,
         "# Setaryb map\n\
          \n\
          Schema version: 1\n\
          Scope: `.`\n\
-         Status: Foundation\n\
+         Status: Analyzed\n\
          \n\
          ## Summary\n\
          \n\
-         The map command contract and renderers are ready; source-map analysis will be added in a subsequent ticket.\n\
+         Analyzed 0 Rust source files and recorded 0 omitted paths within the selected source scope.\n\
          \n\
-         ## Limitations\n\
+         ## Source map\n\
          \n\
-         - Source-map analysis is not available in this build.\n"
+         Map scope: `.`\n\
+         Query pack: `rust-v1`\n\
+         Inventory: 0 tracked (0 modified), 0 untracked, 0 analyzed, 0 omitted\n\
+         \n\
+         ### Rust files\n\
+         \n\
+         No Rust files were analyzed.\n\
+         \n\
+         ### Map limitations\n\
+         \n\
+         - Rust definitions and references are extracted lexically; imports, types, macros, and runtime behavior are not resolved.\n\
+         - Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge.\n\
+         - Tracked files are eligible even when ignore rules match them; ignored untracked files are omitted and recorded.\n"
     );
 }
 

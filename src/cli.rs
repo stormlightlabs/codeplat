@@ -7,6 +7,7 @@ use anyhow::Context;
 use clap::{ArgAction, ColorChoice, Parser, Subcommand, ValueEnum, builder::Styles, error::ErrorKind};
 use owo_colors::OwoColorize;
 
+use crate::map::MapSettings;
 use crate::report::{CommandDescriptor, HistoryOperation, HistorySettings, Report};
 
 #[derive(Debug, Subcommand)]
@@ -86,24 +87,34 @@ enum ApplicationError {
     #[error("{0}")]
     Usage(String),
     #[error("{0}")]
-    History(#[source] crate::history::HistoryError),
+    Report(#[source] crate::report::ReportError),
     #[error("could not serialize the report as JSON")]
     Render(#[source] serde_json::Error),
 }
 
-impl Into<ExitCategory> for ApplicationError {
-    fn into(self) -> ExitCategory {
-        match self {
-            Self::Usage(_) => ExitCategory::Usage,
-            Self::History(error) => error.into(),
-            Self::Render(_) => ExitCategory::Internal,
+impl From<ApplicationError> for ExitCategory {
+    fn from(error: ApplicationError) -> Self {
+        match error {
+            ApplicationError::Usage(_) => ExitCategory::Usage,
+            ApplicationError::Report(error) => match error {
+                crate::report::ReportError::History(error) => error.into(),
+                crate::report::ReportError::Map(error) => error.into(),
+            },
+            ApplicationError::Render(_) => ExitCategory::Internal,
         }
     }
 }
 
 impl From<&ApplicationError> for ExitCategory {
     fn from(value: &ApplicationError) -> Self {
-        value.into()
+        match value {
+            ApplicationError::Usage(_) => ExitCategory::Usage,
+            ApplicationError::Report(error) => match error {
+                crate::report::ReportError::History(error) => error.into(),
+                crate::report::ReportError::Map(error) => error.into(),
+            },
+            ApplicationError::Render(_) => ExitCategory::Internal,
+        }
     }
 }
 
@@ -150,24 +161,43 @@ struct Cli {
     path: PathBuf,
 }
 
-impl Into<CommandRequest> for Cli {
-    fn into(self) -> CommandRequest {
-        let (command, history) = match self.command {
-            None => (CommandDescriptor::briefing(self.path), HistorySettings::default()),
-            Some(SubcommandName::Map(map)) => (CommandDescriptor::map(map.path), HistorySettings::default()),
+impl From<Cli> for CommandRequest {
+    fn from(cli: Cli) -> Self {
+        let (command, history, map_settings) = match cli.command {
+            None => (
+                CommandDescriptor::briefing(cli.path),
+                HistorySettings::default(),
+                MapSettings::default(),
+            ),
+            Some(SubcommandName::Map(map)) => {
+                let MapCommand { excludes, path } = map;
+                (
+                    CommandDescriptor::map(path),
+                    HistorySettings::default(),
+                    MapSettings { excludes },
+                )
+            }
             Some(SubcommandName::History(history)) => {
                 let inherited = history.options.settings();
                 match history.operation {
                     Some(operation) => {
                         let (operation, path, settings) = operation.into_parts(&inherited);
-                        (CommandDescriptor::history(path, Some(operation)), settings)
+                        (
+                            CommandDescriptor::history(path, Some(operation)),
+                            settings,
+                            MapSettings::default(),
+                        )
                     }
-                    None => (CommandDescriptor::history(history.path, None), inherited),
+                    None => (
+                        CommandDescriptor::history(history.path, None),
+                        inherited,
+                        MapSettings::default(),
+                    ),
                 }
             }
         };
 
-        CommandRequest { command, history }
+        CommandRequest { command, history, map: map_settings }
     }
 }
 
@@ -187,6 +217,10 @@ impl Cli {
     setaryb map --json
 ")]
 struct MapCommand {
+    /// Exclude paths from analysis using a Git-style glob; repeat for multiple exclusions.
+    #[arg(long = "exclude", value_name = "GLOB", action = ArgAction::Append)]
+    excludes: Vec<String>,
+
     #[arg(value_name = "PATH", default_value = ".")]
     path: PathBuf,
 }
@@ -349,6 +383,7 @@ impl ColorEnvironment {
 pub struct CommandRequest {
     pub command: CommandDescriptor,
     pub history: HistorySettings,
+    pub map: MapSettings,
 }
 
 /// Parse and execute the command line using the process environment and standard streams.
@@ -415,7 +450,7 @@ where
 
 fn invoke<W: Write>(cli: Cli, stdout: &mut W) -> anyhow::Result<()> {
     let output_format = cli.output_format()?;
-    let report = Report::analyze(cli.into()).map_err(ApplicationError::History)?;
+    let report = Report::analyze(cli.into()).map_err(ApplicationError::Report)?;
     let output = report.render(output_format).map_err(ApplicationError::Render)?;
 
     stdout
