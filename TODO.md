@@ -126,14 +126,14 @@ first-class structural-map contract as Rust.
 
 **Acceptance criteria:**
 
-- [ ] Python and Ruby parsers and versioned query packs are registered through the established
+- [x] Python and Ruby parsers and versioned query packs are registered through the established
       language-support interface.
-- [ ] Fixtures prove extraction for representative module/class/function definitions, references,
+- [x] Fixtures prove extraction for representative module/class/function definitions, references,
       scopes, locations, and snippets in each language.
-- [ ] Dynamically dispatched or otherwise unresolved references remain labelled lexical and never
+- [x] Dynamically dispatched or otherwise unresolved references remain labelled lexical and never
       become asserted call relationships.
-- [ ] Partial parse and query limitations appear per affected file in Markdown and JSON.
-- [ ] Mixed-language results preserve deterministic ordering and language-support metadata.
+- [x] Partial parse and query limitations appear per affected file in Markdown and JSON.
+- [x] Mixed-language results preserve deterministic ordering and language-support metadata.
 
 **Verification:**
 

@@ -1,0 +1,5 @@
+(method name: (identifier) @definition.method)
+(singleton_method name: (identifier) @definition.method)
+(class name: (constant) @definition.class)
+(module name: (constant) @definition.module)
+(assignment left: (identifier) @definition.variable)

@@ -292,9 +292,9 @@ struct MapOptions {
     no_cache: bool,
 }
 
-impl Into<MapSettings> for MapOptions {
-    fn into(self) -> MapSettings {
-        self.settings()
+impl From<MapOptions> for MapSettings {
+    fn from(options: MapOptions) -> Self {
+        options.settings()
     }
 }
 

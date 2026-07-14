@@ -166,6 +166,8 @@ pub enum SourceLanguage {
     TypeScript,
     #[serde(rename = "typescript_tsx")]
     TypeScriptTsx,
+    Python,
+    Ruby,
 }
 
 impl SourceLanguage {
@@ -176,6 +178,8 @@ impl SourceLanguage {
             Self::JavaScriptJsx => "javascript_jsx",
             Self::TypeScript => "typescript",
             Self::TypeScriptTsx => "typescript_tsx",
+            Self::Python => "python",
+            Self::Ruby => "ruby",
         }
     }
 
@@ -186,6 +190,8 @@ impl SourceLanguage {
             Self::JavaScriptJsx => "JavaScript (JSX)",
             Self::TypeScript => "TypeScript",
             Self::TypeScriptTsx => "TypeScript (TSX)",
+            Self::Python => "Python",
+            Self::Ruby => "Ruby",
         }
     }
 }

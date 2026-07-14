@@ -98,6 +98,20 @@ const TYPESCRIPT_SCOPE_KINDS: &[&str] = &[
     "method_definition",
 ];
 
+const PYTHON_DECLARATION_KINDS: &[&str] = &[
+    "function_definition",
+    "class_definition",
+    "assignment",
+    "import_statement",
+    "import_from_statement",
+];
+
+const PYTHON_SCOPE_KINDS: &[&str] = &["function_definition", "class_definition"];
+
+const RUBY_DECLARATION_KINDS: &[&str] = &["method", "singleton_method", "class", "module", "assignment"];
+
+const RUBY_SCOPE_KINDS: &[&str] = &["method", "singleton_method", "class", "module"];
+
 #[derive(Clone, Copy, Debug)]
 struct LanguageSupport {
     language: SourceLanguage,
@@ -165,12 +179,36 @@ const TYPESCRIPT_TSX_SUPPORT: LanguageSupport = LanguageSupport {
     scope_kinds: TYPESCRIPT_SCOPE_KINDS,
 };
 
+const PYTHON_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::Python,
+    extensions: &["py", "pyi"],
+    query_pack: "python-v1",
+    grammar: python_language,
+    definitions: include_str!("queries/python/definitions.scm"),
+    references: include_str!("queries/python/references.scm"),
+    declaration_kinds: PYTHON_DECLARATION_KINDS,
+    scope_kinds: PYTHON_SCOPE_KINDS,
+};
+
+const RUBY_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::Ruby,
+    extensions: &["rb", "rake", "gemspec"],
+    query_pack: "ruby-v1",
+    grammar: ruby_language,
+    definitions: include_str!("queries/ruby/definitions.scm"),
+    references: include_str!("queries/ruby/references.scm"),
+    declaration_kinds: RUBY_DECLARATION_KINDS,
+    scope_kinds: RUBY_SCOPE_KINDS,
+};
+
 const LANGUAGE_SUPPORT: &[LanguageSupport] = &[
     RUST_SUPPORT,
     JAVASCRIPT_SUPPORT,
     JAVASCRIPT_JSX_SUPPORT,
     TYPESCRIPT_SUPPORT,
     TYPESCRIPT_TSX_SUPPORT,
+    PYTHON_SUPPORT,
+    RUBY_SUPPORT,
 ];
 
 type Result<T> = std::result::Result<T, MapError>;
@@ -651,7 +689,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 .to_owned(),
             "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
                 .to_owned(),
-            "JavaScript/JSX and TypeScript/TSX use explicit grammar variants; query-pack provenance is reported per variant."
+            "JavaScript/JSX, TypeScript/TSX, Python, and Ruby use explicit grammar variants; query-pack provenance is reported per language."
                 .to_owned(),
             "Tracked files are eligible even when ignore rules match them; ignored untracked files are omitted and recorded."
                 .to_owned(),
@@ -1537,6 +1575,14 @@ fn rust_language() -> tree_sitter::Language {
     tree_sitter_rust::LANGUAGE.into()
 }
 
+fn python_language() -> tree_sitter::Language {
+    tree_sitter_python::LANGUAGE.into()
+}
+
+fn ruby_language() -> tree_sitter::Language {
+    tree_sitter_ruby::LANGUAGE.into()
+}
+
 fn javascript_language() -> tree_sitter::Language {
     tree_sitter_javascript::LANGUAGE.into()
 }
@@ -1716,6 +1762,68 @@ mod tests {
     }
 
     #[test]
+    fn python_and_ruby_query_packs_extract_definitions_references_and_nested_scopes() {
+        let python = br#"
+class Service:
+    def run(self, value):
+        return helper(value)
+
+def create(value):
+    return Service().run(value)
+"#;
+        let ruby = br#"
+module Billing
+  class Service
+    def run(value)
+      helper(value)
+    end
+  end
+end
+
+def build
+  Service.new
+end
+"#;
+
+        let parsed_python = parse_source(python, &PYTHON_SUPPORT);
+        let parsed_ruby = parse_source(ruby, &RUBY_SUPPORT);
+        assert_eq!(parsed_python.status, FileAnalysisStatus::Complete, "{parsed_python:?}");
+        assert_eq!(parsed_ruby.status, FileAnalysisStatus::Complete, "{parsed_ruby:?}");
+        assert!(parsed_python.findings.is_empty(), "{parsed_python:?}");
+        assert!(parsed_ruby.findings.is_empty(), "{parsed_ruby:?}");
+
+        let python_run = parsed_python
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "run" && symbol.role == SymbolRole::Definition)
+            .expect("Python method definition");
+        assert_eq!(python_run.kind, SymbolKind::Function);
+        assert_eq!(python_run.scope, vec!["Service"]);
+        assert!(python_run.context.starts_with("def run(self, value):"));
+        assert!(
+            parsed_python
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.name == "helper" && symbol.role == SymbolRole::Reference })
+        );
+
+        let ruby_run = parsed_ruby
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "run" && symbol.role == SymbolRole::Definition)
+            .expect("Ruby method definition");
+        assert_eq!(ruby_run.kind, SymbolKind::Method);
+        assert_eq!(ruby_run.scope, vec!["Billing", "Service"]);
+        assert!(ruby_run.context.starts_with("def run(value)"));
+        assert!(
+            parsed_ruby
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.name == "Service" && symbol.role == SymbolRole::Reference })
+        );
+    }
+
+    #[test]
     fn javascript_typescript_and_jsx_extensions_select_explicit_language_variants() {
         assert_eq!(
             support_for_path(Path::new("module.js")).unwrap().language,
@@ -1732,6 +1840,22 @@ mod tests {
         assert_eq!(
             support_for_path(Path::new("module.tsx")).unwrap().language,
             SourceLanguage::TypeScriptTsx
+        );
+        assert_eq!(
+            support_for_path(Path::new("module.py")).unwrap().language,
+            SourceLanguage::Python
+        );
+        assert_eq!(
+            support_for_path(Path::new("module.pyi")).unwrap().language,
+            SourceLanguage::Python
+        );
+        assert_eq!(
+            support_for_path(Path::new("Rakefile.rake")).unwrap().language,
+            SourceLanguage::Ruby
+        );
+        assert_eq!(
+            support_for_path(Path::new("Gemfile.gemspec")).unwrap().language,
+            SourceLanguage::Ruby
         );
         assert!(support_for_path(Path::new("module.vue")).is_none());
     }

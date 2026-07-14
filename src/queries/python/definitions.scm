@@ -1,0 +1,7 @@
+(function_definition name: (identifier) @definition.function)
+(class_definition name: (identifier) @definition.class)
+(assignment left: (identifier) @definition.variable)
+(import_statement name: (dotted_name (identifier) @definition.import))
+(import_statement name: (aliased_import alias: (identifier) @definition.import))
+(import_from_statement name: (dotted_name (identifier) @definition.import))
+(import_from_statement name: (aliased_import alias: (identifier) @definition.import))

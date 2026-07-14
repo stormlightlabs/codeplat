@@ -313,6 +313,16 @@ impl MixedMapFixtureRepository {
                 "src/component.tsx",
                 "export function View(props: { label: string }) { return <button>{props.label}</button>; }\n",
             ),
+            (
+                "src/service.py",
+                "from helpers import helper\n\nclass Service:\n    def run(self, value):\n        return helper(value)\n\ndef create(value):\n    return Service().run(value)\n",
+            ),
+            ("src/broken.py", "def broken(:\n    pass\n"),
+            (
+                "src/service.rb",
+                "module Billing\n  class Service\n    def run(value)\n      helper(value)\n    end\n  end\nend\n\ndef build\n  Service.new\nend\n",
+            ),
+            ("src/broken.rb", "def broken(\nend\n"),
         ];
         let repository = gix::init(&root).expect("initialize mixed map fixture repository");
         let tree = write_tree(&repository, &tracked_files);
@@ -963,6 +973,8 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     assert_eq!(json["map"]["query_packs"]["javascript_jsx"], "javascript-v1");
     assert_eq!(json["map"]["query_packs"]["typescript"], "typescript-v1");
     assert_eq!(json["map"]["query_packs"]["typescript_tsx"], "typescript-v1");
+    assert_eq!(json["map"]["query_packs"]["python"], "python-v1");
+    assert_eq!(json["map"]["query_packs"]["ruby"], "ruby-v1");
 
     let files = json["map"]["files"].as_array().expect("mixed map files");
     for (path, language, extension) in [
@@ -971,6 +983,8 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
         ("src/panel.jsx", "javascript_jsx", "jsx"),
         ("src/types.ts", "typescript", "ts"),
         ("src/component.tsx", "typescript_tsx", "tsx"),
+        ("src/service.py", "python", "py"),
+        ("src/service.rb", "ruby", "rb"),
     ] {
         let file = files
             .iter()
@@ -1008,6 +1022,68 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
             .iter()
             .any(|symbol| symbol["name"] == "User" && symbol["kind"] == "interface")
     );
+    let python = files
+        .iter()
+        .find(|file| file["path"] == "src/service.py")
+        .expect("Python file");
+    assert!(
+        python["symbols"]
+            .as_array()
+            .expect("Python symbols")
+            .iter()
+            .any(|symbol| {
+                symbol["name"] == "Service" && symbol["kind"] == "class" && symbol["role"] == "definition"
+            })
+    );
+    assert!(
+        python["symbols"]
+            .as_array()
+            .expect("Python symbols")
+            .iter()
+            .any(|symbol| {
+                symbol["name"] == "run"
+                    && symbol["kind"] == "function"
+                    && symbol["role"] == "definition"
+                    && symbol["scope"] == serde_json::json!(["Service"])
+            })
+    );
+    assert!(
+        python["symbols"]
+            .as_array()
+            .expect("Python symbols")
+            .iter()
+            .any(|symbol| { symbol["name"] == "helper" && symbol["role"] == "reference" })
+    );
+    let ruby = files
+        .iter()
+        .find(|file| file["path"] == "src/service.rb")
+        .expect("Ruby file");
+    assert!(
+        ruby["symbols"].as_array().expect("Ruby symbols").iter().any(|symbol| {
+            symbol["name"] == "Billing" && symbol["kind"] == "module" && symbol["role"] == "definition"
+        })
+    );
+    assert!(ruby["symbols"].as_array().expect("Ruby symbols").iter().any(|symbol| {
+        symbol["name"] == "run"
+            && symbol["kind"] == "method"
+            && symbol["role"] == "definition"
+            && symbol["scope"] == serde_json::json!(["Billing", "Service"])
+    }));
+    assert!(
+        ruby["symbols"]
+            .as_array()
+            .expect("Ruby symbols")
+            .iter()
+            .any(|symbol| { symbol["name"] == "Service" && symbol["role"] == "reference" })
+    );
+    for path in ["src/broken.py", "src/broken.rb"] {
+        let file = files
+            .iter()
+            .find(|file| file["path"] == path)
+            .expect("malformed dynamic-language file");
+        assert_eq!(file["status"], "partial");
+        assert!(!file["limitations"].as_array().expect("file limitations").is_empty());
+    }
 
     let omissions = json["map"]["omissions"].as_array().expect("mixed omissions");
     assert!(
@@ -1043,6 +1119,12 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     assert!(markdown_stdout.contains("JavaScript (JSX) files"));
     assert!(markdown_stdout.contains("TypeScript files"));
     assert!(markdown_stdout.contains("TypeScript (TSX) files"));
+    assert!(markdown_stdout.contains("Python files"));
+    assert!(markdown_stdout.contains("Ruby files"));
+    assert!(markdown_stdout.contains("src/broken.py"));
+    assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Python file"));
+    assert!(markdown_stdout.contains("src/broken.rb"));
+    assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Ruby file"));
     assert!(markdown_stdout.contains("query-pack provenance"));
     assert_plain_report(&markdown_stdout);
 }
