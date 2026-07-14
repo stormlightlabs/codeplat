@@ -1,0 +1,8 @@
+(function_declaration name: (identifier) @definition.function)
+(generator_function_declaration name: (identifier) @definition.function)
+(class_declaration name: (identifier) @definition.class)
+(method_definition name: (property_identifier) @definition.method)
+(variable_declarator name: (identifier) @definition.variable)
+(import_specifier name: (identifier) @definition.import)
+(import_clause (identifier) @definition.import)
+(namespace_import (identifier) @definition.import)

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 
@@ -106,6 +107,44 @@ impl FileAnalysisStatus {
     }
 }
 
+/// The grammar variant used for one source file. JSX and TSX are kept distinct
+/// from their base languages so callers never have to infer syntax from a path.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceLanguage {
+    Rust,
+    #[serde(rename = "javascript")]
+    JavaScript,
+    #[serde(rename = "javascript_jsx")]
+    JavaScriptJsx,
+    #[serde(rename = "typescript")]
+    TypeScript,
+    #[serde(rename = "typescript_tsx")]
+    TypeScriptTsx,
+}
+
+impl SourceLanguage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::JavaScript => "javascript",
+            Self::JavaScriptJsx => "javascript_jsx",
+            Self::TypeScript => "typescript",
+            Self::TypeScriptTsx => "typescript_tsx",
+        }
+    }
+
+    pub const fn display_label(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::JavaScript => "JavaScript",
+            Self::JavaScriptJsx => "JavaScript (JSX)",
+            Self::TypeScript => "TypeScript",
+            Self::TypeScriptTsx => "TypeScript (TSX)",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolRole {
@@ -135,6 +174,12 @@ pub enum SymbolKind {
     Module,
     Macro,
     Field,
+    Class,
+    Method,
+    Variable,
+    Interface,
+    Import,
+    Export,
     Identifier,
     Other,
 }
@@ -152,6 +197,12 @@ impl SymbolKind {
             Self::Module => "module",
             Self::Macro => "macro",
             Self::Field => "field",
+            Self::Class => "class",
+            Self::Method => "method",
+            Self::Variable => "variable",
+            Self::Interface => "interface",
+            Self::Import => "import",
+            Self::Export => "export",
             Self::Identifier => "identifier",
             Self::Other => "other",
         }
@@ -186,14 +237,18 @@ impl OmissionReason {
 #[serde(rename_all = "snake_case")]
 pub enum MapFindingKind {
     ParseError,
+    ParserError,
     AmbiguousReference,
+    QueryError,
 }
 
 impl MapFindingKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::ParseError => "parse_error",
+            Self::ParserError => "parser_error",
             Self::AmbiguousReference => "ambiguous_reference",
+            Self::QueryError => "query_error",
         }
     }
 }
@@ -305,10 +360,7 @@ impl Report {
                     scope,
                     command: request.command,
                     status: ReportStatus::Analyzed,
-                    summary: format!(
-                        "Analyzed {} Rust source files and recorded {} omitted paths within the selected source scope.",
-                        map_report.inventory.analyzed, map_report.inventory.omitted
-                    ),
+                    summary: map_summary(&map_report),
                     findings: Vec::new(),
                     limitations: Vec::new(),
                     history: None,
@@ -389,6 +441,29 @@ impl Report {
     }
 }
 
+fn map_summary(map: &MapReport) -> String {
+    let mut languages = map
+        .files
+        .iter()
+        .map(|file| file.language.display_label())
+        .collect::<Vec<_>>();
+    languages.sort_unstable();
+    languages.dedup();
+    if languages.is_empty() || (languages.len() == 1 && languages[0] == SourceLanguage::Rust.display_label()) {
+        format!(
+            "Analyzed {} Rust source files and recorded {} omitted paths within the selected source scope.",
+            map.inventory.analyzed, map.inventory.omitted
+        )
+    } else {
+        format!(
+            "Analyzed {} source files ({}) and recorded {} omitted paths within the selected source scope.",
+            map.inventory.analyzed,
+            languages.join(", "),
+            map.inventory.omitted
+        )
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HistoryReport {
     pub repository_root: String,
@@ -413,6 +488,9 @@ pub struct MapReport {
     pub repository_root: String,
     pub scope_path: String,
     pub query_pack: String,
+    /// Query-pack provenance for every language variant encountered in this map.
+    #[serde(default)]
+    pub query_packs: BTreeMap<String, String>,
     pub exclusions: Vec<String>,
     pub inventory: MapInventory,
     pub files: Vec<SourceFile>,
@@ -433,7 +511,8 @@ pub struct MapInventory {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceFile {
     pub path: String,
-    pub language: String,
+    pub language: SourceLanguage,
+    pub extension: String,
     pub worktree_state: WorktreeState,
     pub status: FileAnalysisStatus,
     pub symbols: Vec<SourceSymbol>,
@@ -714,6 +793,16 @@ impl Render {
             .expect("writing to a string cannot fail");
         writeln!(output, "Query pack: `{}`", utils::escape_inline_code(&map.query_pack))
             .expect("writing to a string cannot fail");
+        if map.query_packs.len() > 1 {
+            let provenance = map
+                .query_packs
+                .iter()
+                .map(|(language, query_pack)| format!("{language}={query_pack}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(output, "Query packs: `{}`", utils::escape_inline_code(&provenance))
+                .expect("writing to a string cannot fail");
+        }
         writeln!(
             output,
             "Inventory: {} tracked ({} modified), {} untracked, {} analyzed, {} omitted",
@@ -733,42 +822,25 @@ impl Render {
             .expect("writing to a string cannot fail");
         }
 
-        Render::section_heading(output, "Rust files");
-        if map.files.is_empty() {
-            writeln!(output, "No Rust files were analyzed.").expect("writing to a string cannot fail");
+        let mut files_by_language: BTreeMap<SourceLanguage, Vec<&SourceFile>> = BTreeMap::new();
+        for file in &map.files {
+            files_by_language.entry(file.language).or_default().push(file);
+        }
+        if files_by_language.len() <= 1 {
+            if map.files.is_empty() {
+                Render::section_heading(output, "Rust files");
+                writeln!(output, "No Rust files were analyzed.").expect("writing to a string cannot fail");
+            } else {
+                let (language, files) = files_by_language.iter().next().expect("one language group");
+                Render::section_heading(output, &format!("{} files", language.display_label()));
+                Render::source_files(output, files);
+            }
         } else {
-            for file in &map.files {
-                writeln!(
-                    output,
-                    "- `{}` — {} {}, {} symbols",
-                    utils::escape_inline_code(&file.path),
-                    file.worktree_state.label(),
-                    file.status.label(),
-                    file.symbols.len()
-                )
-                .expect("writing to a string cannot fail");
-                for symbol in &file.symbols {
-                    let location = Self::format_location(&symbol.location);
-                    let scope = if symbol.scope.is_empty() { "root".to_owned() } else { symbol.scope.join("::") };
-                    writeln!(
-                        output,
-                        "  - `{}` {} `{}` at {} in `{}` — `{}`",
-                        symbol.kind.label(),
-                        symbol.role.label(),
-                        utils::escape_inline_code(&symbol.name),
-                        location,
-                        utils::escape_inline_code(&scope),
-                        utils::escape_inline_code(&symbol.context)
-                    )
-                    .expect("writing to a string cannot fail");
-                }
-                for limitation in &file.limitations {
-                    writeln!(output, "  - Limitation: {}", utils::sanitize_text(limitation))
-                        .expect("writing to a string cannot fail");
-                }
+            for (language, files) in &files_by_language {
+                Render::section_heading(output, &format!("{} files", language.display_label()));
+                Render::source_files(output, files);
             }
         }
-
         if !map.findings.is_empty() {
             Render::section_heading(output, "Map findings");
             for finding in &map.findings {
@@ -806,6 +878,41 @@ impl Render {
         Render::section_heading(output, "Map limitations");
         for limitation in &map.limitations {
             writeln!(output, "- {}", utils::sanitize_text(limitation)).expect("writing to a string cannot fail");
+        }
+    }
+
+    fn source_files(output: &mut String, files: &[&SourceFile]) {
+        for file in files {
+            writeln!(
+                output,
+                "- `{}` — {} (.{}), {} {}, {} symbols",
+                utils::escape_inline_code(&file.path),
+                file.language.display_label(),
+                file.extension,
+                file.worktree_state.label(),
+                file.status.label(),
+                file.symbols.len()
+            )
+            .expect("writing to a string cannot fail");
+            for symbol in &file.symbols {
+                let location = Self::format_location(&symbol.location);
+                let scope = if symbol.scope.is_empty() { "root".to_owned() } else { symbol.scope.join("::") };
+                writeln!(
+                    output,
+                    "  - `{}` {} `{}` at {} in `{}` — `{}`",
+                    symbol.kind.label(),
+                    symbol.role.label(),
+                    utils::escape_inline_code(&symbol.name),
+                    location,
+                    utils::escape_inline_code(&scope),
+                    utils::escape_inline_code(&symbol.context)
+                )
+                .expect("writing to a string cannot fail");
+            }
+            for limitation in &file.limitations {
+                writeln!(output, "  - Limitation: {}", utils::sanitize_text(limitation))
+                    .expect("writing to a string cannot fail");
+            }
         }
     }
 

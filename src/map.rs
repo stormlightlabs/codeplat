@@ -10,16 +10,14 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 use crate::cli::ExitCategory;
 use crate::report::{
     FileAnalysisStatus, MapFinding, MapFindingKind, MapInventory, MapReport, OmissionReason, SourceFile,
-    SourceLocation, SourceOmission, SourceSymbol, SymbolKind, SymbolRole, WorktreeState,
+    SourceLanguage, SourceLocation, SourceOmission, SourceSymbol, SymbolKind, SymbolRole, WorktreeState,
 };
 
-const QUERY_PACK_VERSION: &str = "rust-v1";
 const MAX_CONTEXT_CHARS: usize = 180;
 
-const DEFINITION_QUERY: &str = include_str!("queries/rust/definitions.scm");
-const REFERENCE_QUERY: &str = include_str!("queries/rust/references.scm");
+type LanguageFactory = fn() -> tree_sitter::Language;
 
-const DECLARATION_KINDS: &[&str] = &[
+const RUST_DECLARATION_KINDS: &[&str] = &[
     "function_item",
     "struct_item",
     "enum_item",
@@ -32,7 +30,7 @@ const DECLARATION_KINDS: &[&str] = &[
     "field_declaration",
 ];
 
-const SCOPE_KINDS: &[&str] = &[
+const RUST_SCOPE_KINDS: &[&str] = &[
     "function_item",
     "struct_item",
     "enum_item",
@@ -43,6 +41,128 @@ const SCOPE_KINDS: &[&str] = &[
     "mod_item",
     "macro_definition",
     "impl_item",
+];
+
+const JAVASCRIPT_DECLARATION_KINDS: &[&str] = &[
+    "function_declaration",
+    "generator_function_declaration",
+    "class_declaration",
+    "method_definition",
+    "variable_declarator",
+    "import_specifier",
+    "import_clause",
+    "namespace_import",
+    "named_imports",
+];
+
+const JAVASCRIPT_SCOPE_KINDS: &[&str] = &[
+    "function_declaration",
+    "generator_function_declaration",
+    "function",
+    "arrow_function",
+    "class_declaration",
+    "method_definition",
+];
+
+const TYPESCRIPT_DECLARATION_KINDS: &[&str] = &[
+    "function_declaration",
+    "generator_function_declaration",
+    "class_declaration",
+    "interface_declaration",
+    "type_alias_declaration",
+    "enum_declaration",
+    "method_definition",
+    "variable_declarator",
+    "import_specifier",
+    "import_clause",
+    "namespace_import",
+    "named_imports",
+];
+
+const TYPESCRIPT_SCOPE_KINDS: &[&str] = &[
+    "function_declaration",
+    "generator_function_declaration",
+    "function",
+    "arrow_function",
+    "class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    "method_definition",
+];
+
+#[derive(Clone, Copy, Debug)]
+struct LanguageSupport {
+    language: SourceLanguage,
+    extensions: &'static [&'static str],
+    query_pack: &'static str,
+    grammar: LanguageFactory,
+    definitions: &'static str,
+    references: &'static str,
+    declaration_kinds: &'static [&'static str],
+    scope_kinds: &'static [&'static str],
+}
+
+const RUST_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::Rust,
+    extensions: &["rs"],
+    query_pack: "rust-v1",
+    grammar: rust_language,
+    definitions: include_str!("queries/rust/definitions.scm"),
+    references: include_str!("queries/rust/references.scm"),
+    declaration_kinds: RUST_DECLARATION_KINDS,
+    scope_kinds: RUST_SCOPE_KINDS,
+};
+
+const JAVASCRIPT_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::JavaScript,
+    extensions: &["js", "mjs", "cjs"],
+    query_pack: "javascript-v1",
+    grammar: javascript_language,
+    definitions: include_str!("queries/javascript/definitions.scm"),
+    references: include_str!("queries/javascript/references.scm"),
+    declaration_kinds: JAVASCRIPT_DECLARATION_KINDS,
+    scope_kinds: JAVASCRIPT_SCOPE_KINDS,
+};
+
+const JAVASCRIPT_JSX_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::JavaScriptJsx,
+    extensions: &["jsx"],
+    query_pack: "javascript-v1",
+    grammar: javascript_language,
+    definitions: include_str!("queries/javascript/definitions.scm"),
+    references: include_str!("queries/javascript/references.scm"),
+    declaration_kinds: JAVASCRIPT_DECLARATION_KINDS,
+    scope_kinds: JAVASCRIPT_SCOPE_KINDS,
+};
+
+const TYPESCRIPT_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::TypeScript,
+    extensions: &["ts", "mts", "cts"],
+    query_pack: "typescript-v1",
+    grammar: typescript_language,
+    definitions: include_str!("queries/typescript/definitions.scm"),
+    references: include_str!("queries/typescript/references.scm"),
+    declaration_kinds: TYPESCRIPT_DECLARATION_KINDS,
+    scope_kinds: TYPESCRIPT_SCOPE_KINDS,
+};
+
+const TYPESCRIPT_TSX_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::TypeScriptTsx,
+    extensions: &["tsx"],
+    query_pack: "typescript-v1",
+    grammar: tsx_language,
+    definitions: include_str!("queries/typescript/definitions.scm"),
+    references: include_str!("queries/typescript/references.scm"),
+    declaration_kinds: TYPESCRIPT_DECLARATION_KINDS,
+    scope_kinds: TYPESCRIPT_SCOPE_KINDS,
+};
+
+const LANGUAGE_SUPPORT: &[LanguageSupport] = &[
+    RUST_SUPPORT,
+    JAVASCRIPT_SUPPORT,
+    JAVASCRIPT_JSX_SUPPORT,
+    TYPESCRIPT_SUPPORT,
+    TYPESCRIPT_TSX_SUPPORT,
 ];
 
 type Result<T> = std::result::Result<T, MapError>;
@@ -182,7 +302,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             || !in_scope(&path, &scope.relative_path)
             || candidates.contains_key(&path)
             || visible_path_set.contains(&path)
-            || !is_rust_path(Path::new(&path))
+            || support_for_path(Path::new(&path)).is_none()
         {
             continue;
         }
@@ -208,14 +328,16 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             });
             continue;
         }
-        if !is_rust_path(Path::new(&path)) {
+        let Some(support) = support_for_path(Path::new(&path)) else {
             omissions.push(SourceOmission {
                 path: path.clone(),
                 reason: OmissionReason::UnsupportedLanguage,
-                detail: "Only Rust source files are first-class in this ticket; the path was not parsed.".to_owned(),
+                detail:
+                    "The file extension is not registered with a first-class language parser; the path was not parsed."
+                        .to_owned(),
             });
             continue;
-        }
+        };
         let symlink = candidate.symlink
             || fs::symlink_metadata(&absolute)
                 .map(|metadata| metadata.file_type().is_symlink())
@@ -240,16 +362,18 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 continue;
             }
         };
-        let ParsedSource { symbols, findings: file_findings, status, limitations } = parse_source(&source)?;
+        let ParsedSource { symbols, findings: file_findings, status, limitations } = parse_source(&source, support);
         findings.extend(file_findings.into_iter().map(|mut finding| {
             if finding.path.is_empty() {
                 finding.path = path.clone();
             }
             finding
         }));
+        let extension = extension_for_path(Path::new(&path));
         files.push(SourceFile {
             path,
-            language: "rust".to_owned(),
+            language: support.language,
+            extension,
             worktree_state: candidate.state,
             status,
             symbols,
@@ -272,10 +396,45 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             .then_with(|| left.detail.cmp(&right.detail))
     });
 
+    let query_packs = supported_query_packs(&files);
+    let query_pack = if query_packs.len() == 1 {
+        query_packs
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| RUST_SUPPORT.query_pack.to_owned())
+    } else {
+        "mixed".to_owned()
+    };
+
+    let has_non_rust_files = files.iter().any(|file| file.language != SourceLanguage::Rust);
+    let limitations = if has_non_rust_files {
+        vec![
+            "Definitions and references are extracted lexically with language-specific Tree-sitter queries; imports, types, macros, and runtime behavior are not resolved."
+                .to_owned(),
+            "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
+                .to_owned(),
+            "JavaScript/JSX and TypeScript/TSX use explicit grammar variants; query-pack provenance is reported per variant."
+                .to_owned(),
+            "Tracked files are eligible even when ignore rules match them; ignored untracked files are omitted and recorded."
+                .to_owned(),
+        ]
+    } else {
+        vec![
+            "Rust definitions and references are extracted lexically; imports, types, macros, and runtime behavior are not resolved."
+                .to_owned(),
+            "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
+                .to_owned(),
+            "Tracked files are eligible even when ignore rules match them; ignored untracked files are omitted and recorded."
+                .to_owned(),
+        ]
+    };
+
     Ok(MapReport {
         repository_root: repository_root.to_string_lossy().into_owned(),
         scope_path: scope.relative_path,
-        query_pack: QUERY_PACK_VERSION.to_owned(),
+        query_pack,
+        query_packs,
         exclusions: settings.excludes.clone(),
         inventory: MapInventory {
             tracked: inventory.0,
@@ -287,14 +446,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         files,
         omissions,
         findings,
-        limitations: vec![
-            "Rust definitions and references are extracted lexically; imports, types, macros, and runtime behavior are not resolved."
-                .to_owned(),
-            "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
-                .to_owned(),
-            "Tracked files are eligible even when ignore rules match them; ignored untracked files are omitted and recorded."
-                .to_owned(),
-        ],
+        limitations,
     })
 }
 
@@ -432,12 +584,6 @@ fn is_git_internal(path: &str) -> bool {
     path == ".git" || path.starts_with(".git/")
 }
 
-fn is_rust_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
-}
-
 fn inventory(candidates: &BTreeMap<String, Candidate>) -> (usize, usize, usize) {
     let tracked = candidates
         .values()
@@ -454,51 +600,93 @@ fn inventory(candidates: &BTreeMap<String, Candidate>) -> (usize, usize, usize) 
     (tracked, modified, untracked)
 }
 
-fn parse_source(source: &[u8]) -> Result<ParsedSource> {
-    let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+fn parse_source(source: &[u8], support: &LanguageSupport) -> ParsedSource {
+    let language = (support.grammar)();
     let mut parser = Parser::new();
-    parser
-        .set_language(&language)
-        .map_err(|error| MapError::analysis("configuring the Rust Tree-sitter parser", error))?;
-    let tree = parser.parse(source, None).ok_or_else(|| MapError::Analysis {
-        operation: "parsing a Rust source file",
-        reason: "Tree-sitter did not return a syntax tree".to_owned(),
-    })?;
-    let definition_query = Query::new(&language, DEFINITION_QUERY)
-        .map_err(|error| MapError::analysis("compiling the Rust definition query pack", error))?;
-    let reference_query = Query::new(&language, REFERENCE_QUERY)
-        .map_err(|error| MapError::analysis("compiling the Rust reference query pack", error))?;
+    let mut findings = Vec::new();
+    if let Err(error) = parser.set_language(&language) {
+        findings.push(MapFinding {
+            kind: MapFindingKind::ParserError,
+            path: String::new(),
+            location: None,
+            detail: format!(
+                "Could not configure the {} parser: {error}.",
+                support.language.display_label()
+            ),
+        });
+        return ParsedSource {
+            symbols: Vec::new(),
+            findings,
+            status: FileAnalysisStatus::Partial,
+            limitations: vec![format!(
+                "The {} parser could not be configured; no symbols were extracted.",
+                support.language.display_label()
+            )],
+        };
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        findings.push(MapFinding {
+            kind: MapFindingKind::ParseError,
+            path: String::new(),
+            location: None,
+            detail: format!(
+                "The {} parser did not return a syntax tree.",
+                support.language.display_label()
+            ),
+        });
+        return ParsedSource {
+            symbols: Vec::new(),
+            findings,
+            status: FileAnalysisStatus::Partial,
+            limitations: vec![format!(
+                "The {} parser did not return a syntax tree; no symbols were extracted.",
+                support.language.display_label()
+            )],
+        };
+    };
 
     let mut symbols = Vec::new();
     let mut definition_nodes = BTreeSet::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&definition_query, tree.root_node(), source);
-    while let Some(query_match) = matches.next() {
-        for capture in query_match.captures {
-            let node = capture.node;
-            definition_nodes.insert(node.id());
-            symbols.push(symbol_from_capture(
-                node,
-                capture_name(&definition_query, capture.index),
-                SymbolRole::Definition,
-                source,
-            ));
-        }
-    }
-    let mut matches = cursor.matches(&reference_query, tree.root_node(), source);
-    while let Some(query_match) = matches.next() {
-        for capture in query_match.captures {
-            let node = capture.node;
-            if definition_nodes.contains(&node.id()) {
-                continue;
+    let mut query_failed = false;
+    if let Some(definition_query) = compile_query(&language, support.definitions, support, "definition", &mut findings)
+    {
+        let mut matches = cursor.matches(&definition_query, tree.root_node(), source);
+        while let Some(query_match) = matches.next() {
+            for capture in query_match.captures {
+                let node = capture.node;
+                definition_nodes.insert(node.id());
+                symbols.push(symbol_from_capture(
+                    node,
+                    capture_name(&definition_query, capture.index),
+                    SymbolRole::Definition,
+                    source,
+                    support,
+                ));
             }
-            symbols.push(symbol_from_capture(
-                node,
-                capture_name(&reference_query, capture.index),
-                SymbolRole::Reference,
-                source,
-            ));
         }
+    } else {
+        query_failed = true;
+    }
+    if let Some(reference_query) = compile_query(&language, support.references, support, "reference", &mut findings) {
+        let mut matches = cursor.matches(&reference_query, tree.root_node(), source);
+        while let Some(query_match) = matches.next() {
+            for capture in query_match.captures {
+                let node = capture.node;
+                if definition_nodes.contains(&node.id()) {
+                    continue;
+                }
+                symbols.push(symbol_from_capture(
+                    node,
+                    capture_name(&reference_query, capture.index),
+                    SymbolRole::Reference,
+                    source,
+                    support,
+                ));
+            }
+        }
+    } else {
+        query_failed = true;
     }
 
     symbols.sort_by(|left, right| {
@@ -507,21 +695,53 @@ fn parse_source(source: &[u8]) -> Result<ParsedSource> {
             .then_with(|| left.role.label().cmp(right.role.label()))
             .then_with(|| left.name.cmp(&right.name))
     });
+    symbols.dedup_by(|right, left| {
+        right.name == left.name && right.kind == left.kind && right.role == left.role && right.location == left.location
+    });
 
-    let mut findings = Vec::new();
     collect_parse_findings(tree.root_node(), source, &mut findings);
-    let status = if tree.root_node().has_error() {
-        findings.shrink_to_fit();
+    let status = if tree.root_node().has_error() || query_failed {
         FileAnalysisStatus::Partial
     } else {
         FileAnalysisStatus::Complete
     };
-    let limitations = if status == FileAnalysisStatus::Partial {
-        vec!["Tree-sitter reported parse errors; extracted symbols may be incomplete.".to_owned()]
-    } else {
-        Vec::new()
-    };
-    Ok(ParsedSource { symbols, findings, status, limitations })
+    let mut limitations = Vec::new();
+    if tree.root_node().has_error() {
+        limitations.push(format!(
+            "Tree-sitter reported parse errors in this {} file; extracted symbols may be incomplete.",
+            support.language.display_label()
+        ));
+    }
+    if query_failed {
+        limitations.push(format!(
+            "One or more {} query-pack queries failed; available query findings were retained.",
+            support.language.display_label()
+        ));
+    }
+    ParsedSource { symbols, findings, status, limitations }
+}
+
+fn compile_query(
+    language: &tree_sitter::Language, source: &str, support: &LanguageSupport, role: &str,
+    findings: &mut Vec<MapFinding>,
+) -> Option<Query> {
+    match Query::new(language, source) {
+        Ok(query) => Some(query),
+        Err(error) => {
+            findings.push(MapFinding {
+                kind: MapFindingKind::QueryError,
+                path: String::new(),
+                location: None,
+                detail: format!(
+                    "Could not compile the {} {} query in query pack `{}`: {error}.",
+                    support.language.display_label(),
+                    role,
+                    support.query_pack
+                ),
+            });
+            None
+        }
+    }
 }
 
 fn capture_name(query: &Query, index: u32) -> &str {
@@ -532,16 +752,18 @@ fn capture_name(query: &Query, index: u32) -> &str {
         .unwrap_or("reference.identifier")
 }
 
-fn symbol_from_capture(node: Node<'_>, capture_name: &str, role: SymbolRole, source: &[u8]) -> SourceSymbol {
-    let declaration = declaration_node(node);
+fn symbol_from_capture(
+    node: Node<'_>, capture_name: &str, role: SymbolRole, source: &[u8], support: &LanguageSupport,
+) -> SourceSymbol {
+    let declaration = declaration_node(node, support.declaration_kinds);
     let scope_start = if role == SymbolRole::Definition { declaration.parent() } else { node.parent() };
     SourceSymbol {
         name: text_for_node(node, source),
         kind: symbol_kind(capture_name),
         role,
-        scope: scope_for_node(scope_start, source),
+        scope: scope_for_node(scope_start, source, support.scope_kinds),
         location: SourceLocation::from(node),
-        context: context_snippet(node, source),
+        context: context_snippet(node, source, support.declaration_kinds),
     }
 }
 
@@ -558,15 +780,21 @@ fn symbol_kind(capture_name: &str) -> SymbolKind {
         "module" => SymbolKind::Module,
         "macro" => SymbolKind::Macro,
         "field" => SymbolKind::Field,
+        "class" => SymbolKind::Class,
+        "method" => SymbolKind::Method,
+        "variable" => SymbolKind::Variable,
+        "interface" => SymbolKind::Interface,
+        "import" => SymbolKind::Import,
+        "export" => SymbolKind::Export,
         "identifier" => SymbolKind::Identifier,
         _ => SymbolKind::Other,
     }
 }
 
-fn declaration_node(node: Node<'_>) -> Node<'_> {
+fn declaration_node<'a>(node: Node<'a>, declaration_kinds: &[&str]) -> Node<'a> {
     let mut current = node;
     while let Some(parent) = current.parent() {
-        if DECLARATION_KINDS.contains(&parent.kind()) {
+        if declaration_kinds.contains(&parent.kind()) {
             return parent;
         }
         current = parent;
@@ -574,11 +802,11 @@ fn declaration_node(node: Node<'_>) -> Node<'_> {
     node
 }
 
-fn scope_for_node(start: Option<Node<'_>>, source: &[u8]) -> Vec<String> {
+fn scope_for_node(start: Option<Node<'_>>, source: &[u8], scope_kinds: &[&str]) -> Vec<String> {
     let mut scopes = Vec::new();
     let mut current = start;
     while let Some(node) = current {
-        if SCOPE_KINDS.contains(&node.kind())
+        if scope_kinds.contains(&node.kind())
             && let Some(name) = node.child_by_field_name("name")
         {
             scopes.push(text_for_node(name, source));
@@ -589,9 +817,9 @@ fn scope_for_node(start: Option<Node<'_>>, source: &[u8]) -> Vec<String> {
     scopes
 }
 
-fn context_snippet(node: Node<'_>, source: &[u8]) -> String {
-    let declaration = declaration_node(node);
-    let (start, end) = if DECLARATION_KINDS.contains(&declaration.kind()) {
+fn context_snippet(node: Node<'_>, source: &[u8], declaration_kinds: &[&str]) -> String {
+    let declaration = declaration_node(node, declaration_kinds);
+    let (start, end) = if declaration_kinds.contains(&declaration.kind()) {
         let end = declaration
             .child_by_field_name("body")
             .map(|body| body.start_byte())
@@ -648,7 +876,7 @@ fn collect_parse_findings(node: Node<'_>, source: &[u8], findings: &mut Vec<MapF
             detail: format!(
                 "Tree-sitter recovered from a {} node near `{}`.",
                 node.kind(),
-                context_snippet(node, source)
+                context_snippet(node, source, &[])
             ),
         });
     }
@@ -705,6 +933,51 @@ fn location_key(location: Option<&SourceLocation>) -> (usize, usize, usize, usiz
     })
 }
 
+fn rust_language() -> tree_sitter::Language {
+    tree_sitter_rust::LANGUAGE.into()
+}
+
+fn javascript_language() -> tree_sitter::Language {
+    tree_sitter_javascript::LANGUAGE.into()
+}
+
+fn typescript_language() -> tree_sitter::Language {
+    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+}
+
+fn tsx_language() -> tree_sitter::Language {
+    tree_sitter_typescript::LANGUAGE_TSX.into()
+}
+
+fn support_for_path(path: &Path) -> Option<&'static LanguageSupport> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    LANGUAGE_SUPPORT
+        .iter()
+        .find(|support| support.extensions.contains(&extension.as_str()))
+}
+
+fn extension_for_path(path: &Path) -> String {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map_or_else(String::new, |extension| extension.to_ascii_lowercase())
+}
+
+fn supported_query_packs(files: &[SourceFile]) -> BTreeMap<String, String> {
+    let mut query_packs = BTreeMap::new();
+    for file in files {
+        if let Some(support) = support_for_path(Path::new(&file.path)) {
+            query_packs.insert(support.language.label().to_owned(), support.query_pack.to_owned());
+        }
+    }
+    if query_packs.is_empty() {
+        query_packs.insert(
+            RUST_SUPPORT.language.label().to_owned(),
+            RUST_SUPPORT.query_pack.to_owned(),
+        );
+    }
+    query_packs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,7 +985,7 @@ mod tests {
     #[test]
     fn scope_and_snippet_are_compact_and_one_based() {
         let source = b"mod outer { fn parse(value: usize) { let _ = value; } }";
-        let ParsedSource { symbols, findings, status, limitations } = parse_source(source).expect("Rust parses");
+        let ParsedSource { symbols, findings, status, limitations } = parse_source(source, &RUST_SUPPORT);
 
         assert!(findings.is_empty());
         assert_eq!(status, FileAnalysisStatus::Complete);
@@ -729,12 +1002,164 @@ mod tests {
 
     #[test]
     fn malformed_rust_is_partial_with_an_explicit_parse_finding() {
-        let ParsedSource { symbols, findings, status, limitations } =
-            parse_source(b"fn broken( {").expect("parser recovers");
+        let ParsedSource { symbols, findings, status, limitations } = parse_source(b"fn broken( {", &RUST_SUPPORT);
 
         assert_eq!(status, FileAnalysisStatus::Partial);
         assert!(!symbols.is_empty());
         assert!(!findings.is_empty());
         assert!(limitations.iter().any(|limitation| limitation.contains("parse errors")));
+    }
+
+    #[test]
+    fn javascript_query_pack_extracts_module_class_and_function_symbols() {
+        let source = br#"
+            import { helper } from "./helper.js";
+            export function build(value) { return new Widget(value, helper); }
+            export class Widget { render() { return helper(); } }
+        "#;
+        let ParsedSource { symbols, findings, status, limitations } = parse_source(source, &JAVASCRIPT_SUPPORT);
+
+        assert_eq!(status, FileAnalysisStatus::Complete, "{findings:?}");
+        assert!(limitations.is_empty());
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.kind != MapFindingKind::QueryError)
+        );
+        assert!(symbols.iter().any(|symbol| {
+            symbol.name == "build" && symbol.kind == SymbolKind::Function && symbol.role == SymbolRole::Definition
+        }));
+        assert!(symbols.iter().any(|symbol| {
+            symbol.name == "Widget" && symbol.kind == SymbolKind::Class && symbol.role == SymbolRole::Definition
+        }));
+        assert!(symbols.iter().any(|symbol| {
+            symbol.name == "render" && symbol.kind == SymbolKind::Method && symbol.role == SymbolRole::Definition
+        }));
+        let render = symbols
+            .iter()
+            .find(|symbol| symbol.name == "render" && symbol.role == SymbolRole::Definition)
+            .expect("method definition");
+        assert_eq!(render.scope, vec!["Widget"]);
+        assert!(render.location.start.line > 0);
+        assert!(render.context.starts_with("render()"));
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| symbol.name == "helper" && symbol.role == SymbolRole::Reference)
+        );
+    }
+
+    #[test]
+    fn typescript_and_tsx_query_packs_extract_typed_symbols_without_cross_language_loss() {
+        let typescript = br#"
+            import { helper } from "./helper";
+            export interface User { name: string; }
+            export class Service { run(user: User) { return helper(user.name); } }
+            export function create(user: User): Service { return new Service(); }
+        "#;
+        let tsx = br#"
+            export function View(props: { label: string }) { return <button>{props.label}</button>; }
+        "#;
+
+        let parsed_typescript = parse_source(typescript, &TYPESCRIPT_SUPPORT);
+        let parsed_tsx = parse_source(tsx, &TYPESCRIPT_TSX_SUPPORT);
+        assert_eq!(
+            parsed_typescript.status,
+            FileAnalysisStatus::Complete,
+            "{parsed_typescript:?}"
+        );
+        assert_eq!(parsed_tsx.status, FileAnalysisStatus::Complete, "{parsed_tsx:?}");
+        assert!(
+            parsed_typescript
+                .findings
+                .iter()
+                .all(|finding| finding.kind != MapFindingKind::QueryError)
+        );
+        assert!(
+            parsed_tsx
+                .findings
+                .iter()
+                .all(|finding| finding.kind != MapFindingKind::QueryError)
+        );
+        assert!(
+            parsed_typescript
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "User" && symbol.kind == SymbolKind::Interface)
+        );
+        assert!(
+            parsed_typescript
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "Service" && symbol.kind == SymbolKind::Class)
+        );
+        assert!(
+            parsed_typescript
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "helper" && symbol.role == SymbolRole::Reference)
+        );
+        let run = parsed_typescript
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "run" && symbol.role == SymbolRole::Definition)
+            .expect("method definition");
+        assert_eq!(run.scope, vec!["Service"]);
+        assert!(run.context.starts_with("run(user: User)"));
+        let view = parsed_tsx
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "View" && symbol.kind == SymbolKind::Function)
+            .expect("TSX function definition");
+        assert!(view.location.start.line > 0);
+        assert!(view.context.starts_with("function View"));
+    }
+
+    #[test]
+    fn javascript_typescript_and_jsx_extensions_select_explicit_language_variants() {
+        assert_eq!(
+            support_for_path(Path::new("module.js")).unwrap().language,
+            SourceLanguage::JavaScript
+        );
+        assert_eq!(
+            support_for_path(Path::new("module.jsx")).unwrap().language,
+            SourceLanguage::JavaScriptJsx
+        );
+        assert_eq!(
+            support_for_path(Path::new("module.ts")).unwrap().language,
+            SourceLanguage::TypeScript
+        );
+        assert_eq!(
+            support_for_path(Path::new("module.tsx")).unwrap().language,
+            SourceLanguage::TypeScriptTsx
+        );
+        assert!(support_for_path(Path::new("module.vue")).is_none());
+    }
+
+    #[test]
+    fn query_failure_is_partial_and_does_not_discard_definition_findings() {
+        let support =
+            LanguageSupport { references: "(not_a_real_javascript_node) @reference.identifier", ..JAVASCRIPT_SUPPORT };
+        let parsed = parse_source(b"function build() {}", &support);
+
+        assert_eq!(parsed.status, FileAnalysisStatus::Partial);
+        assert!(
+            parsed
+                .findings
+                .iter()
+                .any(|finding| finding.kind == MapFindingKind::QueryError)
+        );
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "build" && symbol.role == SymbolRole::Definition)
+        );
+        assert!(
+            parsed
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("query-pack queries failed"))
+        );
     }
 }

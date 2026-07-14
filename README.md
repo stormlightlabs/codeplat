@@ -5,7 +5,8 @@ in a new codebase.
 
 It produces two focused reports:
 
-- `map` inventories the current worktree and extracts a structural Rust source map.
+- `map` inventories the current worktree and extracts structural maps for Rust, JavaScript,
+  JSX, TypeScript, and TSX source files.
 - `history` summarizes five Git-history signals: churn, contributors, bug-related clusters,
   monthly activity, and firefighting language.
 
@@ -34,13 +35,14 @@ Git repository and keeps the selected scope inside that repository.
 
 ### `setaryb map [OPTIONS] [PATH]`
 
-The map command currently supports Rust source files. It reports:
+The map command supports Rust, JavaScript, JSX, TypeScript, and TSX source files. It reports:
 
 - tracked, modified, and untracked worktree state
+- the selected language variant and file extension (`javascript_jsx` and `typescript_tsx` are explicit)
 - definitions and lexical references with symbol kind, enclosing scope,
   1-based source locations, and compact declaration context
-- parse errors and ambiguous lexical references
-- analyzed and omitted counts, repository root, scope, query-pack version, and
+- parse errors, query-pack failures, and ambiguous lexical references per affected file
+- analyzed and omitted counts, repository root, scope, query-pack provenance, and
   supplied exclusions.
 
 Exclusions can be repeated:
@@ -89,14 +91,16 @@ Color settings never change report stdout.
 
 ## Map limitations
 
-The current Rust map is lexical. It does not resolve imports, types, macros,
-runtime behavior, or semantic call relationships. A name with multiple definition
-candidates is reported as ambiguous instead of being presented as a resolved edge.
+The source map is lexical. It does not resolve imports, types, macros, runtime
+behavior, or semantic call relationships. A name with multiple definition candidates
+is reported as ambiguous instead of being presented as a resolved edge. Parse and
+query limitations remain attached to the affected file so other language findings
+are retained.
 
 Unsupported files, read failures, symlinks, and partial parses remain visible in
 the report.
 
 ### Coming Soon
 
-- JavaScript, TypeScript, Python, Ruby, Java, and C# support
+- Python, Ruby, Java, and C# support
 - Ranking, token budgeting, caching, and the integrated default briefing

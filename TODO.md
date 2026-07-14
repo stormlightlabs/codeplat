@@ -100,13 +100,13 @@ structural-map contract as Rust.
 
 **Acceptance criteria:**
 
-- [ ] JavaScript and TypeScript parsers and versioned query packs are registered through the same
+- [x] JavaScript and TypeScript parsers and versioned query packs are registered through the same
       language-support interface as Rust.
-- [ ] Both languages extract tested definition, reference, scope, location, and snippet data for
+- [x] Both languages extract tested definition, reference, scope, location, and snippet data for
       representative module and class/function structures.
-- [ ] JavaScript, TypeScript, and TSX/JSX extension handling is explicit and unambiguous in output.
-- [ ] Query failure or partial parsing is reported per file without losing findings from other languages.
-- [ ] Mixed Rust/JavaScript/TypeScript fixture output remains deterministic in both formats.
+- [x] JavaScript, TypeScript, and TSX/JSX extension handling is explicit and unambiguous in output.
+- [x] Query failure or partial parsing is reported per file without losing findings from other languages.
+- [x] Mixed Rust/JavaScript/TypeScript fixture output remains deterministic in both formats.
 
 **Verification:**
 

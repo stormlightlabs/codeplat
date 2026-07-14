@@ -31,6 +31,12 @@ struct MapFixtureRepository {
     temporary_root: PathBuf,
 }
 
+struct MixedMapFixtureRepository {
+    root: PathBuf,
+    cache: PathBuf,
+    temporary_root: PathBuf,
+}
+
 impl FixtureRepository {
     fn new() -> Self {
         let suffix = format!(
@@ -272,6 +278,85 @@ impl MapFixtureRepository {
 }
 
 impl Drop for MapFixtureRepository {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.temporary_root);
+    }
+}
+
+impl MixedMapFixtureRepository {
+    fn new() -> Self {
+        let suffix = format!(
+            "setaryb-mixed-map-{}-{}",
+            std::process::id(),
+            FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let temporary_root = env::temp_dir().join(suffix);
+        let root = temporary_root.join("repository");
+        let cache = temporary_root.join("xdg-cache");
+        fs::create_dir_all(root.join("src")).expect("create mixed map fixture source scope");
+        fs::create_dir_all(&cache).expect("create mixed map fixture cache");
+
+        let tracked_files = [
+            (".gitignore", "src/ignored.js\n"),
+            ("README.md", "mixed-language source map fixture\n"),
+            ("src/lib.rs", "pub fn parse() { let value = 1; let _ = value; }\n"),
+            ("src/broken.js", "export function broken( {\n"),
+            (
+                "src/module.js",
+                "import { helper } from \"./helper.js\";\nexport function build(value) { return new Widget(value, helper); }\nexport class Widget { render() { return helper(); } }\n",
+            ),
+            (
+                "src/types.ts",
+                "export interface User { name: string; }\nexport class Service { run(user: User) { return user.name; } }\nexport function create(user: User): Service { return new Service(); }\n",
+            ),
+            (
+                "src/component.tsx",
+                "export function View(props: { label: string }) { return <button>{props.label}</button>; }\n",
+            ),
+        ];
+        let repository = gix::init(&root).expect("initialize mixed map fixture repository");
+        let tree = write_tree(&repository, &tracked_files);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after the Unix epoch")
+            .as_secs() as i64;
+        let commit = write_commit(
+            &repository,
+            tree,
+            &[],
+            "Mixed Map Fixture",
+            "mixed@example.com",
+            now,
+            "Initial mixed-language source map fixture",
+        );
+        drop(repository);
+
+        write_file(root.join(".git/HEAD"), b"ref: refs/heads/main\n");
+        write_file(root.join(".git/refs/heads/main"), format!("{commit}\n").as_bytes());
+        for (path, contents) in tracked_files {
+            write_file(root.join(path), contents.as_bytes());
+        }
+        write_file(
+            root.join("src/panel.jsx"),
+            b"import React from \"react\";\nexport function Panel() { return <div />; }\n",
+        );
+        write_file(root.join("src/ignored.js"), b"export function ignored() {}\n");
+        gix::open(&root).expect("open mixed map fixture repository");
+
+        Self { root, cache, temporary_root }
+    }
+
+    fn run(&self, arguments: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
+        command
+            .args(arguments)
+            .current_dir(&self.root)
+            .env("XDG_CACHE_HOME", &self.cache);
+        command.output().expect("run mixed map fixture command")
+    }
+}
+
+impl Drop for MixedMapFixtureRepository {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.temporary_root);
     }
@@ -723,6 +808,121 @@ fn map_scope_exclusions_and_markdown_limitations_are_preserved() {
     assert!(markdown.contains("Map findings"));
     assert!(markdown.contains("Map limitations"));
     assert!(markdown.contains("lexically"));
+}
+
+#[test]
+fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
+    let fixture = MixedMapFixtureRepository::new();
+    let first = fixture.run(&["map", "--json"]);
+    let second = fixture.run(&["map", "--json"]);
+    let first_stdout = stdout(&first);
+    let second_stdout = stdout(&second);
+    let json: Value = serde_json::from_str(&first_stdout).expect("valid mixed-language map JSON");
+
+    assert!(
+        first.status.success(),
+        "mixed map failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "repeated mixed map failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(first.stderr.is_empty());
+    assert!(second.stderr.is_empty());
+    assert_plain_report(&first_stdout);
+    assert_eq!(
+        first_stdout, second_stdout,
+        "mixed-language map ordering must be deterministic"
+    );
+    assert_eq!(json["map"]["query_pack"], "mixed");
+    assert_eq!(json["map"]["query_packs"]["javascript"], "javascript-v1");
+    assert_eq!(json["map"]["query_packs"]["javascript_jsx"], "javascript-v1");
+    assert_eq!(json["map"]["query_packs"]["typescript"], "typescript-v1");
+    assert_eq!(json["map"]["query_packs"]["typescript_tsx"], "typescript-v1");
+
+    let files = json["map"]["files"].as_array().expect("mixed map files");
+    for (path, language, extension) in [
+        ("src/lib.rs", "rust", "rs"),
+        ("src/module.js", "javascript", "js"),
+        ("src/panel.jsx", "javascript_jsx", "jsx"),
+        ("src/types.ts", "typescript", "ts"),
+        ("src/component.tsx", "typescript_tsx", "tsx"),
+    ] {
+        let file = files
+            .iter()
+            .find(|file| file["path"] == path)
+            .expect("language fixture file");
+        assert_eq!(file["language"], language);
+        assert_eq!(file["extension"], extension);
+        assert_eq!(file["status"], "complete");
+        assert!(!file["symbols"].as_array().expect("symbols").is_empty());
+    }
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file["path"] == "src/broken.js")
+            .expect("malformed JavaScript file")["status"],
+        "partial"
+    );
+    assert!(
+        files
+            .iter()
+            .find(|file| file["path"] == "src/module.js")
+            .expect("JavaScript file")["symbols"]
+            .as_array()
+            .expect("JavaScript symbols")
+            .iter()
+            .any(|symbol| symbol["name"] == "Widget" && symbol["kind"] == "class")
+    );
+    assert!(
+        files
+            .iter()
+            .find(|file| file["path"] == "src/types.ts")
+            .expect("TypeScript file")["symbols"]
+            .as_array()
+            .expect("TypeScript symbols")
+            .iter()
+            .any(|symbol| symbol["name"] == "User" && symbol["kind"] == "interface")
+    );
+
+    let omissions = json["map"]["omissions"].as_array().expect("mixed omissions");
+    assert!(
+        omissions
+            .iter()
+            .any(|omission| { omission["path"] == "src/ignored.js" && omission["reason"] == "ignored_untracked" })
+    );
+    assert!(
+        omissions
+            .iter()
+            .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "unsupported_language" })
+    );
+    assert!(
+        json["map"]["findings"]
+            .as_array()
+            .expect("mixed findings")
+            .iter()
+            .all(|finding| finding["kind"] != "query_error")
+    );
+    assert!(
+        json["map"]["findings"]
+            .as_array()
+            .expect("mixed findings")
+            .iter()
+            .any(|finding| finding["kind"] == "parse_error" && finding["path"] == "src/broken.js")
+    );
+
+    let markdown = fixture.run(&["map"]);
+    let markdown_stdout = stdout(&markdown);
+    assert!(markdown.status.success());
+    assert!(markdown.stderr.is_empty());
+    assert!(markdown_stdout.contains("JavaScript files"));
+    assert!(markdown_stdout.contains("JavaScript (JSX) files"));
+    assert!(markdown_stdout.contains("TypeScript files"));
+    assert!(markdown_stdout.contains("TypeScript (TSX) files"));
+    assert!(markdown_stdout.contains("query-pack provenance"));
+    assert_plain_report(&markdown_stdout);
 }
 
 #[test]
