@@ -1,4 +1,5 @@
 mod cli;
+mod history;
 mod report;
 mod utils;
 

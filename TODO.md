@@ -43,15 +43,15 @@ and focused history commands, using gix only and returning structured evidence w
 
 **Acceptance criteria:**
 
-- [ ] Churn hotspots, contributor concentration, bug clusters with churn overlap, monthly activity,
+- [x] Churn hotspots, contributor concentration, bug clusters with churn overlap, monthly activity,
       and firefighting commits are available in Markdown and JSON.
-- [ ] The default time windows and keyword patterns are visible in output and can be overridden explicitly.
-- [ ] Analysis scopes paths to the requested directory within the discovered repository and never
+- [x] The default time windows and keyword patterns are visible in output and can be overridden explicitly.
+- [x] Analysis scopes paths to the requested directory within the discovered repository and never
       invokes the system `git` executable.
-- [ ] Results identify the evidence paths/commits and attach the required caveats for absolute churn,
+- [x] Results identify the evidence paths/commits and attach the required caveats for absolute churn,
       squash merges, weak commit messages, activity interpretation, and empty firefighting output.
-- [ ] The report does not label people or paths as objectively bad; it presents priorities and uncertainty.
-- [ ] Fixture repositories cover non-merge filtering, overlapping churn/fix paths, keyword misses, and monthly grouping.
+- [x] The report does not label people or paths as objectively bad; it presents priorities and uncertainty.
+- [x] Fixture repositories cover non-merge filtering, overlapping churn/fix paths, keyword misses, and monthly grouping.
 
 **Verification:**
 

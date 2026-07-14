@@ -1,10 +1,12 @@
 use std::{
+    collections::BTreeMap,
     env,
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::Value;
@@ -12,6 +14,12 @@ use serde_json::Value;
 static FIXTURE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 struct FixtureRepository {
+    root: PathBuf,
+    cache: PathBuf,
+    temporary_root: PathBuf,
+}
+
+struct HistoryFixtureRepository {
     root: PathBuf,
     cache: PathBuf,
     temporary_root: PathBuf,
@@ -61,6 +69,189 @@ impl Drop for FixtureRepository {
     }
 }
 
+impl HistoryFixtureRepository {
+    fn new() -> Self {
+        let suffix = format!(
+            "setaryb-history-{}-{}",
+            std::process::id(),
+            FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let temporary_root = env::temp_dir().join(suffix);
+        let root = temporary_root.join("repository");
+        let cache = temporary_root.join("xdg-cache");
+        fs::create_dir_all(&root).expect("create history fixture repository");
+        fs::create_dir_all(root.join("src")).expect("create history fixture source scope");
+        fs::create_dir_all(&cache).expect("create history fixture cache");
+
+        let repository = gix::init(&root).expect("initialize history fixture repository");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after the Unix epoch")
+            .as_secs() as i64;
+        let day = 86_400;
+        let initial_tree = write_tree(&repository, &[("legacy.txt", "legacy")]);
+        let first = write_commit(
+            &repository,
+            initial_tree,
+            &[],
+            "Alice",
+            "alice@example.com",
+            now - 400 * day,
+            "Initial import",
+        );
+
+        let second_tree = write_tree(
+            &repository,
+            &[("legacy.txt", "legacy"), ("src/lib.rs", "pub fn parse() {}")],
+        );
+        let second = write_commit(
+            &repository,
+            second_tree,
+            &[first],
+            "Bob",
+            "bob@example.com",
+            now - 200 * day,
+            "Implement parser",
+        );
+
+        let third_tree = write_tree(
+            &repository,
+            &[("legacy.txt", "legacy"), ("src/lib.rs", "pub fn parse() { 1 }")],
+        );
+        let third = write_commit(
+            &repository,
+            third_tree,
+            &[second],
+            "Alice",
+            "alice@example.com",
+            now - 20 * day,
+            "Fix parser bug",
+        );
+
+        let side_tree = write_tree(
+            &repository,
+            &[
+                ("legacy.txt", "legacy"),
+                ("src/lib.rs", "pub fn parse() { 1 }"),
+                ("src/side.rs", "pub fn side() {}"),
+            ],
+        );
+        let side = write_commit(
+            &repository,
+            side_tree,
+            &[second],
+            "Carol",
+            "carol@example.com",
+            now - 15 * day,
+            "Emergency hotfix side work",
+        );
+        let merge = write_commit(
+            &repository,
+            third_tree,
+            &[third, side],
+            "Maintainer",
+            "maintainer@example.com",
+            now - 5 * day,
+            "Merge side work",
+        );
+
+        let final_tree = write_tree(
+            &repository,
+            &[
+                ("legacy.txt", "legacy"),
+                ("src/lib.rs", "pub fn parse() { 1 }"),
+                ("src/main.rs", "fn main() { 1 }"),
+            ],
+        );
+        let final_commit = write_commit(
+            &repository,
+            final_tree,
+            &[merge],
+            "Bob",
+            "bob@example.com",
+            now - 2 * day,
+            "Rollback entrypoint",
+        );
+        drop(repository);
+        write_file(root.join(".git/HEAD"), b"ref: refs/heads/main\n");
+        write_file(
+            root.join(".git/refs/heads/main"),
+            format!("{final_commit}\n").as_bytes(),
+        );
+        gix::open(&root).expect("open history fixture repository");
+
+        Self { root, cache, temporary_root }
+    }
+
+    fn run(&self, arguments: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
+        command
+            .args(arguments)
+            .current_dir(&self.root)
+            .env("XDG_CACHE_HOME", &self.cache);
+        command.output().expect("run history fixture command")
+    }
+}
+
+impl Drop for HistoryFixtureRepository {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.temporary_root);
+    }
+}
+
+fn write_tree(repository: &gix::Repository, files: &[(&str, &str)]) -> gix::ObjectId {
+    let mut root_entries = Vec::new();
+    let mut source_entries = Vec::new();
+    for (path, contents) in files {
+        let blob = repository
+            .write_object(gix::objs::Blob { data: contents.as_bytes().to_vec() })
+            .expect("write fixture blob")
+            .detach();
+        if let Some(filename) = path.strip_prefix("src/") {
+            source_entries.push(gix::objs::tree::Entry {
+                mode: gix::objs::tree::EntryKind::Blob.into(),
+                filename: filename.into(),
+                oid: blob,
+            });
+        } else {
+            root_entries.push(gix::objs::tree::Entry {
+                mode: gix::objs::tree::EntryKind::Blob.into(),
+                filename: (*path).into(),
+                oid: blob,
+            });
+        }
+    }
+    if !source_entries.is_empty() {
+        source_entries.sort();
+        let source_tree = repository
+            .write_object(gix::objs::Tree { entries: source_entries })
+            .expect("write fixture source tree")
+            .detach();
+        root_entries.push(gix::objs::tree::Entry {
+            mode: gix::objs::tree::EntryKind::Tree.into(),
+            filename: "src".into(),
+            oid: source_tree,
+        });
+    }
+    root_entries.sort();
+    repository
+        .write_object(gix::objs::Tree { entries: root_entries })
+        .expect("write fixture root tree")
+        .detach()
+}
+
+fn write_commit(
+    repository: &gix::Repository, tree: gix::ObjectId, parents: &[gix::ObjectId], name: &str, email: &str,
+    seconds: i64, message: &str,
+) -> gix::ObjectId {
+    let timestamp = format!("{seconds} +0000");
+    let signature = gix::actor::SignatureRef { name: name.into(), email: email.into(), time: &timestamp };
+    repository
+        .new_commit_as(signature, signature, message, tree, parents.iter().copied())
+        .expect("write fixture commit")
+        .id
+}
+
 fn write_file(path: impl AsRef<Path>, contents: &[u8]) {
     let mut file = File::create(path).expect("create fixture file");
     file.write_all(contents).expect("write fixture file");
@@ -107,12 +298,7 @@ fn root_map_and_history_help_are_complete() {
 fn commands_parse_with_default_paths_and_emit_actionable_foundation_guidance() {
     let fixture = FixtureRepository::new();
 
-    for arguments in [
-        [].as_slice(),
-        ["map"].as_slice(),
-        ["history"].as_slice(),
-        ["history", "contributors"].as_slice(),
-    ] {
+    for arguments in [[].as_slice(), ["map"].as_slice()] {
         let output = fixture.run(arguments);
         let markdown = stdout(&output);
 
@@ -122,6 +308,16 @@ fn commands_parse_with_default_paths_and_emit_actionable_foundation_guidance() {
         assert!(markdown.contains("not available in this build"));
         assert_plain_report(&markdown);
     }
+}
+
+#[test]
+fn history_without_commits_uses_the_analysis_exit_category() {
+    let fixture = FixtureRepository::new();
+    let output = fixture.run(&["history", "--json"]);
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("history analysis failed"));
 }
 
 #[test]
@@ -142,8 +338,8 @@ fn json_rendering_is_versioned_semantic_and_plain() {
 
 #[test]
 fn selected_paths_and_history_operations_are_preserved_in_the_typed_report() {
-    let fixture = FixtureRepository::new();
-    let output = fixture.run(&["history", "contributors", "nested", "--json"]);
+    let fixture = HistoryFixtureRepository::new();
+    let output = fixture.run(&["history", "contributors", "src", "--json"]);
     let json = stdout(&output);
 
     assert!(output.status.success());
@@ -152,7 +348,180 @@ fn selected_paths_and_history_operations_are_preserved_in_the_typed_report() {
     let value: Value = serde_json::from_str(&json).expect("valid JSON report");
     assert_eq!(value["command"]["name"], "history");
     assert_eq!(value["command"]["operation"], "contributors");
-    assert_eq!(value["scope"]["selected_path"], "nested");
+    assert_eq!(value["scope"]["selected_path"], "src");
+    assert_eq!(
+        value["history"]["contributors"]["overall"]
+            .as_array()
+            .expect("scoped contributors")
+            .iter()
+            .find(|contributor| contributor["email"] == "alice@example.com")
+            .expect("scoped Alice contributor")["commits"],
+        1
+    );
+}
+
+#[test]
+fn history_json_contains_all_signals_evidence_and_required_caveats() {
+    let fixture = HistoryFixtureRepository::new();
+    let output = fixture.run(&["history", "--json"]);
+    let value: Value = serde_json::from_str(&stdout(&output)).expect("valid history JSON");
+
+    assert!(
+        output.status.success(),
+        "history failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_plain_report(&stdout(&output));
+    assert_eq!(value["status"], "analyzed");
+    assert_eq!(value["history"]["commits_seen"], 6);
+    assert_eq!(value["history"]["non_merge_commits_seen"], 5);
+    assert_eq!(value["history"]["settings"]["window_days"], 365);
+    assert_eq!(value["history"]["settings"]["recent_window_days"], 180);
+
+    let churn_paths: BTreeMap<_, _> = value["history"]["churn"]["paths"]
+        .as_array()
+        .expect("churn paths")
+        .iter()
+        .map(|path| {
+            (
+                path["path"].as_str().expect("path name").to_owned(),
+                path["commits"].as_u64().expect("count"),
+            )
+        })
+        .collect();
+    assert_eq!(churn_paths.get("src/lib.rs"), Some(&3));
+    assert_eq!(churn_paths.get("src/side.rs"), Some(&1));
+    assert_eq!(churn_paths.get("src"), None);
+    assert!(
+        value["history"]["bugs"]["overlap_paths"]
+            .as_array()
+            .expect("bug overlap")
+            .iter()
+            .any(|path| path["path"] == "src/lib.rs")
+    );
+    assert_eq!(
+        value["history"]["bugs"]["commits"]
+            .as_array()
+            .expect("bug evidence")
+            .len(),
+        2
+    );
+    assert_eq!(
+        value["history"]["firefighting"]["commits"]
+            .as_array()
+            .expect("firefighting evidence")
+            .len(),
+        2
+    );
+    assert_eq!(
+        value["history"]["activity"]["months"]
+            .as_array()
+            .expect("activity months")
+            .iter()
+            .map(|month| month["commits"].as_u64().unwrap())
+            .sum::<u64>(),
+        6
+    );
+
+    let caveats = value["history"]["bugs"]["caveats"].as_array().expect("bug caveats");
+    assert!(
+        caveats
+            .iter()
+            .any(|caveat| caveat.as_str().expect("caveat").contains("commit-message discipline"))
+    );
+    let contributor_caveats = value["history"]["contributors"]["caveats"]
+        .as_array()
+        .expect("contributor caveats");
+    assert!(
+        contributor_caveats
+            .iter()
+            .any(|caveat| caveat.as_str().expect("caveat").contains("Squash merges"))
+    );
+}
+
+#[test]
+fn focused_history_commands_support_scopes_and_explicit_overrides() {
+    let fixture = HistoryFixtureRepository::new();
+    let bugs = fixture.run(&[
+        "history",
+        "bugs",
+        "--window-days",
+        "30",
+        "--bug-keyword",
+        "parser",
+        "--json",
+    ]);
+    let bugs_json: Value = serde_json::from_str(&stdout(&bugs)).expect("valid focused bug JSON");
+
+    assert!(bugs.status.success());
+    assert_eq!(bugs_json["history"]["settings"]["window_days"], 30);
+    assert_eq!(bugs_json["history"]["settings"]["bug_keywords"][0], "parser");
+    assert_eq!(bugs_json["history"]["bugs"]["keywords"][0], "parser");
+    assert_eq!(bugs_json["history"]["bugs"]["paths"][0]["path"], "src/lib.rs");
+    assert_eq!(bugs_json["history"]["bugs"]["overlap_paths"][0]["path"], "src/lib.rs");
+    assert!(bugs_json["history"]["churn"].is_null());
+
+    let keyword_miss = fixture.run(&["history", "bugs", "--bug-keyword", "not-a-keyword", "--json"]);
+    let keyword_miss_json: Value = serde_json::from_str(&stdout(&keyword_miss)).expect("valid keyword-miss JSON");
+    assert!(keyword_miss.status.success());
+    assert!(
+        keyword_miss_json["history"]["bugs"]["commits"]
+            .as_array()
+            .expect("keyword-miss commits")
+            .is_empty()
+    );
+    assert!(
+        keyword_miss_json["history"]["bugs"]["caveats"]
+            .as_array()
+            .expect("keyword-miss caveats")
+            .iter()
+            .any(|caveat| caveat
+                .as_str()
+                .expect("caveat")
+                .contains("No bug-related commits matched"))
+    );
+
+    let scoped = fixture.run(&["history", "churn", "src", "--json"]);
+    let scoped_json: Value = serde_json::from_str(&stdout(&scoped)).expect("valid scoped churn JSON");
+    assert!(scoped.status.success());
+    assert_eq!(scoped_json["history"]["scope_path"], "src");
+    assert!(
+        scoped_json["history"]["churn"]["paths"]
+            .as_array()
+            .expect("scoped paths")
+            .iter()
+            .all(|path| path["path"].as_str().expect("path").starts_with("src/"))
+    );
+
+    let activity = fixture.run(&["history", "activity"]);
+    let activity_markdown = stdout(&activity);
+    assert!(activity.status.success());
+    assert!(activity_markdown.contains("Monthly activity"));
+    assert!(!activity_markdown.contains("Churn hotspots"));
+}
+
+#[test]
+fn every_history_operation_renders_in_markdown_and_json() {
+    let fixture = HistoryFixtureRepository::new();
+    for operation in ["history", "churn", "contributors", "bugs", "activity", "firefighting"] {
+        let operation_arguments: Vec<&str> =
+            if operation == "history" { vec!["history"] } else { vec!["history", operation] };
+        let markdown = fixture.run(&operation_arguments);
+        assert!(markdown.status.success(), "{operation} Markdown failed");
+        assert!(markdown.stderr.is_empty());
+        assert!(stdout(&markdown).contains("Status: Analyzed"));
+        assert_plain_report(&stdout(&markdown));
+
+        let mut json_arguments = operation_arguments;
+        json_arguments.push("--json");
+        let json = fixture.run(&json_arguments);
+        assert!(json.status.success(), "{operation} JSON failed");
+        assert!(json.stderr.is_empty());
+        let value: Value = serde_json::from_str(&stdout(&json)).expect("valid operation JSON");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["status"], "analyzed");
+    }
 }
 
 #[test]

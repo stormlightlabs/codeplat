@@ -6,12 +6,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{ArgAction, ColorChoice, Parser, Subcommand, ValueEnum, builder::Styles, error::ErrorKind};
 use owo_colors::OwoColorize;
-use thiserror::Error;
 
-use crate::report::{CommandDescriptor, HistoryOperation, Report};
-
-// FIXME: what is this for?
-const HELP_AFTER: &str = "Examples:\n  setaryb\n  setaryb map --json\n  setaryb history contributors .\n\nExit status:\n  0  success\n  2  command-line usage error\n  3  repository discovery failure\n  4  input or access failure\n  5  analysis failure\n 70  internal failure";
+use crate::report::{CommandDescriptor, HistoryOperation, HistorySettings, Report};
 
 #[derive(Debug, Subcommand)]
 enum SubcommandName {
@@ -65,20 +61,8 @@ impl ColorPolicy {
 pub enum ExitCategory {
     Success,
     Usage,
-    #[expect(
-        dead_code,
-        reason = "Ticket 2 will use this stable category for repository-discovery failures."
-    )]
     Repository,
-    #[expect(
-        dead_code,
-        reason = "Tickets 2 and 3 will use this stable category for input and access failures."
-    )]
     Input,
-    #[expect(
-        dead_code,
-        reason = "Tickets 2 and 3 will use this stable category for analysis failures."
-    )]
     Analysis,
     Internal,
 }
@@ -97,24 +81,35 @@ impl ExitCategory {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 enum ApplicationError {
     #[error("{0}")]
     Usage(String),
+    #[error("{0}")]
+    History(#[source] crate::history::HistoryError),
     #[error("could not serialize the report as JSON")]
     Render(#[source] serde_json::Error),
+}
+
+impl Into<ExitCategory> for ApplicationError {
+    fn into(self) -> ExitCategory {
+        match self {
+            Self::Usage(_) => ExitCategory::Usage,
+            Self::History(error) => error.into(),
+            Self::Render(_) => ExitCategory::Internal,
+        }
+    }
+}
+
+impl From<&ApplicationError> for ExitCategory {
+    fn from(value: &ApplicationError) -> Self {
+        value.into()
+    }
 }
 
 impl ApplicationError {
     fn usage(message: impl Into<String>) -> Self {
         Self::Usage(message.into())
-    }
-
-    const fn category(&self) -> ExitCategory {
-        match self {
-            Self::Usage(_) => ExitCategory::Usage,
-            Self::Render(_) => ExitCategory::Internal,
-        }
     }
 }
 
@@ -123,8 +118,23 @@ impl ApplicationError {
     name = "setaryb",
     version,
     about = "Read-only repository orientation for people and coding agents.",
-    long_about = "Setaryb produces a concise, evidence-backed repository briefing. Use `map` or `history` for focused reports.",
-    after_help = HELP_AFTER,
+    long_about = "Setaryb produces a concise, evidence-backed repository briefing.
+
+Use `map` or `history` for focused reports.
+
+Examples:
+    setaryb
+    setaryb map --json
+    setaryb history contributors .
+
+Exit status:
+    0  success
+    2  command-line usage error
+    3  repository discovery failure
+    4  input or access failure
+    5  analysis failure
+    70  internal failure
+",
     color = ColorChoice::Never,
     styles = Styles::plain(),
     disable_help_subcommand = true
@@ -140,23 +150,28 @@ struct Cli {
     path: PathBuf,
 }
 
-impl Cli {
-    fn into_request(self) -> CommandRequest {
-        let command = match self.command {
-            None => CommandDescriptor::briefing(self.path),
-            Some(SubcommandName::Map(map)) => CommandDescriptor::map(map.path),
-            Some(SubcommandName::History(history)) => match history.operation {
-                Some(operation) => {
-                    let (operation, path) = operation.into_parts();
-                    CommandDescriptor::history(path, Some(operation))
+impl Into<CommandRequest> for Cli {
+    fn into(self) -> CommandRequest {
+        let (command, history) = match self.command {
+            None => (CommandDescriptor::briefing(self.path), HistorySettings::default()),
+            Some(SubcommandName::Map(map)) => (CommandDescriptor::map(map.path), HistorySettings::default()),
+            Some(SubcommandName::History(history)) => {
+                let inherited = history.options.settings();
+                match history.operation {
+                    Some(operation) => {
+                        let (operation, path, settings) = operation.into_parts(&inherited);
+                        (CommandDescriptor::history(path, Some(operation)), settings)
+                    }
+                    None => (CommandDescriptor::history(history.path, None), inherited),
                 }
-                None => CommandDescriptor::history(history.path, None),
-            },
+            }
         };
 
-        CommandRequest { command }
+        CommandRequest { command, history }
     }
+}
 
+impl Cli {
     fn output_format(&self) -> Result<OutputFormat, ApplicationError> {
         self.output.format()
     }
@@ -167,15 +182,24 @@ impl Cli {
 }
 
 #[derive(Debug, clap::Args)]
-#[command(after_help = HELP_AFTER)]
+#[command(after_help = "Examples:
+    setaryb map
+    setaryb map --json
+")]
 struct MapCommand {
     #[arg(value_name = "PATH", default_value = ".")]
     path: PathBuf,
 }
 
 #[derive(Debug, clap::Args)]
-#[command(after_help = HELP_AFTER)]
+#[command(after_help = "Examples:
+    setaryb history
+    setaryb history contributors .
+")]
 struct HistoryCommand {
+    #[command(flatten)]
+    options: HistoryOptions,
+
     #[command(subcommand)]
     operation: Option<HistorySubcommand>,
 
@@ -184,20 +208,88 @@ struct HistoryCommand {
 }
 
 #[derive(Debug, clap::Args)]
-#[command(after_help = HELP_AFTER)]
+#[command(after_help = "Examples:
+    setaryb history churn
+    setaryb history bugs --json
+")]
 struct HistoryOperationCommand {
+    #[command(flatten)]
+    options: HistoryOptions,
+
     #[arg(value_name = "PATH", default_value = ".")]
     path: PathBuf,
 }
 
 impl HistorySubcommand {
-    fn into_parts(self) -> (HistoryOperation, PathBuf) {
+    fn into_parts(self, inherited: &HistorySettings) -> (HistoryOperation, PathBuf, HistorySettings) {
         match self {
-            Self::Churn(command) => (HistoryOperation::Churn, command.path),
-            Self::Contributors(command) => (HistoryOperation::Contributors, command.path),
-            Self::Bugs(command) => (HistoryOperation::Bugs, command.path),
-            Self::Activity(command) => (HistoryOperation::Activity, command.path),
-            Self::Firefighting(command) => (HistoryOperation::Firefighting, command.path),
+            Self::Churn(command) => (
+                HistoryOperation::Churn,
+                command.path,
+                command.options.settings_with_fallback(inherited),
+            ),
+            Self::Contributors(command) => (
+                HistoryOperation::Contributors,
+                command.path,
+                command.options.settings_with_fallback(inherited),
+            ),
+            Self::Bugs(command) => (
+                HistoryOperation::Bugs,
+                command.path,
+                command.options.settings_with_fallback(inherited),
+            ),
+            Self::Activity(command) => (
+                HistoryOperation::Activity,
+                command.path,
+                command.options.settings_with_fallback(inherited),
+            ),
+            Self::Firefighting(command) => (
+                HistoryOperation::Firefighting,
+                command.path,
+                command.options.settings_with_fallback(inherited),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, clap::Args)]
+struct HistoryOptions {
+    /// Number of trailing days for churn, bug, and firefighting signals (default: 365).
+    #[arg(long, value_name = "DAYS", value_parser = clap::value_parser!(u32).range(1..))]
+    window_days: Option<u32>,
+
+    /// Number of trailing days used for recent contributor concentration (default: 180).
+    #[arg(long, value_name = "DAYS", value_parser = clap::value_parser!(u32).range(1..))]
+    recent_window_days: Option<u32>,
+
+    /// Replace the default bug-message keywords; repeat for multiple words (default: fix, bug, broken).
+    #[arg(long = "bug-keyword", value_name = "WORD", action = ArgAction::Append)]
+    bug_keywords: Vec<String>,
+
+    /// Replace the default firefighting keywords; repeat for multiple words (default: revert, hotfix, emergency, rollback).
+    #[arg(long = "firefighting-keyword", value_name = "WORD", action = ArgAction::Append)]
+    firefighting_keywords: Vec<String>,
+}
+
+impl HistoryOptions {
+    fn settings(&self) -> HistorySettings {
+        self.settings_with_fallback(&HistorySettings::default())
+    }
+
+    fn settings_with_fallback(&self, fallback: &HistorySettings) -> HistorySettings {
+        HistorySettings {
+            window_days: self.window_days.unwrap_or(fallback.window_days),
+            recent_window_days: self.recent_window_days.unwrap_or(fallback.recent_window_days),
+            bug_keywords: if self.bug_keywords.is_empty() {
+                fallback.bug_keywords.clone()
+            } else {
+                self.bug_keywords.clone()
+            },
+            firefighting_keywords: if self.firefighting_keywords.is_empty() {
+                fallback.firefighting_keywords.clone()
+            } else {
+                self.firefighting_keywords.clone()
+            },
         }
     }
 }
@@ -256,6 +348,7 @@ impl ColorEnvironment {
 #[derive(Debug)]
 pub struct CommandRequest {
     pub command: CommandDescriptor,
+    pub history: HistorySettings,
 }
 
 /// Parse and execute the command line using the process environment and standard streams.
@@ -313,7 +406,7 @@ where
         Err(error) => {
             let category = error
                 .downcast_ref::<ApplicationError>()
-                .map_or(ExitCategory::Internal, ApplicationError::category);
+                .map_or(ExitCategory::Internal, |v| v.into());
             write_diagnostic(stderr, &error, color_policy, stderr_is_terminal, color_environment);
             category
         }
@@ -322,7 +415,7 @@ where
 
 fn invoke<W: Write>(cli: Cli, stdout: &mut W) -> anyhow::Result<()> {
     let output_format = cli.output_format()?;
-    let report = Report::foundation(cli.into_request());
+    let report = Report::analyze(cli.into()).map_err(ApplicationError::History)?;
     let output = report.render(output_format).map_err(ApplicationError::Render)?;
 
     stdout
@@ -378,7 +471,8 @@ mod tests {
         };
 
         let error = options.format().expect_err("options should conflict");
-        assert_eq!(error.category(), ExitCategory::Usage);
+        let cat: ExitCategory = error.into();
+        assert_eq!(cat, ExitCategory::Usage);
     }
 
     #[test]
