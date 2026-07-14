@@ -12,18 +12,18 @@ policy, and black-box fixture-test harness.
 
 **Acceptance criteria:**
 
-- [ ] `setaryb`, `setaryb map`, and `setaryb history` parse with concise no-argument
+- [x] `setaryb`, `setaryb map`, and `setaryb history` parse with concise no-argument
       guidance and complete `--help` text.
-- [ ] `--format markdown`, `--format json`, and `--json` select a shared typed report
+- [x] `--format markdown`, `--format json`, and `--json` select a shared typed report
       renderer; JSON includes `schema_version: 1` and Markdown is generated directly
       without a Markdown parser.
-- [ ] Report stdout has no ANSI/control sequences, diagnostics use stderr, and parser/usage
+- [x] Report stdout has no ANSI/control sequences, diagnostics use stderr, and parser/usage
       errors have stable documented exit categories.
-- [ ] Color policy supports `auto`, `always`, and `never`, honors `NO_COLOR`, and does not
+- [x] Color policy supports `auto`, `always`, and `never`, honors `NO_COLOR`, and does not
       affect report stdout.
-- [ ] A black-box CLI test harness can execute fixture repositories with a temporary
+- [x] A black-box CLI test harness can execute fixture repositories with a temporary
       XDG cache location and assert parsed JSON plus Markdown snapshots.
-- [ ] The selected baseline dependencies use compatible, locked versions and no dependency
+- [x] The selected baseline dependencies use compatible, locked versions and no dependency
       beyond the approved roadmap stack is introduced.
 
 **Verification:**

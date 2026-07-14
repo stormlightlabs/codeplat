@@ -179,6 +179,8 @@ map only if the report makes that limitation explicit.
 - Rust edition 2024.
 - `clap` 4 with derive support for typed root commands, subcommands, value enums, help, and validation.
 - `serde` 1 and `serde_json` 1 for the typed report model and JSON schema.
+- `thiserror` 2 for typed internal errors, and `anyhow` 1 only at the top-level invocation
+  boundary for contextual error propagation.
 - `owo-colors` 4 with its stream/capability support enabled for interactive stderr presentation.
 - `gix` 0.85 with only the discovery, revision/object traversal, worktree-status, and trust-safe features
   required by the final implementation.

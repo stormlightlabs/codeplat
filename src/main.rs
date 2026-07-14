@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    std::process::exit(setaryb::run());
 }
