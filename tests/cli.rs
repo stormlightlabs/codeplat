@@ -19,24 +19,6 @@ struct FixtureRepository {
     temporary_root: PathBuf,
 }
 
-struct HistoryFixtureRepository {
-    root: PathBuf,
-    cache: PathBuf,
-    temporary_root: PathBuf,
-}
-
-struct MapFixtureRepository {
-    root: PathBuf,
-    cache: PathBuf,
-    temporary_root: PathBuf,
-}
-
-struct MixedMapFixtureRepository {
-    root: PathBuf,
-    cache: PathBuf,
-    temporary_root: PathBuf,
-}
-
 impl FixtureRepository {
     fn new() -> Self {
         let suffix = format!(
@@ -79,6 +61,12 @@ impl Drop for FixtureRepository {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.temporary_root);
     }
+}
+
+struct HistoryFixtureRepository {
+    root: PathBuf,
+    cache: PathBuf,
+    temporary_root: PathBuf,
 }
 
 impl HistoryFixtureRepository {
@@ -277,10 +265,22 @@ impl MapFixtureRepository {
     }
 }
 
+struct MapFixtureRepository {
+    root: PathBuf,
+    cache: PathBuf,
+    temporary_root: PathBuf,
+}
+
 impl Drop for MapFixtureRepository {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.temporary_root);
     }
+}
+
+struct MixedMapFixtureRepository {
+    root: PathBuf,
+    cache: PathBuf,
+    temporary_root: PathBuf,
 }
 
 impl MixedMapFixtureRepository {
@@ -367,6 +367,88 @@ impl MixedMapFixtureRepository {
 }
 
 impl Drop for MixedMapFixtureRepository {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.temporary_root);
+    }
+}
+
+struct JavaCSharpMapFixtureRepository {
+    root: PathBuf,
+    cache: PathBuf,
+    temporary_root: PathBuf,
+}
+
+impl JavaCSharpMapFixtureRepository {
+    fn new() -> Self {
+        let suffix = format!(
+            "setaryb-java-csharp-map-{}-{}",
+            std::process::id(),
+            FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let temporary_root = env::temp_dir().join(suffix);
+        let root = temporary_root.join("repository");
+        let cache = temporary_root.join("xdg-cache");
+        fs::create_dir_all(root.join("src")).expect("create Java and C# map fixture source scope");
+        fs::create_dir_all(&cache).expect("create Java and C# map fixture cache");
+
+        let tracked_files = [
+            (".gitignore", "src/ignored.java\n"),
+            ("README.md", "Java and C# source map fixture\n"),
+            ("src/lib.rs", "pub fn parse() {}\n"),
+            (
+                "src/service.java",
+                "package example;\nimport java.util.List;\n\npublic class Service extends BaseService {\n    private class Hidden {}\n\n    public Result run(Input input) {\n        return new Result(input.value());\n    }\n}\n\ninterface Runner {}\n",
+            ),
+            (
+                "src/consumer.java",
+                "package consumer;\n\nclass Consumer {\n    Service make() {\n        return new Service();\n    }\n}\n",
+            ),
+            (
+                "src/service.cs",
+                "using System;\n\nnamespace Example.App {\n    public class Service : BaseService, IRunner {\n        private class Hidden {}\n        private Helper helper;\n\n        public Result Run(Input input) {\n            helper.Execute(input);\n            return new Result();\n        }\n    }\n\n    public struct Value {}\n    public interface IRunner {}\n}\n",
+            ),
+            ("src/broken.cs", "namespace Broken {\n    public class Broken( {\n"),
+        ];
+        let repository = gix::init(&root).expect("initialize Java and C# map fixture repository");
+        let tree = write_tree(&repository, &tracked_files);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is after the Unix epoch")
+            .as_secs() as i64;
+        let commit = write_commit(
+            &repository,
+            tree,
+            &[],
+            "JVM and CLR Fixture",
+            "languages@example.com",
+            now,
+            "Initial Java and C# source map fixture",
+        );
+        drop(repository);
+
+        write_file(root.join(".git/HEAD"), b"ref: refs/heads/main\n");
+        write_file(root.join(".git/refs/heads/main"), format!("{commit}\n").as_bytes());
+        for (path, contents) in tracked_files {
+            write_file(root.join(path), contents.as_bytes());
+        }
+        write_file(root.join("src/untracked.java"), b"package fresh; class Fresh {}\n");
+        write_file(root.join("src/ignored.java"), b"package ignored; class Ignored {}\n");
+        gix::open(&root).expect("open Java and C# map fixture repository");
+
+        Self { root, cache, temporary_root }
+    }
+
+    fn run(&self, arguments: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
+        command
+            .args(arguments)
+            .current_dir(&self.root)
+            .env("XDG_CACHE_HOME", &self.cache);
+        command.output().expect("run Java and C# map fixture command")
+    }
+}
+
+impl Drop for JavaCSharpMapFixtureRepository {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.temporary_root);
     }
@@ -1126,6 +1208,162 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     assert!(markdown_stdout.contains("src/broken.rb"));
     assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Ruby file"));
     assert!(markdown_stdout.contains("query-pack provenance"));
+    assert_plain_report(&markdown_stdout);
+}
+
+#[test]
+fn java_and_c_sharp_map_is_first_class_and_preserves_visibility_duplicates_and_limitations() {
+    let fixture = JavaCSharpMapFixtureRepository::new();
+    let first = fixture.run(&["map", "--no-cache", "--json"]);
+    let second = fixture.run(&["map", "--no-cache", "--json"]);
+    let first_stdout = stdout(&first);
+    let second_stdout = stdout(&second);
+    let json: Value = serde_json::from_str(&first_stdout).expect("valid Java and C# map JSON");
+
+    assert!(
+        first.status.success(),
+        "map failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "repeated map failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(first.stderr.is_empty());
+    assert!(second.stderr.is_empty());
+    assert_plain_report(&first_stdout);
+    assert_eq!(
+        first_stdout, second_stdout,
+        "Java and C# map ordering must be deterministic"
+    );
+    assert_eq!(json["map"]["query_pack"], "mixed");
+    assert_eq!(json["map"]["query_packs"]["java"], "java-v1");
+    assert_eq!(json["map"]["query_packs"]["c_sharp"], "c-sharp-v1");
+
+    let files = json["map"]["files"].as_array().expect("Java and C# map files");
+    for (path, language, extension) in [
+        ("src/service.java", "java", "java"),
+        ("src/consumer.java", "java", "java"),
+        ("src/service.cs", "c_sharp", "cs"),
+    ] {
+        let file = files
+            .iter()
+            .find(|file| file["path"] == path)
+            .expect("first-class language fixture file");
+        assert_eq!(file["language"], language);
+        assert_eq!(file["extension"], extension);
+        assert_eq!(file["status"], "complete");
+        assert!(!file["symbols"].as_array().expect("symbols").is_empty());
+    }
+    let untracked = files
+        .iter()
+        .find(|file| file["path"] == "src/untracked.java")
+        .expect("untracked Java file");
+    assert_eq!(untracked["worktree_state"], "untracked");
+
+    let java = files
+        .iter()
+        .find(|file| file["path"] == "src/service.java")
+        .expect("Java file");
+    assert!(
+        java["symbols"].as_array().expect("Java symbols").iter().any(|symbol| {
+            symbol["name"] == "example" && symbol["kind"] == "module" && symbol["role"] == "definition"
+        })
+    );
+    assert!(
+        java["symbols"].as_array().expect("Java symbols").iter().any(|symbol| {
+            symbol["name"] == "Service" && symbol["kind"] == "class" && symbol["role"] == "definition"
+        })
+    );
+    assert!(
+        java["symbols"].as_array().expect("Java symbols").iter().any(|symbol| {
+            symbol["name"] == "Hidden" && symbol["kind"] == "class" && symbol["role"] == "definition"
+        })
+    );
+    assert!(java["symbols"].as_array().expect("Java symbols").iter().any(|symbol| {
+        symbol["name"] == "run"
+            && symbol["kind"] == "method"
+            && symbol["role"] == "definition"
+            && symbol["location"]["start"]["line"].as_u64().unwrap_or(0) > 0
+            && symbol["context"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("public Result run")
+    }));
+    assert!(
+        java["symbols"]
+            .as_array()
+            .expect("Java symbols")
+            .iter()
+            .any(|symbol| { symbol["name"] == "Input" && symbol["kind"] == "type" && symbol["role"] == "reference" })
+    );
+
+    let c_sharp = files
+        .iter()
+        .find(|file| file["path"] == "src/service.cs")
+        .expect("C# file");
+    assert!(c_sharp["symbols"].as_array().expect("C# symbols").iter().any(|symbol| {
+        symbol["name"] == "Example.App" && symbol["kind"] == "module" && symbol["role"] == "definition"
+    }));
+    assert!(
+        c_sharp["symbols"].as_array().expect("C# symbols").iter().any(|symbol| {
+            symbol["name"] == "Service" && symbol["kind"] == "class" && symbol["role"] == "definition"
+        })
+    );
+    assert!(
+        c_sharp["symbols"].as_array().expect("C# symbols").iter().any(|symbol| {
+            symbol["name"] == "Value" && symbol["kind"] == "struct" && symbol["role"] == "definition"
+        })
+    );
+    assert!(
+        c_sharp["symbols"].as_array().expect("C# symbols").iter().any(|symbol| {
+            symbol["name"] == "Hidden" && symbol["kind"] == "class" && symbol["role"] == "definition"
+        })
+    );
+    assert!(
+        c_sharp["symbols"].as_array().expect("C# symbols").iter().any(|symbol| {
+            symbol["name"] == "Execute" && symbol["kind"] == "method" && symbol["role"] == "reference"
+        })
+    );
+
+    let broken = files
+        .iter()
+        .find(|file| file["path"] == "src/broken.cs")
+        .expect("malformed C# file");
+    assert_eq!(broken["status"], "partial");
+    assert!(!broken["limitations"].as_array().expect("C# limitations").is_empty());
+
+    let omissions = json["map"]["omissions"].as_array().expect("map omissions");
+    assert!(
+        omissions
+            .iter()
+            .any(|omission| { omission["path"] == "src/ignored.java" && omission["reason"] == "ignored_untracked" })
+    );
+    assert!(
+        omissions
+            .iter()
+            .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "unsupported_language" })
+    );
+    assert!(
+        json["map"]["findings"]
+            .as_array()
+            .expect("map findings")
+            .iter()
+            .any(|finding| {
+                finding["kind"] == "ambiguous_reference"
+                    && finding["detail"].as_str().unwrap_or_default().contains("Service")
+            })
+    );
+
+    let markdown = fixture.run(&["map"]);
+    let markdown_stdout = stdout(&markdown);
+    assert!(markdown.status.success());
+    assert!(markdown.stderr.is_empty());
+    assert!(markdown_stdout.contains("Java files"));
+    assert!(markdown_stdout.contains("C# files"));
+    assert!(markdown_stdout.contains("src/broken.cs"));
+    assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this C# file"));
     assert_plain_report(&markdown_stdout);
 }
 

@@ -1,6 +1,7 @@
 ---
 title: "Setaryb: repository navigation CLI"
-status: "ready"
+status: "in-progress"
+updated: "2026-07-14"
 ---
 
 ## Objective
@@ -42,14 +43,46 @@ larger report.
   directory and is optional via `--no-cache`.
 - Black-box CLI fixture tests cover the output contract and pass for supported languages, cache
   modes, worktree states, ignores, and error cases.
+- Hostile or malformed repository paths cannot escape the selected scope, and repository-controlled
+  hooks, filters, commands, credentials, or network transports cannot execute during analysis.
+- Default compact reports bound all data-dependent output, not only selected snippets. Every limit
+  reports totals, returned counts, and truncation or omission reasons.
+- Reports identify the analyzed revision, tool and query-pack versions, capture time, worktree state,
+  cache freshness, and history completeness so two runs can be compared responsibly.
 
 ## Current State
 
-- The repository contains a Rust 2024 binary crate named `setaryb` with no dependencies and a
-  `Hello, world!` entry point.
-- `ROADMAP.md`, `TODO.md`, and the top-level README were initially empty.
+- The Rust 2024 binary implements the focused `map` and `history` commands, both renderers,
+  all five history diagnostics, cache modes, graph ranking, and Tree-sitter query packs for all
+  seven first-class language families.
+- Feature implementations for Tickets 1 through 7 exist, and the local formatting, test, Clippy,
+  documentation, and release-build checks pass. The suite currently contains 35 tests; audit-reopened
+  acceptance boxes remain unchecked in `TODO.md`.
+- The default `setaryb [PATH]` command is still a successful foundation placeholder rather than the
+  promised integrated briefing, so Ticket 8 remains incomplete.
+- The **2026-07-14** audit found release-blocking trust-boundary, cache-validity,
+  bounded-output, resource-limit, history-scope, and report-provenance gaps. Tickets 9 through 14
+  define the stabilization work; they supersede checked acceptance criteria where the audit produced
+  contradictory evidence.
 - [Research notes](notes/README.md) capture the source material, Rust library boundaries, and
   the limits of Git-history and Tree-sitter-derived evidence.
+
+## Baseline
+
+The baseline is intentionally measured against Setaryb itself, not only tiny fixtures:
+
+- `cargo fmt --check`, `cargo test --all-features`, `cargo clippy --all-targets --all-features
+-- -D warnings`, and `cargo doc --no-deps` pass.
+- The release binary is approximately 20 MiB while `gix` still uses its broad default feature set.
+- `setaryb map --no-cache --json` emits 7,332,198 bytes for eight analyzed files. The same map emits
+  423,230 bytes of Markdown with `--map-tokens 1000` and 417,506 bytes with `--map-tokens 100`.
+  This proves the current token budget does not bound the report.
+- The current self-map contains 11,630 symbols, 2,212 ambiguity findings, and 795 lexical edges;
+  repeated bare identifiers dominate useful architectural relationships.
+
+These numbers are regression baselines, not acceptable targets. A release candidate must replace
+them with explicit compact-output and latency ceilings measured on small, monorepo, deep-history,
+malformed-tree, and ignored-vendor fixtures.
 
 ## Product Contract
 
@@ -62,6 +95,10 @@ setaryb [OPTIONS] [PATH]
 setaryb map [OPTIONS] [PATH]
 setaryb history [OPTIONS] [PATH]
 setaryb history <churn|contributors|bugs|activity|firefighting> [OPTIONS] [PATH]
+setaryb explain [OPTIONS] <PATH-OR-SYMBOL> [PATH]
+setaryb cache <path|status|prune|clear>
+setaryb capabilities [--json]
+setaryb doctor [OPTIONS] [PATH]
 ```
 
 - The default command is the integrated briefing. It does not hide a catch-all subcommand.
@@ -75,6 +112,10 @@ setaryb history <churn|contributors|bugs|activity|firefighting> [OPTIONS] [PATH]
   They are the only task-personalization inputs.
 - `--map-tokens <n>` controls the maximum token budget for the compact source map; the initial
   default is 1,000 tokens.
+- `--profile <compact|evidence>` defaults to bounded `compact`; exhaustive evidence is explicit and
+  remains paginated or otherwise bounded.
+- `--strict` applies the documented machine policy for stale, truncated, incomplete, unsupported, or
+  partial results.
 - `--exclude <glob>` may be repeated to narrow a caller's analysis intentionally.
   Output records all supplied exclusions.
 - `--no-cache` disables reading and writing analysis cache data. Cache refresh modes
@@ -122,6 +163,18 @@ Implement all five diagnostics using `gix` repository and revision APIs, never t
 
 The common time-window and keyword defaults must be visible in output and overridable with explicit flags.
 The report treats overlap as a prioritization signal, never a quality score or a judgment about contributors.
+Every focused operation obeys the selected path scope, including activity and envelope counts. If a future
+signal is intentionally repository-wide, its section carries an explicit `scope_kind` rather than inheriting
+the selected path label.
+
+Contributor identities are canonicalized through `.mailmap` by default while preserving provenance about
+the raw identities that were combined. Compact output does not expose email addresses unless the caller
+requests them. Keyword evidence records the exact matched term and defaults to word-aware matching so
+`fixture`, `prefix`, and `debug` do not become false `fix`/`bug` evidence.
+
+After correctness is established, history can add size-normalized churn, rename-aware path continuity, and
+declared ownership from `CODEOWNERS`. Each remains a separate evidence field beside absolute churn and raw
+commit identity; no normalization silently replaces the article-derived baseline.
 
 ### Repository map
 
@@ -142,6 +195,15 @@ The report treats overlap as a prioritization signal, never a quality score or a
 
 Map output must give callers enough global API awareness to select the next full file to read,
 while stating that it cannot replace source retrieval, type checking, import resolution, or runtime analysis.
+
+The graph must prefer evidence over fan-out. Candidate matching is constrained by language, import/module
+context, and scope where the syntax supplies that information; same-file and cross-language bare-name
+matches do not affect centrality by default. Every retained edge includes its resolution reason and confidence
+tier. Candidate groups and repeated ambiguity diagnostics are deduplicated and capped before ranking.
+
+Each language has a conformance corpus containing positive and negative tags, imports/aliases, overloads,
+visibility, nesting, malformed input, and conventional extensionless entry files where applicable. Quality is
+tracked with stable precision-oriented fixtures, not inferred from parser success alone.
 
 ### First-class language support
 
@@ -171,6 +233,98 @@ map only if the report makes that limitation explicit.
 - `auto` validates and refreshes stale records; `always` reparses eligible inputs; `files`
   refreshes only caller-named changed paths; `manual` uses only available cache records and labels potentially stale output.
   `--no-cache` performs no cache I/O.
+- Cache writes are atomic and safe under concurrent readers. User-private permissions, bounded
+  per-repository retention, and explicit `cache path`, `cache status`, `cache prune`, and `cache clear`
+  operations make source-derived retention observable and controllable.
+- Cache roots that resolve inside the analyzed repository are rejected. Parsed-file identity is
+  independent of report scope, uses a reviewed collision-resistant content digest, and incorporates
+  the exact grammar and query-pack content that produced the record.
+
+## V1 Trustworthiness Release Gates
+
+These are correctness requirements, not optional polish.
+
+### Hostile-repository containment
+
+- Treat tree, index, status, and walk paths as untrusted byte strings. Accept only non-empty relative
+  paths made of normal components; reject absolute paths, `.` and `..`, platform separator tricks,
+  NULs, and lossy-decoding collisions before joining a worktree path.
+- Do not follow a symlink or reparse point in any path component. Reads must remain beneath both the
+  repository root and selected scope even if the worktree changes between inventory and open.
+- Open `gix` repositories with an explicit hostile-input policy. Analysis must not execute hooks,
+  clean/smudge/process filters, credential helpers, editors, pagers, shell commands, or network
+  transports, including for a same-owner repository that Gitoxide would otherwise fully trust.
+- Malicious-tree, intermediate-symlink, race, filter-sentinel, non-UTF-8, and Windows path fixtures
+  are release tests. A rejected path becomes a typed safety diagnostic and is never read or cached.
+
+### Cache validity
+
+- Cache mode behavior is a tested state machine. In `auto`, a content-fingerprint miss parses the
+  current bytes and reports a refresh; in `manual`, it may use the newest available record only while
+  visibly marking it stale; in `files`, only normalized, exactly matched caller paths are refreshed.
+- Unmatched `--cache-file` arguments and cache-unavailable files are reported explicitly. A file with
+  no usable parsed record is not counted as analyzed.
+
+### Bounded work and bounded reports
+
+- The default profile is compact. It emits selected structural evidence plus bounded summaries;
+  exhaustive symbols, edges, findings, and commit evidence require an explicit evidence profile or
+  pagination. Repeated ambiguity is grouped, not repeated per identifier occurrence.
+- `--map-tokens` accounts for every data-dependent field in the compact map. The fixed envelope is
+  documented and bounded, and the estimated-token total never exceeds the requested budget.
+- Traversal prunes `.git`, ignored dependency/build/vendor directories, and nested repositories before
+  descent. Hidden files are not treated as ignored merely because their names begin with a dot.
+- File bytes, files, syntax depth, symbols, edge candidates, findings, commits, history evidence,
+  elapsed work, and emitted output all have measured limits. Hitting a limit returns a useful partial
+  report with `total`, `returned`, `truncated`, and reason metadata rather than hanging, exhausting
+  memory, overflowing the stack, or silently dropping evidence.
+- Focused history operations stream only the fields and diffs they require. A contributor or activity
+  request must not recursively diff every reachable commit tree when paths are unnecessary.
+- Potentially long scans provide concise progress on interactive stderr only, never report stdout, and
+  honor interruption promptly without leaving a partial cache record. Non-interactive runs stay quiet.
+
+### Reproducible and enforceable reports
+
+- Every JSON report includes the Setaryb version, effective command/options, repository identity,
+  resolved HEAD reference and object ID, capture/reference time, worktree snapshot state, grammar and
+  query-pack versions, cache status, observed history range, and shallow/partial-history status.
+- A committed JSON Schema and golden compatibility corpus define schema version 1. Schema changes are
+  checked in CI; a numeric `schema_version` field alone is not a compatibility contract.
+- Byte-native repository paths remain distinct internally. JSON uses one documented reversible
+  representation; Markdown visibly escapes paths that cannot be represented as ordinary UTF-8.
+- A strict policy lets automation reject stale, truncated, incomplete, unsupported, or partial reports
+  through documented exit categories without scraping prose. Default mode still returns useful partial
+  evidence and typed limitations.
+
+## High-Value Navigation Extensions
+
+Explainability and capability inspection complete the v1 trust contract. Landmarks and comparison follow
+the v1 release. All are deliberately narrow additions to repository orientation, not a move toward an
+editor, code generator, or semantic compiler.
+
+### Repository landmarks
+
+Add a bounded landmarks section to the integrated briefing. It identifies files a human or agent commonly
+needs before source traversal: README and contributor instructions, `AGENTS.md`, manifests and lockfiles,
+workspace/package roots, build and task entry points, test roots, CI configuration, ownership files, licenses,
+submodules, and nested repositories. Each landmark includes a detection reason; unknown files are not guessed.
+Monorepos are grouped by detected project root so the briefing exposes topology before symbol detail.
+
+### Explainable recommendations
+
+Add `setaryb explain <PATH-OR-SYMBOL>` in Markdown and JSON. It decomposes a recommendation into bounded,
+typed evidence: focus matches, history overlap, graph edges, landmark role, ranking contributions, ambiguity,
+and omitted alternatives. This is an explanation of Setaryb's heuristic, not a claim about program semantics.
+
+Add `setaryb capabilities --json` and `setaryb doctor` so automation and people can inspect supported
+languages, query-pack versions, schema versions, cache location/health, active safety policy, and resource
+limits without analyzing a repository.
+
+### Revision comparison
+
+Add `setaryb compare --base <REV> [--head <REV|worktree>] [PATH]` after report provenance is stable. It reports
+bounded changes to landmarks, public definitions, dependency evidence, hotspots, ownership concentration, and
+recommended next reads. Comparison uses the same uncertainty labels and does not ingest Markdown as data.
 
 ## Technical Plan
 
@@ -183,7 +337,9 @@ map only if the report makes that limitation explicit.
   boundary for contextual error propagation.
 - `owo-colors` 4 with its stream/capability support enabled for interactive stderr presentation.
 - `gix` 0.85 with only the discovery, revision/object traversal, worktree-status, and trust-safe features
-  required by the final implementation.
+  required by the final implementation. Disable default features and review the resulting feature tree;
+  command, credential, transport, archive, worktree-mutation, and external-filter capabilities are not
+  accepted merely because Setaryb does not intentionally call them.
 - `tree-sitter` 0.26 and mutually compatible official/upstream grammar crates for each first-class language.
   Grammar versions are pinned in `Cargo.lock` and upgraded only with query/fixture validation.
 - `ignore` 0.4 for path traversal and explicit Git-style ignore matching.
@@ -203,9 +359,15 @@ Keep these layers independent:
 7. **Cache:** stores typed analysis intermediates, not presentation strings.
 8. **Renderers:** produce schema-versioned JSON or stable-in-spirit Markdown from one report model.
 
+Before adding more languages, split the current catch-all map and report modules along these existing
+responsibilities: inventory/path safety, language/query registry, graph/ranking, selection/budgets, cache,
+report schema, and renderers. This is a behavior-preserving maintainability step, not a new abstraction layer;
+each extracted module needs a narrow typed boundary and the current black-box tests must remain authoritative.
+
 ### Trust, privacy, and read-only behavior
 
-- Use gix's repository trust model; do not enable behavior that executes repository-controlled programs.
+- Apply gix's repository trust model plus Setaryb's stricter hostile-input policy; same ownership does not
+  authorize repository-controlled programs or paths outside the selected scope.
 - Do not follow a path outside the requested repository scope through a symlink during worktree enumeration.
 - Do not contact remotes, read chat/editor state, collect analytics, prompt for credentials, or mutate Git,
   the worktree, or project configuration.
@@ -233,6 +395,12 @@ an implementation is not accepted based on unit tests alone.
   XDG cache directory.
 - Stream fixtures proving JSON and Markdown stdout contain no ANSI escapes, while interactive stderr
   color policy remains independently testable.
+- Hostile-input fixtures with `..` tree entries, non-UTF-8 names, intermediate symlinks/reparse points,
+  race attempts, nested repositories, and configured external Git filters whose sentinel must never run.
+- Scale fixtures with large ignored trees, oversized and deeply nested syntax files, high symbol ambiguity,
+  and 10,000-plus commits. Tests assert bounded output, work, memory-sensitive counts, and typed truncation.
+- Compatibility fixtures validated against the committed JSON Schema, including older schema-version-1
+  examples that must continue to deserialize with the same meaning.
 
 ### Required checks
 
@@ -240,6 +408,8 @@ an implementation is not accepted based on unit tests alone.
 cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
+cargo doc --no-deps
+cargo package
 ```
 
 Each implementation ticket adds the narrowest relevant black-box case. JSON tests compare parsed semantic values and schema version;
@@ -271,18 +441,24 @@ Keep language query files and test fixtures as first-class, versioned assets rat
 
 ## Implementation Milestones
 
-1. **Foundation:** establish typed CLI requests/results, schema versioning, JSON/Markdown renderers,
+1. **Foundation (implemented):** establish typed CLI requests/results, schema versioning, JSON/Markdown renderers,
    stream/error behavior, fixtures, and command-level test harness.
-2. **History orientation:** deliver the complete five-signal Git history briefing through the
+2. **History orientation (implemented, fixes pending):** deliver the complete five-signal Git history briefing through the
    default command and focused history commands.
-3. **Source-map core:** inventory current worktree state and produce a Rust structural map with
+3. **Source-map core (implemented, fixes pending):** inventory current worktree state and produce a Rust structural map with
    locations, snippets, support diagnostics, and explicit limitations.
-4. **First-class language coverage:** add and validate JavaScript, TypeScript, Python, Ruby, Java, and
+4. **First-class language coverage (implemented, conformance expansion pending):** add and validate JavaScript, TypeScript, Python, Ruby, Java, and
    C# grammars and query packs.
-5. **Relevant compact maps:** add lexical graph construction, deterministic rank/focus scoring,
+5. **Relevant compact maps (implemented mechanically, quality gate failed):** add lexical graph construction, deterministic rank/focus scoring,
    token-budget selection, cache modes, and cache observability.
-6. **V1 hardening:** complete help and documentation, output/exit-code compatibility tests,
-   performance and failure-mode checks, and release-quality verification.
+6. **Integrated briefing:** replace the successful foundation placeholder with the shared history, map,
+   limitations, provenance, and next-read report.
+7. **Trust and resource hardening:** close hostile-path/filter execution, stale cache, scope, bounded-work,
+   bounded-output, graph-signal, and machine-contract tickets with fixtures.
+8. **Distributable v1:** complete help and documentation, cross-platform output/exit compatibility,
+   minimal dependency features, package metadata/licensing, CI, performance gates, and release artifacts.
+9. **Navigation depth:** add landmarks and explainability, followed by revision comparison; evaluate each
+   addition against compact-output and simplicity budgets before starting the next.
 
 ## Deferred Milestones
 
@@ -313,8 +489,14 @@ uncertainty labels and must not turn the tool into a source editor or remote ser
 - Symbol-name matching creates ambiguous lexical edges, especially in object-oriented and dynamically typed languages.
   The map must expose candidates and limitations instead of false precision.
 - Large repositories can make history walks, source reading, and graph ranking expensive.
-  Cache correctness, bounded output, deterministic ordering, and progress/error behavior
-  need measurement against realistic fixtures before release.
+  Cache correctness, operation-aware streaming, bounded output and evidence, deterministic ordering,
+  and partial-result behavior require measured ceilings before release.
+- A same-owner repository is still untrusted input. Gitoxide's trust classification alone does not prove
+  that status, filters, configuration, or worktree access cannot execute repository-controlled programs.
+- Git tree and index paths are byte strings, not trusted platform paths. Lossy conversion or unchecked joins
+  can collapse identities or escape the repository even when a normal checkout would reject the tree.
+- A token-budgeted snippet selection is not a compact report if symbols, edges, omissions, and diagnostics
+  remain unbounded around it. Budget enforcement must be measured at the rendered contract boundary.
 - Commit-message-based diagnostics are only as good as repository conventions.
   Empty or noisy results require caveats, not reinterpretation.
 - Persistent user-local cache can contain source-derived metadata.
@@ -336,7 +518,7 @@ uncertainty labels and must not turn the tool into a source editor or remote ser
 | Scope                 | Never silently omit tracked paths; explicit caller exclusions; use `ignore` for traversal policy. |
 | Worktree              | Include untracked non-ignored source in maps and label it; history is committed-data-only.        |
 | Relevance             | Explicit `--focus` and `--focus-path` only; no session or prompt inspection.                      |
-| JSON                  | Public, versioned schema from v1.                                                                 |
+| JSON                  | Public, versioned schema from v1, backed by a normative JSON Schema and compatibility corpus.     |
 | Color                 | No color on report stdout; stream-aware Owo styling only on interactive stderr.                   |
 | Verification          | Black-box CLI fixture tests are the primary acceptance boundary.                                  |
 

@@ -1,0 +1,5 @@
+(object_creation_expression type: (identifier) @reference.type)
+(variable_declaration type: (identifier) @reference.type)
+(base_list (_) @reference.type)
+(invocation_expression function: (member_access_expression name: (identifier) @reference.method))
+(invocation_expression function: (identifier) @reference.method)

@@ -112,6 +112,53 @@ const RUBY_DECLARATION_KINDS: &[&str] = &["method", "singleton_method", "class",
 
 const RUBY_SCOPE_KINDS: &[&str] = &["method", "singleton_method", "class", "module"];
 
+const JAVA_DECLARATION_KINDS: &[&str] = &[
+    "package_declaration",
+    "import_declaration",
+    "class_declaration",
+    "record_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    "annotation_type_declaration",
+    "method_declaration",
+    "field_declaration",
+];
+
+const JAVA_SCOPE_KINDS: &[&str] = &[
+    "package_declaration",
+    "class_declaration",
+    "record_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    "annotation_type_declaration",
+    "method_declaration",
+];
+
+const C_SHARP_DECLARATION_KINDS: &[&str] = &[
+    "namespace_declaration",
+    "file_scoped_namespace_declaration",
+    "class_declaration",
+    "struct_declaration",
+    "enum_declaration",
+    "interface_declaration",
+    "record_declaration",
+    "method_declaration",
+    "property_declaration",
+    "field_declaration",
+];
+
+const C_SHARP_SCOPE_KINDS: &[&str] = &[
+    "namespace_declaration",
+    "file_scoped_namespace_declaration",
+    "class_declaration",
+    "struct_declaration",
+    "enum_declaration",
+    "interface_declaration",
+    "record_declaration",
+    "method_declaration",
+    "property_declaration",
+];
+
 #[derive(Clone, Copy, Debug)]
 struct LanguageSupport {
     language: SourceLanguage,
@@ -201,6 +248,28 @@ const RUBY_SUPPORT: LanguageSupport = LanguageSupport {
     scope_kinds: RUBY_SCOPE_KINDS,
 };
 
+const JAVA_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::Java,
+    extensions: &["java"],
+    query_pack: "java-v1",
+    grammar: java_language,
+    definitions: include_str!("queries/java/definitions.scm"),
+    references: include_str!("queries/java/references.scm"),
+    declaration_kinds: JAVA_DECLARATION_KINDS,
+    scope_kinds: JAVA_SCOPE_KINDS,
+};
+
+const C_SHARP_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::CSharp,
+    extensions: &["cs"],
+    query_pack: "c-sharp-v1",
+    grammar: c_sharp_language,
+    definitions: include_str!("queries/c_sharp/definitions.scm"),
+    references: include_str!("queries/c_sharp/references.scm"),
+    declaration_kinds: C_SHARP_DECLARATION_KINDS,
+    scope_kinds: C_SHARP_SCOPE_KINDS,
+};
+
 const LANGUAGE_SUPPORT: &[LanguageSupport] = &[
     RUST_SUPPORT,
     JAVASCRIPT_SUPPORT,
@@ -209,6 +278,8 @@ const LANGUAGE_SUPPORT: &[LanguageSupport] = &[
     TYPESCRIPT_TSX_SUPPORT,
     PYTHON_SUPPORT,
     RUBY_SUPPORT,
+    JAVA_SUPPORT,
+    C_SHARP_SUPPORT,
 ];
 
 type Result<T> = std::result::Result<T, MapError>;
@@ -689,7 +760,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 .to_owned(),
             "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
                 .to_owned(),
-            "JavaScript/JSX, TypeScript/TSX, Python, and Ruby use explicit grammar variants; query-pack provenance is reported per language."
+            "JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, and C# use explicit grammar variants; query-pack provenance is reported per language."
                 .to_owned(),
             "Tracked files are eligible even when ignore rules match them; ignored untracked files are omitted and recorded."
                 .to_owned(),
@@ -1595,6 +1666,14 @@ fn tsx_language() -> tree_sitter::Language {
     tree_sitter_typescript::LANGUAGE_TSX.into()
 }
 
+fn java_language() -> tree_sitter::Language {
+    tree_sitter_java::LANGUAGE.into()
+}
+
+fn c_sharp_language() -> tree_sitter::Language {
+    tree_sitter_c_sharp::LANGUAGE.into()
+}
+
 fn support_for_path(path: &Path) -> Option<&'static LanguageSupport> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     LANGUAGE_SUPPORT
@@ -1824,6 +1903,112 @@ end
     }
 
     #[test]
+    fn java_and_c_sharp_query_packs_extract_types_scopes_and_references() {
+        let java = br#"
+package com.example;
+import java.util.List;
+
+public class Service extends BaseService implements Runner {
+    private class Hidden {}
+
+    public Result run(Input input) {
+        return new Result(helper(input));
+    }
+
+    private Result helper(Input input) {
+        return input.result();
+    }
+}
+
+interface Runner {}
+"#;
+        let c_sharp = br#"
+using System;
+
+namespace Example.App {
+    public class Service : BaseService, IRunner {
+        private class Hidden {}
+        private Helper helper;
+
+        public Result Run(Input input) {
+            helper.Execute(input);
+            return new Result();
+        }
+    }
+
+    public struct Value {}
+    public interface IRunner {}
+}
+"#;
+
+        let parsed_java = parse_source(java, &JAVA_SUPPORT);
+        let parsed_c_sharp = parse_source(c_sharp, &C_SHARP_SUPPORT);
+        assert_eq!(parsed_java.status, FileAnalysisStatus::Complete, "{parsed_java:?}");
+        assert_eq!(
+            parsed_c_sharp.status,
+            FileAnalysisStatus::Complete,
+            "{parsed_c_sharp:?}"
+        );
+        assert!(parsed_java.findings.is_empty(), "{parsed_java:?}");
+        assert!(parsed_c_sharp.findings.is_empty(), "{parsed_c_sharp:?}");
+
+        assert!(parsed_java.symbols.iter().any(|symbol| {
+            symbol.name == "com.example" && symbol.kind == SymbolKind::Module && symbol.role == SymbolRole::Definition
+        }));
+        assert!(parsed_java.symbols.iter().any(|symbol| {
+            symbol.name == "Service" && symbol.kind == SymbolKind::Class && symbol.role == SymbolRole::Definition
+        }));
+        assert!(parsed_java.symbols.iter().any(|symbol| {
+            symbol.name == "Hidden" && symbol.kind == SymbolKind::Class && symbol.role == SymbolRole::Definition
+        }));
+        let java_run = parsed_java
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "run" && symbol.role == SymbolRole::Definition)
+            .expect("Java method definition");
+        assert_eq!(java_run.scope, vec!["Service"]);
+        assert!(java_run.context.starts_with("public Result run(Input input)"));
+        assert!(
+            parsed_java
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "Input" && symbol.role == SymbolRole::Reference)
+        );
+        assert!(parsed_java.symbols.iter().any(|symbol| symbol.name == "helper"
+            && symbol.kind == SymbolKind::Method
+            && symbol.role == SymbolRole::Reference));
+
+        assert!(parsed_c_sharp.symbols.iter().any(|symbol| {
+            symbol.name == "Example.App" && symbol.kind == SymbolKind::Module && symbol.role == SymbolRole::Definition
+        }));
+        assert!(parsed_c_sharp.symbols.iter().any(|symbol| {
+            symbol.name == "Service" && symbol.kind == SymbolKind::Class && symbol.role == SymbolRole::Definition
+        }));
+        assert!(parsed_c_sharp.symbols.iter().any(|symbol| {
+            symbol.name == "Value" && symbol.kind == SymbolKind::Struct && symbol.role == SymbolRole::Definition
+        }));
+        assert!(parsed_c_sharp.symbols.iter().any(|symbol| {
+            symbol.name == "Hidden" && symbol.kind == SymbolKind::Class && symbol.role == SymbolRole::Definition
+        }));
+        let c_sharp_run = parsed_c_sharp
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "Run" && symbol.role == SymbolRole::Definition)
+            .expect("C# method definition");
+        assert_eq!(c_sharp_run.scope, vec!["Example.App", "Service"]);
+        assert!(c_sharp_run.context.starts_with("public Result Run(Input input)"));
+        assert!(
+            parsed_c_sharp
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "Helper" && symbol.role == SymbolRole::Reference)
+        );
+        assert!(parsed_c_sharp.symbols.iter().any(|symbol| symbol.name == "Execute"
+            && symbol.kind == SymbolKind::Method
+            && symbol.role == SymbolRole::Reference));
+    }
+
+    #[test]
     fn javascript_typescript_and_jsx_extensions_select_explicit_language_variants() {
         assert_eq!(
             support_for_path(Path::new("module.js")).unwrap().language,
@@ -1856,6 +2041,14 @@ end
         assert_eq!(
             support_for_path(Path::new("Gemfile.gemspec")).unwrap().language,
             SourceLanguage::Ruby
+        );
+        assert_eq!(
+            support_for_path(Path::new("Service.java")).unwrap().language,
+            SourceLanguage::Java
+        );
+        assert_eq!(
+            support_for_path(Path::new("Service.cs")).unwrap().language,
+            SourceLanguage::CSharp
         );
         assert!(support_for_path(Path::new("module.vue")).is_none());
     }
