@@ -811,10 +811,132 @@ fn map_scope_exclusions_and_markdown_limitations_are_preserved() {
 }
 
 #[test]
+fn map_builds_ambiguous_edges_and_applies_focus_and_token_budget() {
+    let fixture = MapFixtureRepository::new();
+    let output = fixture.run(&[
+        "map",
+        "--focus",
+        "duplicate",
+        "--focus-path",
+        "src/one.rs",
+        "--map-tokens",
+        "40",
+        "--no-cache",
+        "--json",
+    ]);
+    let json: Value = serde_json::from_str(&stdout(&output)).expect("valid focused map JSON");
+
+    assert!(
+        output.status.success(),
+        "focused map failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(json["map"]["selection"]["token_budget"], 40);
+    assert!(json["map"]["selection"]["estimated_tokens"].as_u64().unwrap() <= 40);
+    assert_eq!(json["map"]["ranking"][0]["path"], "src/one.rs");
+    assert_eq!(json["map"]["cache"]["status"], "disabled");
+    assert!(json["map"]["edges"].as_array().unwrap().iter().any(|edge| {
+        edge["source"] == "src/use.rs"
+            && edge["symbol"] == "duplicate"
+            && edge["ambiguous"] == true
+            && (edge["target"] == "src/one.rs" || edge["target"] == "src/two.rs")
+    }));
+
+    let elided = fixture.run(&[
+        "map",
+        "--focus",
+        "duplicate",
+        "--map-tokens",
+        "14",
+        "--no-cache",
+        "--json",
+    ]);
+    let elided_json: Value = serde_json::from_str(&stdout(&elided)).expect("valid elided map JSON");
+    assert!(
+        elided_json["map"]["selection"]["snippets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|snippet| snippet["truncated"] == true && snippet["symbol"]["location"]["start"]["line"] == 1)
+    );
+}
+
+#[test]
+fn map_cache_modes_hit_invalidate_refresh_and_disable_without_project_writes() {
+    let fixture = MapFixtureRepository::new();
+    let initial_cache_entries = fs::read_dir(&fixture.cache).expect("read empty cache root").count();
+    assert_eq!(initial_cache_entries, 0);
+
+    let disabled = fixture.run(&["map", "--no-cache", "--json"]);
+    assert!(disabled.status.success());
+    assert_eq!(
+        fs::read_dir(&fixture.cache).expect("read disabled cache root").count(),
+        0
+    );
+
+    let first = fixture.run(&["map", "--json"]);
+    let first_json: Value = serde_json::from_str(&stdout(&first)).expect("first cached map JSON");
+    assert_eq!(first_json["map"]["cache"]["status"], "refreshed");
+    assert_eq!(first_json["map"]["cache"]["refreshed"].as_array().unwrap().len(), 7);
+
+    let second = fixture.run(&["map", "--json"]);
+    let second_json: Value = serde_json::from_str(&stdout(&second)).expect("cache-hit map JSON");
+    assert_eq!(second_json["map"]["cache"]["status"], "hit");
+    assert_eq!(second_json["map"]["cache"]["hits"], 7);
+    assert_eq!(first_json["map"]["ranking"], second_json["map"]["ranking"]);
+    assert_eq!(first_json["map"]["selection"], second_json["map"]["selection"]);
+
+    let always = fixture.run(&["map", "--cache", "always", "--json"]);
+    let always_json: Value = serde_json::from_str(&stdout(&always)).expect("always-refresh map JSON");
+    assert_eq!(always_json["map"]["cache"]["status"], "refreshed");
+    assert_eq!(always_json["map"]["cache"]["refreshed"].as_array().unwrap().len(), 7);
+
+    write_file(
+        fixture.root.join("src/lib.rs"),
+        b"pub fn parse() { let changed = 2; let _ = changed; }\n",
+    );
+    let manual = fixture.run(&["map", "--cache", "manual", "--json"]);
+    let manual_json: Value = serde_json::from_str(&stdout(&manual)).expect("manual stale map JSON");
+    assert_eq!(manual_json["map"]["cache"]["status"], "stale");
+    assert!(
+        manual_json["map"]["cache"]["stale"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "src/lib.rs")
+    );
+    assert!(
+        manual_json["map"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"] == "src/lib.rs")
+            .unwrap()["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|limitation| limitation.as_str().unwrap().contains("potentially stale"))
+    );
+
+    let files = fixture.run(&["map", "--cache", "files", "--cache-file", "src/lib.rs", "--json"]);
+    let files_json: Value = serde_json::from_str(&stdout(&files)).expect("file-refresh map JSON");
+    assert_eq!(files_json["map"]["cache"]["status"], "refreshed");
+    assert_eq!(
+        files_json["map"]["cache"]["refreshed"],
+        serde_json::json!(["src/lib.rs"])
+    );
+
+    let missing_changed_file = fixture.run(&["map", "--cache", "files", "--json"]);
+    assert_eq!(missing_changed_file.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing_changed_file.stderr).contains("requires at least one"));
+}
+
+#[test]
 fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     let fixture = MixedMapFixtureRepository::new();
-    let first = fixture.run(&["map", "--json"]);
-    let second = fixture.run(&["map", "--json"]);
+    let first = fixture.run(&["map", "--no-cache", "--json"]);
+    let second = fixture.run(&["map", "--no-cache", "--json"]);
     let first_stdout = stdout(&first);
     let second_stdout = stdout(&second);
     let json: Value = serde_json::from_str(&first_stdout).expect("valid mixed-language map JSON");

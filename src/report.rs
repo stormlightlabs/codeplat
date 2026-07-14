@@ -98,6 +98,51 @@ pub enum FileAnalysisStatus {
     Partial,
 }
 
+/// Cache refresh policy used by source-map analysis.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheMode {
+    Auto,
+    Always,
+    Files,
+    Manual,
+    Disabled,
+}
+
+impl CacheMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Files => "files",
+            Self::Manual => "manual",
+            Self::Disabled => "no_cache",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStatus {
+    Disabled,
+    Hit,
+    Miss,
+    Refreshed,
+    Stale,
+}
+
+impl CacheStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Refreshed => "refreshed",
+            Self::Stale => "stale",
+        }
+    }
+}
+
 impl FileAnalysisStatus {
     pub const fn label(self) -> &'static str {
         match self {
@@ -497,6 +542,58 @@ pub struct MapReport {
     pub omissions: Vec<SourceOmission>,
     pub findings: Vec<MapFinding>,
     pub limitations: Vec<String>,
+    pub edges: Vec<LexicalEdge>,
+    pub ranking: Vec<FileRank>,
+    pub selection: MapSelection,
+    pub cache: MapCacheReport,
+}
+
+/// One file-level lexical dependency candidate. This is intentionally not a
+/// type-resolved call graph edge.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LexicalEdge {
+    pub source: String,
+    pub target: String,
+    pub symbol: String,
+    pub ambiguous: bool,
+    /// All lexical definition candidates for this reference.
+    pub candidates: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FileRank {
+    pub path: String,
+    /// PageRank plus explicit-focus score scaled by 1,000,000.
+    pub score: u64,
+    pub focus_matches: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapSelection {
+    pub token_budget: usize,
+    pub estimated_tokens: usize,
+    pub snippets: Vec<MapSnippet>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapSnippet {
+    pub path: String,
+    pub language: SourceLanguage,
+    pub symbol: SourceSymbol,
+    /// Symbol score scaled by 1,000,000.
+    pub score: u64,
+    pub estimated_tokens: usize,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapCacheReport {
+    pub mode: CacheMode,
+    pub status: CacheStatus,
+    pub hits: usize,
+    pub misses: usize,
+    pub refreshed: Vec<String>,
+    pub stale: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -822,6 +919,56 @@ impl Render {
             .expect("writing to a string cannot fail");
         }
 
+        if !map.files.is_empty() {
+            writeln!(
+                output,
+                "Cache: {} ({}) — {} hits, {} misses, {} refreshed, {} stale",
+                map.cache.mode.label(),
+                map.cache.status.label(),
+                map.cache.hits,
+                map.cache.misses,
+                map.cache.refreshed.len(),
+                map.cache.stale.len()
+            )
+            .expect("writing to a string cannot fail");
+            writeln!(
+                output,
+                "Ranking: {} files; map budget {} tokens, selected {}",
+                map.ranking.len(),
+                map.selection.token_budget,
+                map.selection.estimated_tokens
+            )
+            .expect("writing to a string cannot fail");
+            Render::section_heading(output, "Ranked map selection");
+            if map.selection.snippets.is_empty() {
+                writeln!(output, "No structural snippets fit the map token budget.")
+                    .expect("writing to a string cannot fail");
+            } else {
+                for snippet in &map.selection.snippets {
+                    let location = Self::format_location(&snippet.symbol.location);
+                    let scope = if snippet.symbol.scope.is_empty() {
+                        "root".to_owned()
+                    } else {
+                        snippet.symbol.scope.join("::")
+                    };
+                    writeln!(
+                        output,
+                        "- `{}` — {} `{}` at {} in `{}` (score {}, {} tokens) — `{}`{}",
+                        utils::escape_inline_code(&snippet.path),
+                        snippet.symbol.kind.label(),
+                        utils::escape_inline_code(&snippet.symbol.name),
+                        location,
+                        utils::escape_inline_code(&scope),
+                        snippet.score,
+                        snippet.estimated_tokens,
+                        utils::escape_inline_code(&snippet.symbol.context),
+                        if snippet.truncated { " (elided)" } else { "" }
+                    )
+                    .expect("writing to a string cannot fail");
+                }
+            }
+        }
+
         let mut files_by_language: BTreeMap<SourceLanguage, Vec<&SourceFile>> = BTreeMap::new();
         for file in &map.files {
             files_by_language.entry(file.language).or_default().push(file);
@@ -861,6 +1008,21 @@ impl Render {
             }
         }
 
+        if !map.edges.is_empty() {
+            Render::section_heading(output, "Lexical dependency edges");
+            for edge in &map.edges {
+                writeln!(
+                    output,
+                    "- `{}` → `{}` via `{}`{}",
+                    utils::escape_inline_code(&edge.source),
+                    utils::escape_inline_code(&edge.target),
+                    utils::escape_inline_code(&edge.symbol),
+                    if edge.ambiguous { " (ambiguous candidate)" } else { "" }
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
+
         if !map.omissions.is_empty() {
             Render::section_heading(output, "Omitted paths");
             for omission in &map.omissions {
@@ -894,21 +1056,11 @@ impl Render {
                 file.symbols.len()
             )
             .expect("writing to a string cannot fail");
-            for symbol in &file.symbols {
-                let location = Self::format_location(&symbol.location);
-                let scope = if symbol.scope.is_empty() { "root".to_owned() } else { symbol.scope.join("::") };
-                writeln!(
-                    output,
-                    "  - `{}` {} `{}` at {} in `{}` — `{}`",
-                    symbol.kind.label(),
-                    symbol.role.label(),
-                    utils::escape_inline_code(&symbol.name),
-                    location,
-                    utils::escape_inline_code(&scope),
-                    utils::escape_inline_code(&symbol.context)
-                )
-                .expect("writing to a string cannot fail");
-            }
+            writeln!(
+                output,
+                "  - Structural snippets are shown in the ranked selection above."
+            )
+            .expect("writing to a string cannot fail");
             for limitation in &file.limitations {
                 writeln!(output, "  - Limitation: {}", utils::sanitize_text(limitation))
                     .expect("writing to a string cannot fail");

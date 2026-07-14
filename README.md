@@ -41,6 +41,9 @@ The map command supports Rust, JavaScript, JSX, TypeScript, and TSX source files
 - the selected language variant and file extension (`javascript_jsx` and `typescript_tsx` are explicit)
 - definitions and lexical references with symbol kind, enclosing scope,
   1-based source locations, and compact declaration context
+- lexical file edges and deterministic centrality ranking, with optional explicit
+  `--focus` and `--focus-path` boosts
+- a bounded ranked selection controlled by `--map-tokens` (default: 1,000)
 - parse errors, query-pack failures, and ambiguous lexical references per affected file
 - analyzed and omitted counts, repository root, scope, query-pack provenance, and
   supplied exclusions.
@@ -50,6 +53,21 @@ Exclusions can be repeated:
 ```sh
 setaryb map --exclude 'src/generated/**' --exclude 'tests/fixtures/**'
 ```
+
+Map focus and cache controls are explicit:
+
+```sh
+setaryb map --focus parser --focus-path src --map-tokens 500
+setaryb map --cache always
+setaryb map --cache files --cache-file src/parser.rs
+setaryb map --cache manual
+setaryb map --no-cache
+```
+
+Cache records are stored under `$XDG_CACHE_HOME/setaryb` (or `~/.cache/setaryb`) and
+are keyed by repository, scope, query pack, tool schema, path, and source content.
+
+Manual mode never refreshes silently and labels stale or unavailable records.
 
 ### `setaryb history [OPERATION] [OPTIONS] [PATH]`
 
@@ -93,14 +111,20 @@ Color settings never change report stdout.
 
 The source map is lexical. It does not resolve imports, types, macros, runtime
 behavior, or semantic call relationships. A name with multiple definition candidates
-is reported as ambiguous instead of being presented as a resolved edge. Parse and
-query limitations remain attached to the affected file so other language findings
-are retained.
+is reported as ambiguous instead of being presented as a resolved edge.
 
-Unsupported files, read failures, symlinks, and partial parses remain visible in
-the report.
+Parse and query limitations remain attached to the affected file so other language
+findings are retained.
+
+The ranked map uses lexical PageRank-style centrality.
+
+Generic and underscore-prefixed names may be downweighted for ranking only but remain
+available in the full JSON evidence. The token budget bounds selected structural snippets
+and keeps their source locations when context is elided.
+
+Unsupported files, read failures, symlinks, and partial parses remain visible in the report.
 
 ### Coming Soon
 
 - Python, Ruby, Java, and C# support
-- Ranking, token budgeting, caching, and the integrated default briefing
+- Integrated default briefing

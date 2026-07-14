@@ -8,7 +8,7 @@ use clap::{ArgAction, ColorChoice, Parser, Subcommand, ValueEnum, builder::Style
 use owo_colors::OwoColorize;
 
 use crate::map::MapSettings;
-use crate::report::{CommandDescriptor, HistoryOperation, HistorySettings, Report};
+use crate::report::{CacheMode, CommandDescriptor, HistoryOperation, HistorySettings, Report};
 
 #[derive(Debug, Subcommand)]
 enum SubcommandName {
@@ -37,6 +37,25 @@ enum HistorySubcommand {
 pub enum OutputFormat {
     Markdown,
     Json,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CacheModeOption {
+    Auto,
+    Always,
+    Files,
+    Manual,
+}
+
+impl From<CacheModeOption> for CacheMode {
+    fn from(mode: CacheModeOption) -> Self {
+        match mode {
+            CacheModeOption::Auto => Self::Auto,
+            CacheModeOption::Always => Self::Always,
+            CacheModeOption::Files => Self::Files,
+            CacheModeOption::Manual => Self::Manual,
+        }
+    }
 }
 
 /// The diagnostic color policy selected by `--color` or `--no-color`.
@@ -154,6 +173,9 @@ struct Cli {
     #[command(flatten)]
     output: OutputOptions,
 
+    #[command(flatten)]
+    map_options: MapOptions,
+
     #[command(subcommand)]
     command: Option<SubcommandName>,
 
@@ -163,18 +185,19 @@ struct Cli {
 
 impl From<Cli> for CommandRequest {
     fn from(cli: Cli) -> Self {
+        let default_map_settings = cli.map_options.settings();
         let (command, history, map_settings) = match cli.command {
             None => (
                 CommandDescriptor::briefing(cli.path),
                 HistorySettings::default(),
-                MapSettings::default(),
+                default_map_settings,
             ),
             Some(SubcommandName::Map(map)) => {
-                let MapCommand { excludes, path } = map;
+                let MapCommand { options, path } = map;
                 (
                     CommandDescriptor::map(path),
                     HistorySettings::default(),
-                    MapSettings { excludes },
+                    options.settings(),
                 )
             }
             Some(SubcommandName::History(history)) => {
@@ -209,6 +232,14 @@ impl Cli {
     fn color_policy(&self) -> ColorPolicy {
         self.output.color_policy()
     }
+
+    fn validate(&self) -> Result<(), ApplicationError> {
+        self.map_options.validate()?;
+        if let Some(SubcommandName::Map(map)) = &self.command {
+            map.options.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -217,12 +248,87 @@ impl Cli {
     setaryb map --json
 ")]
 struct MapCommand {
+    #[command(flatten)]
+    options: MapOptions,
+
+    #[arg(value_name = "PATH", default_value = ".")]
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug, clap::Args)]
+struct MapOptions {
     /// Exclude paths from analysis using a Git-style glob; repeat for multiple exclusions.
     #[arg(long = "exclude", value_name = "GLOB", action = ArgAction::Append)]
     excludes: Vec<String>,
 
-    #[arg(value_name = "PATH", default_value = ".")]
-    path: PathBuf,
+    /// Boost symbols and paths matching this explicit task text; repeat for multiple terms.
+    #[arg(long = "focus", value_name = "TEXT", action = ArgAction::Append)]
+    focuses: Vec<String>,
+
+    /// Boost files under this explicit path; repeat for multiple paths.
+    #[arg(long = "focus-path", value_name = "PATH", action = ArgAction::Append)]
+    focus_paths: Vec<String>,
+
+    /// Maximum estimated tokens in the selected structural map (default: 1000).
+    #[arg(long = "map-tokens", value_name = "N", default_value_t = 1_000, value_parser = clap::value_parser!(usize))]
+    map_tokens: usize,
+
+    /// Cache policy: auto, always, files, or manual (default: auto).
+    #[arg(
+        long = "cache",
+        visible_alias = "cache-mode",
+        value_name = "MODE",
+        value_enum,
+        default_value_t = CacheModeOption::Auto
+    )]
+    cache_mode: CacheModeOption,
+
+    /// Refresh only these paths when `--cache files` is selected; repeat as needed.
+    #[arg(long = "cache-file", visible_alias = "changed-file", value_name = "PATH", action = ArgAction::Append)]
+    cache_files: Vec<String>,
+
+    /// Disable all cache reads and writes.
+    #[arg(long = "no-cache", action = ArgAction::SetTrue)]
+    no_cache: bool,
+}
+
+impl Into<MapSettings> for MapOptions {
+    fn into(self) -> MapSettings {
+        self.settings()
+    }
+}
+
+impl MapOptions {
+    fn settings(&self) -> MapSettings {
+        MapSettings {
+            excludes: self.excludes.clone(),
+            focuses: self.focuses.clone(),
+            focus_paths: self.focus_paths.clone(),
+            map_tokens: self.map_tokens,
+            cache_mode: if self.no_cache { CacheMode::Disabled } else { self.cache_mode.into() },
+            cache_files: self.cache_files.clone(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), ApplicationError> {
+        if self.map_tokens == 0 {
+            return Err(ApplicationError::usage("`--map-tokens` must be greater than zero"));
+        }
+        if self.no_cache && self.cache_mode != CacheModeOption::Auto {
+            return Err(ApplicationError::usage(
+                "`--no-cache` cannot be combined with an explicit `--cache` mode",
+            ));
+        }
+        if self.cache_mode == CacheModeOption::Files && self.cache_files.is_empty() && !self.no_cache {
+            return Err(ApplicationError::usage(
+                "`--cache files` requires at least one `--cache-file` path",
+            ));
+        }
+        if self.cache_files.iter().any(|path| path.trim().is_empty()) {
+            return Err(ApplicationError::usage("`--cache-file` paths must not be empty"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -450,6 +556,7 @@ where
 
 fn invoke<W: Write>(cli: Cli, stdout: &mut W) -> anyhow::Result<()> {
     let output_format = cli.output_format()?;
+    cli.validate()?;
     let report = Report::analyze(cli.into()).map_err(ApplicationError::Report)?;
     let output = report.render(output_format).map_err(ApplicationError::Render)?;
 

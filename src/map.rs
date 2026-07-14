@@ -5,15 +5,23 @@ use std::path::{Path, PathBuf};
 use gix::bstr::ByteSlice;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::cli::ExitCategory;
 use crate::report::{
-    FileAnalysisStatus, MapFinding, MapFindingKind, MapInventory, MapReport, OmissionReason, SourceFile,
-    SourceLanguage, SourceLocation, SourceOmission, SourceSymbol, SymbolKind, SymbolRole, WorktreeState,
+    CacheMode, CacheStatus, FileAnalysisStatus, FileRank, LexicalEdge, MapCacheReport, MapFinding, MapFindingKind,
+    MapInventory, MapReport, MapSelection, MapSnippet, OmissionReason, SourceFile, SourceLanguage, SourceLocation,
+    SourceOmission, SourceSymbol, SymbolKind, SymbolRole, WorktreeState,
 };
 
 const MAX_CONTEXT_CHARS: usize = 180;
+const DEFAULT_MAP_TOKENS: usize = 1_000;
+const CACHE_SCHEMA_VERSION: u16 = 1;
+const CACHE_TOOL_VERSION: &str = "setaryb-map-v7";
+const RANK_SCALE: f64 = 1_000_000.0;
+const PAGE_RANK_DAMPING: f64 = 0.85;
+const PAGE_RANK_ITERATIONS: usize = 24;
 
 type LanguageFactory = fn() -> tree_sitter::Language;
 
@@ -207,9 +215,27 @@ impl MapError {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct MapSettings {
     pub excludes: Vec<String>,
+    pub focuses: Vec<String>,
+    pub focus_paths: Vec<String>,
+    pub map_tokens: usize,
+    pub cache_mode: CacheMode,
+    pub cache_files: Vec<String>,
+}
+
+impl Default for MapSettings {
+    fn default() -> Self {
+        Self {
+            excludes: Vec::new(),
+            focuses: Vec::new(),
+            focus_paths: Vec::new(),
+            map_tokens: DEFAULT_MAP_TOKENS,
+            cache_mode: CacheMode::Auto,
+            cache_files: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -223,12 +249,147 @@ struct Candidate {
     symlink: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct ParsedSource {
     symbols: Vec<SourceSymbol>,
     findings: Vec<MapFinding>,
     status: FileAnalysisStatus,
     limitations: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CacheRecord {
+    schema_version: u16,
+    tool_version: String,
+    repository_root: String,
+    scope_path: String,
+    path: String,
+    language: SourceLanguage,
+    query_pack: String,
+    fingerprint: String,
+    parsed: ParsedSource,
+}
+
+#[derive(Debug)]
+struct CacheStore {
+    root: Option<PathBuf>,
+    repository_root: String,
+    scope_path: String,
+}
+
+#[derive(Debug, Default)]
+struct CacheStats {
+    hits: usize,
+    misses: usize,
+    refreshed: Vec<String>,
+    stale: Vec<String>,
+}
+
+impl CacheStore {
+    fn new(repository_root: &Path, scope_path: &str) -> Self {
+        Self {
+            root: cache_root(),
+            repository_root: repository_root.to_string_lossy().into_owned(),
+            scope_path: scope_path.to_owned(),
+        }
+    }
+
+    fn record_path(&self, path: &str, support: &LanguageSupport, fingerprint: Option<&str>) -> Option<PathBuf> {
+        let root = self.root.as_ref()?;
+        let identity = format!(
+            "{CACHE_TOOL_VERSION}\n{}\n{}\n{}\n{}\n{}",
+            self.repository_root,
+            self.scope_path,
+            support.language.label(),
+            support.query_pack,
+            path
+        );
+        let records = root.join("maps").join(stable_hash(&identity)).join(stable_hash(path));
+        Some(records.join(format!("{}.json", fingerprint.unwrap_or("latest"))))
+    }
+
+    fn load(
+        &self, path: &str, support: &LanguageSupport, fingerprint: &str, mode: CacheMode,
+    ) -> Option<(ParsedSource, bool)> {
+        if matches!(mode, CacheMode::Disabled | CacheMode::Always | CacheMode::Files) {
+            let record = self.read_record(
+                self.record_path(path, support, Some(fingerprint))?,
+                false,
+                path,
+                support,
+                fingerprint,
+            )?;
+            return (!record.1).then_some(record);
+        }
+
+        let current = self.record_path(path, support, Some(fingerprint))?;
+        if let Some(record) = self.read_record(current.clone(), false, path, support, fingerprint) {
+            return Some(record);
+        }
+
+        let directory = current.parent()?;
+        let entries = fs::read_dir(directory).ok()?;
+        let mut candidates = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|candidate| candidate.extension().is_some_and(|extension| extension == "json"))
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates
+            .into_iter()
+            .find_map(|candidate| self.read_record(candidate, true, path, support, fingerprint))
+    }
+
+    fn read_record(
+        &self, path: PathBuf, stale: bool, expected_path: &str, support: &LanguageSupport, fingerprint: &str,
+    ) -> Option<(ParsedSource, bool)> {
+        let bytes = fs::read(path).ok()?;
+        let record: CacheRecord = serde_json::from_slice(&bytes).ok()?;
+        if record.schema_version != CACHE_SCHEMA_VERSION
+            || record.tool_version != CACHE_TOOL_VERSION
+            || record.repository_root != self.repository_root
+            || record.scope_path != self.scope_path
+            || record.path != expected_path
+            || record.language != support.language
+            || record.query_pack != support.query_pack
+        {
+            return None;
+        }
+        Some((record.parsed, stale || record.fingerprint != fingerprint))
+    }
+
+    fn write(&self, path: &str, support: &LanguageSupport, fingerprint: &str, parsed: &ParsedSource) -> Option<String> {
+        let record_path = self.record_path(path, support, Some(fingerprint))?;
+        let parent = record_path.parent()?;
+        if let Err(error) = fs::create_dir_all(parent) {
+            return Some(format!("could not create the Setaryb cache directory: {error}"));
+        }
+        let record = CacheRecord {
+            schema_version: CACHE_SCHEMA_VERSION,
+            tool_version: CACHE_TOOL_VERSION.to_owned(),
+            repository_root: self.repository_root.clone(),
+            scope_path: self.scope_path.clone(),
+            path: path.to_owned(),
+            language: support.language,
+            query_pack: support.query_pack.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+            parsed: parsed.clone(),
+        };
+        let bytes = match serde_json::to_vec(&record) {
+            Ok(bytes) => bytes,
+            Err(error) => return Some(format!("could not serialize the source-map cache record: {error}")),
+        };
+        fs::write(record_path, bytes)
+            .err()
+            .map(|error| format!("could not write the source-map cache record: {error}"))
+    }
+}
+
+#[derive(Clone)]
+struct SnippetCandidate {
+    path: String,
+    language: SourceLanguage,
+    symbol: SourceSymbol,
+    score: u64,
 }
 
 pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
@@ -255,6 +416,27 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     let scope = Scope { relative_path };
 
     let exclusions = build_exclusions(&repository_root, &settings.excludes)?;
+    if settings.map_tokens == 0 {
+        return Err(MapError::Input {
+            path: selected_path,
+            reason: "map token budget must be greater than zero".to_owned(),
+        });
+    }
+    if settings.cache_mode == CacheMode::Files && settings.cache_files.is_empty() {
+        return Err(MapError::Input {
+            path: selected_path,
+            reason: "files cache mode requires at least one changed-file path".to_owned(),
+        });
+    }
+    let cache = CacheStore::new(&repository_root, &scope.relative_path);
+    let mut cache_stats = CacheStats::default();
+    let mut cache_limitations = Vec::new();
+    if settings.cache_mode != CacheMode::Disabled && cache.root.is_none() {
+        cache_limitations.push(
+            "The XDG cache location could not be resolved; source analysis continued without persistent cache data."
+                .to_owned(),
+        );
+    }
     let mut tracked_paths = BTreeSet::new();
     collect_tree_files(
         &repository,
@@ -362,7 +544,62 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 continue;
             }
         };
-        let ParsedSource { symbols, findings: file_findings, status, limitations } = parse_source(&source, support);
+        let fingerprint = source_fingerprint(&source);
+        let forced_refresh = matches!(settings.cache_mode, CacheMode::Always)
+            || (settings.cache_mode == CacheMode::Files
+                && cache_file_requested(&path, &settings.cache_files, &repository_root));
+        let (parsed, stale) = if settings.cache_mode != CacheMode::Disabled && !forced_refresh {
+            match cache.load(&path, support, &fingerprint, settings.cache_mode) {
+                Some((parsed, stale)) => {
+                    cache_stats.hits += 1;
+                    if stale {
+                        cache_stats.stale.push(path.clone());
+                    }
+                    (parsed, stale)
+                }
+                None if settings.cache_mode == CacheMode::Manual => {
+                    cache_stats.misses += 1;
+                    files.push(SourceFile {
+                        path: path.clone(),
+                        language: support.language,
+                        extension: extension_for_path(Path::new(&path)),
+                        worktree_state: candidate.state,
+                        status: FileAnalysisStatus::Partial,
+                        symbols: Vec::new(),
+                        limitations: vec![
+                            "Manual cache mode found no cached analysis for this file and did not refresh it."
+                                .to_owned(),
+                        ],
+                    });
+                    continue;
+                }
+                None => {
+                    cache_stats.misses += 1;
+                    let parsed = parse_source(&source, support);
+                    if let Some(error) = cache.write(&path, support, &fingerprint, &parsed) {
+                        cache_limitations.push(error);
+                    }
+                    cache_stats.refreshed.push(path.clone());
+                    (parsed, false)
+                }
+            }
+        } else {
+            let parsed = parse_source(&source, support);
+            if settings.cache_mode != CacheMode::Disabled {
+                if let Some(error) = cache.write(&path, support, &fingerprint, &parsed) {
+                    cache_limitations.push(error);
+                }
+                cache_stats.refreshed.push(path.clone());
+            }
+            (parsed, false)
+        };
+        let ParsedSource { symbols, findings: file_findings, status, mut limitations } = parsed;
+        if stale {
+            limitations.push(
+                "Manual cache mode used a potentially stale source analysis; rerun with `--cache always` to refresh it."
+                    .to_owned(),
+            );
+        }
         findings.extend(file_findings.into_iter().map(|mut finding| {
             if finding.path.is_empty() {
                 finding.path = path.clone();
@@ -408,7 +645,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     };
 
     let has_non_rust_files = files.iter().any(|file| file.language != SourceLanguage::Rust);
-    let limitations = if has_non_rust_files {
+    let mut limitations = if has_non_rust_files {
         vec![
             "Definitions and references are extracted lexically with language-specific Tree-sitter queries; imports, types, macros, and runtime behavior are not resolved."
                 .to_owned(),
@@ -430,6 +667,21 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         ]
     };
 
+    if !files.is_empty() {
+        limitations.push(
+            "Ranking uses deterministic lexical centrality; generic and underscore-prefixed names are downweighted only for ranking and remain available in the full symbol evidence."
+                .to_owned(),
+        );
+    }
+    limitations.extend(cache_limitations);
+
+    let edges = build_lexical_edges(&files);
+    let ranking = rank_files(&files, &edges, settings);
+    let selection = select_snippets(&files, &edges, &ranking, settings.map_tokens, settings);
+    let cache_status = cache_status(settings.cache_mode, &cache_stats);
+    cache_stats.refreshed.sort();
+    cache_stats.stale.sort();
+
     Ok(MapReport {
         repository_root: repository_root.to_string_lossy().into_owned(),
         scope_path: scope.relative_path,
@@ -447,7 +699,355 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         omissions,
         findings,
         limitations,
+        edges,
+        ranking,
+        selection,
+        cache: MapCacheReport {
+            mode: settings.cache_mode,
+            status: cache_status,
+            hits: cache_stats.hits,
+            misses: cache_stats.misses,
+            refreshed: cache_stats.refreshed,
+            stale: cache_stats.stale,
+        },
     })
+}
+
+fn cache_root() -> Option<PathBuf> {
+    if let Some(xdg_cache_home) = std::env::var_os("XDG_CACHE_HOME")
+        && !xdg_cache_home.is_empty()
+    {
+        let xdg_cache_home = PathBuf::from(xdg_cache_home);
+        if xdg_cache_home.is_absolute() {
+            return Some(xdg_cache_home.join("setaryb"));
+        }
+    }
+    std::env::var_os("HOME").and_then(|home| {
+        let home = PathBuf::from(home);
+        home.is_absolute().then(|| home.join(".cache/setaryb"))
+    })
+}
+
+fn stable_hash(input: &str) -> String {
+    stable_hash_bytes(input.as_bytes())
+}
+
+fn stable_hash_bytes(bytes: &[u8]) -> String {
+    let mut first = 0xcbf29ce484222325_u64;
+    let mut second = 0x9e3779b185ebca87_u64;
+    for byte in bytes {
+        first ^= u64::from(*byte);
+        first = first.wrapping_mul(0x100000001b3);
+        second ^= u64::from(*byte).wrapping_add(0x9e37);
+        second = second.rotate_left(7).wrapping_mul(0x517cc1b727220a95);
+    }
+    format!("{first:016x}{second:016x}")
+}
+
+fn source_fingerprint(source: &[u8]) -> String {
+    stable_hash_bytes(source)
+}
+
+fn cache_file_requested(path: &str, requested: &[String], repository_root: &Path) -> bool {
+    requested.iter().any(|requested| {
+        let requested = requested.replace('\\', "/");
+        if requested.trim().is_empty() {
+            return false;
+        }
+        if let Ok(absolute) = fs::canonicalize(&requested)
+            && let Ok(relative) = absolute.strip_prefix(repository_root)
+        {
+            return relative.to_string_lossy().replace('\\', "/") == path;
+        }
+        let requested = requested.trim_start_matches("./");
+        requested == path || path.ends_with(&format!("/{requested}"))
+    })
+}
+
+fn cache_status(mode: CacheMode, stats: &CacheStats) -> CacheStatus {
+    if mode == CacheMode::Disabled {
+        CacheStatus::Disabled
+    } else if !stats.stale.is_empty() {
+        CacheStatus::Stale
+    } else if !stats.refreshed.is_empty() {
+        CacheStatus::Refreshed
+    } else if stats.hits > 0 {
+        CacheStatus::Hit
+    } else {
+        CacheStatus::Miss
+    }
+}
+
+fn build_lexical_edges(files: &[SourceFile]) -> Vec<LexicalEdge> {
+    let mut definitions = BTreeMap::<String, BTreeSet<String>>::new();
+    for file in files {
+        for symbol in &file.symbols {
+            if symbol.role == SymbolRole::Definition {
+                definitions
+                    .entry(symbol.name.clone())
+                    .or_default()
+                    .insert(file.path.clone());
+            }
+        }
+    }
+
+    let mut edges = Vec::new();
+    for file in files {
+        for symbol in &file.symbols {
+            if symbol.role != SymbolRole::Reference {
+                continue;
+            }
+            let Some(candidates) = definitions.get(&symbol.name) else {
+                continue;
+            };
+            let ambiguous = candidates.len() > 1;
+            for target in candidates {
+                edges.push(LexicalEdge {
+                    source: file.path.clone(),
+                    target: target.clone(),
+                    symbol: symbol.name.clone(),
+                    ambiguous,
+                    candidates: candidates.iter().cloned().collect(),
+                });
+            }
+        }
+    }
+    edges.sort_by(|left, right| {
+        left.source
+            .cmp(&right.source)
+            .then_with(|| left.target.cmp(&right.target))
+            .then_with(|| left.symbol.cmp(&right.symbol))
+            .then_with(|| left.ambiguous.cmp(&right.ambiguous))
+    });
+    edges.dedup();
+    edges
+}
+
+fn rank_files(files: &[SourceFile], edges: &[LexicalEdge], settings: &MapSettings) -> Vec<FileRank> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let paths = files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+    let path_set = paths.iter().cloned().collect::<BTreeSet<_>>();
+    let mut outgoing = BTreeMap::<String, Vec<&LexicalEdge>>::new();
+    for edge in edges {
+        outgoing.entry(edge.source.clone()).or_default().push(edge);
+    }
+
+    let initial = 1.0 / paths.len() as f64;
+    let mut scores = paths
+        .iter()
+        .map(|path| (path.clone(), initial))
+        .collect::<BTreeMap<_, _>>();
+    for _ in 0..PAGE_RANK_ITERATIONS {
+        let mut next = paths
+            .iter()
+            .map(|path| (path.clone(), (1.0 - PAGE_RANK_DAMPING) * initial))
+            .collect::<BTreeMap<_, _>>();
+        let dangling = paths
+            .iter()
+            .filter(|path| outgoing.get(*path).is_none_or(Vec::is_empty))
+            .map(|path| scores[path])
+            .sum::<f64>();
+        let dangling_share = PAGE_RANK_DAMPING * dangling * initial;
+        for score in next.values_mut() {
+            *score += dangling_share;
+        }
+        for source in &paths {
+            let Some(source_edges) = outgoing.get(source) else {
+                continue;
+            };
+            let total_weight = source_edges
+                .iter()
+                .map(|edge| lexical_weight(&edge.symbol))
+                .sum::<f64>();
+            if total_weight == 0.0 {
+                continue;
+            }
+            for edge in source_edges {
+                if path_set.contains(&edge.target) {
+                    let contribution = PAGE_RANK_DAMPING * scores[source] * lexical_weight(&edge.symbol) / total_weight;
+                    *next.entry(edge.target.clone()).or_default() += contribution;
+                }
+            }
+        }
+        scores = next;
+    }
+
+    let mut ranking = files
+        .iter()
+        .map(|file| {
+            let text_matches = settings
+                .focuses
+                .iter()
+                .filter(|focus| file_matches_focus(file, focus))
+                .count();
+            let path_matches = settings
+                .focus_paths
+                .iter()
+                .filter(|focus_path| path_matches_focus(&file.path, focus_path))
+                .count();
+            let focus_matches = text_matches + path_matches;
+            let focus_boost = text_matches as f64 * 0.35 + path_matches as f64 * 0.7;
+            let score = scores[&file.path] + focus_boost;
+            FileRank { path: file.path.clone(), score: scaled_score(score), focus_matches }
+        })
+        .collect::<Vec<_>>();
+    ranking.sort_by(|left, right| right.score.cmp(&left.score).then_with(|| left.path.cmp(&right.path)));
+    ranking
+}
+
+fn lexical_weight(symbol: &str) -> f64 {
+    if is_generic_name(symbol) || symbol.starts_with('_') { 0.25 } else { 1.0 }
+}
+
+fn is_generic_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "data" | "default" | "error" | "item" | "key" | "main" | "new" | "result" | "self" | "value"
+    )
+}
+
+fn file_matches_focus(file: &SourceFile, focus: &str) -> bool {
+    let focus = focus.trim().to_ascii_lowercase();
+    !focus.is_empty()
+        && (file.path.to_ascii_lowercase().contains(&focus)
+            || file.symbols.iter().any(|symbol| {
+                symbol.name.to_ascii_lowercase().contains(&focus)
+                    || symbol.context.to_ascii_lowercase().contains(&focus)
+            }))
+}
+
+fn path_matches_focus(path: &str, focus_path: &str) -> bool {
+    let focus_path = focus_path.trim().replace('\\', "/");
+    let focus_path = focus_path.trim_start_matches("./");
+    !focus_path.is_empty() && (path == focus_path || path.starts_with(&format!("{focus_path}/")))
+}
+
+fn scaled_score(score: f64) -> u64 {
+    (score.max(0.0) * RANK_SCALE).round() as u64
+}
+
+fn select_snippets(
+    files: &[SourceFile], edges: &[LexicalEdge], ranking: &[FileRank], token_budget: usize, settings: &MapSettings,
+) -> MapSelection {
+    let file_scores = ranking
+        .iter()
+        .map(|rank| (rank.path.as_str(), rank.score))
+        .collect::<BTreeMap<_, _>>();
+    let mut candidates = Vec::new();
+    for file in files {
+        let file_score = *file_scores.get(file.path.as_str()).unwrap_or(&0);
+        for symbol in file
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.role == SymbolRole::Definition)
+        {
+            let reference_count = edges
+                .iter()
+                .filter(|edge| edge.target == file.path && edge.symbol == symbol.name)
+                .count() as u64;
+            let focus_boost = settings
+                .focuses
+                .iter()
+                .filter(|focus| symbol_matches_focus(symbol, focus))
+                .count() as u64
+                * 250_000;
+            let symbol_score = file_score
+                .saturating_add(reference_count.saturating_mul(1_000))
+                .saturating_add(focus_boost);
+            candidates.push(SnippetCandidate {
+                path: file.path.clone(),
+                language: file.language,
+                symbol: symbol.clone(),
+                score: symbol_score,
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| location_key(Some(&left.symbol.location)).cmp(&location_key(Some(&right.symbol.location))))
+            .then_with(|| left.symbol.name.cmp(&right.symbol.name))
+    });
+
+    let mut snippets = Vec::new();
+    let mut estimated_tokens = 0;
+    for candidate in candidates {
+        let remaining = token_budget.saturating_sub(estimated_tokens);
+        let Some((symbol, cost, truncated)) = fit_snippet(&candidate, remaining) else {
+            continue;
+        };
+        estimated_tokens += cost;
+        snippets.push(MapSnippet {
+            path: candidate.path,
+            language: candidate.language,
+            symbol,
+            score: candidate.score,
+            estimated_tokens: cost,
+            truncated,
+        });
+        if estimated_tokens >= token_budget {
+            break;
+        }
+    }
+
+    MapSelection { token_budget, estimated_tokens, snippets }
+}
+
+fn symbol_matches_focus(symbol: &SourceSymbol, focus: &str) -> bool {
+    let focus = focus.trim().to_ascii_lowercase();
+    !focus.is_empty()
+        && (symbol.name.to_ascii_lowercase().contains(&focus) || symbol.context.to_ascii_lowercase().contains(&focus))
+}
+
+fn fit_snippet(candidate: &SnippetCandidate, budget: usize) -> Option<(SourceSymbol, usize, bool)> {
+    let scope = if candidate.symbol.scope.is_empty() {
+        "root".to_owned()
+    } else {
+        candidate.symbol.scope.join("::")
+    };
+    let prefix = format!(
+        "{} {} {} {}:{}-{}:{} {}",
+        candidate.path,
+        candidate.symbol.kind.label(),
+        candidate.symbol.name,
+        candidate.symbol.location.start.line,
+        candidate.symbol.location.start.column,
+        candidate.symbol.location.end.line,
+        candidate.symbol.location.end.column,
+        scope
+    );
+    let full = format!("{prefix} {}", candidate.symbol.context);
+    let full_cost = token_count(&full);
+    if full_cost <= budget {
+        return Some((candidate.symbol.clone(), full_cost, false));
+    }
+    let marker = " …";
+    if token_count(&format!("{prefix}{marker}")) > budget {
+        return None;
+    }
+    let max_chars = candidate.symbol.context.chars().count();
+    let mut best = 0;
+    for chars in 0..=max_chars {
+        let context = candidate.symbol.context.chars().take(chars).collect::<String>();
+        if token_count(&format!("{prefix} {context}{marker}")) <= budget {
+            best = chars;
+        } else {
+            break;
+        }
+    }
+    let context = candidate.symbol.context.chars().take(best).collect::<String>();
+    let mut symbol = candidate.symbol.clone();
+    symbol.context = format!("{context}{marker}");
+    let cost = token_count(&format!("{prefix} {}", symbol.context));
+    Some((symbol, cost, true))
+}
+
+fn token_count(text: &str) -> usize {
+    text.chars().count().div_ceil(4).max(1)
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {

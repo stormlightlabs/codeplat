@@ -178,26 +178,26 @@ graph ranking, explicit focus boosts, token-budget selection, and all approved c
 
 **Acceptance criteria:**
 
-- [ ] File-level lexical dependency edges are built from typed definitions and references,
+- [x] File-level lexical dependency edges are built from typed definitions and references,
       preserve ambiguous candidates, and are never described as a type-resolved call graph.
-- [ ] Deterministic PageRank-style ranking prioritizes central files/symbols, then applies
+- [x] Deterministic PageRank-style ranking prioritizes central files/symbols, then applies
       only explicit `--focus` and `--focus-path` boosts.
-- [ ] Generic and private-looking names may be downweighted as transparent ranking heuristics,
+- [x] Generic and private-looking names may be downweighted as transparent ranking heuristics,
       but remain available in output when selected or requested.
-- [ ] `--map-tokens` defaults to 1,000 and selects structural snippets with location-preserving
+- [x] `--map-tokens` defaults to 1,000 and selects structural snippets with location-preserving
       elision instead of full source bodies.
-- [ ] Cache data lives only under the XDG Setaryb cache path and is isolated by repository, scope,
+- [x] Cache data lives only under the XDG Setaryb cache path and is isolated by repository, scope,
       query-pack, tool/schema, and source-content fingerprint.
-- [ ] `auto`, `always`, `files`, `manual`, and `--no-cache` work as specified; manual mode labels
+- [x] `auto`, `always`, `files`, `manual`, and `--no-cache` work as specified; manual mode labels
       possible staleness and never refreshes silently.
 
 **Verification:**
 
-- Exercise focus text/path, duplicate symbols, generic/private names, and token limits against
+- [x] Exercise focus text/path, duplicate symbols, generic/private names, and token limits against
   the Rust and mixed-language fixtures.
-- Use a temporary XDG cache directory to prove cache hits, invalidation, explicit file refresh,
+- [x] Use a temporary XDG cache directory to prove cache hits, invalidation, explicit file refresh,
   manual stale labels, and no-cache behavior.
-- Confirm deterministic JSON ordering across repeated runs with unchanged inputs.
+- [x] Confirm deterministic JSON ordering across repeated runs with unchanged inputs.
 - `cargo fmt --check`
 - `cargo test`
 - `cargo clippy --all-targets --all-features -- -D warnings`
