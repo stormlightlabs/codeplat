@@ -8,3 +8,4 @@
 (enum_declaration name: (identifier) @definition.enum)
 (annotation_type_declaration name: (identifier) @definition.interface)
 (method_declaration name: (identifier) @definition.method)
+(field_declaration declarator: (variable_declarator name: (identifier) @definition.field))

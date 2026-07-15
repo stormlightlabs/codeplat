@@ -6,7 +6,7 @@ in a new codebase.
 It produces two focused reports:
 
 - `map` inventories the current worktree and extracts structural maps for Rust, JavaScript,
-  JSX, TypeScript, TSX, Python, and Ruby source files.
+  JSX, TypeScript, TSX, Python, Ruby, Java, and C# source files.
 - `history` summarizes five Git-history signals: churn, contributors, bug-related clusters,
   monthly activity, and firefighting language.
 
@@ -35,7 +35,7 @@ Git repository and keeps the selected scope inside that repository.
 
 ### `setaryb map [OPTIONS] [PATH]`
 
-The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, and Ruby source files. It reports:
+The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, and C# source files. It reports:
 
 - tracked, modified, and untracked worktree state
 - the selected language variant and file extension (`javascript_jsx` and `typescript_tsx` are explicit)
@@ -124,7 +124,6 @@ and keeps their source locations when context is elided.
 
 Unsupported files, read failures, symlinks, and partial parses remain visible in the report.
 
-### Coming Soon
-
-- Java and C# support
-- Integrated default briefing
+Java and C# query-pack provenance is reported as `java-v1` and `c-sharp-v1` in mixed-language
+maps. Their lexical findings include package/namespace, type, method, property, and field
+symbols where the grammar exposes them; visibility is not treated as a reason to omit a symbol.

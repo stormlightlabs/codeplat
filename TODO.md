@@ -2,6 +2,8 @@
 
 Implementation tickets derived from [ROADMAP.md](ROADMAP.md).
 
+**Last reviewed:** 2026-07-15
+
 ## 1. Establish the CLI contract and verification foundation
 
 Created the typed command and report foundation that every Setaryb feature uses: the Clap command hierarchy,
@@ -34,15 +36,16 @@ structural-map contract as Rust.
 
 **Blocked by:** Ticket 3
 
-**Audit status:** Parser/query coverage exists, but visibility-aware ranking and Java field extraction are
-reopened by Ticket 14.
+**Audit status:** Parser/query coverage exists and Java field extraction is now covered by the query pack and
+regression tests. Visibility-aware ranking remains reopened by Ticket 14 because visibility is not represented
+in the report model.
 
 **Acceptance criteria:**
 
 - [x] Java and C# parsers and versioned query packs are registered through the established
       language-support interface.
 - [x] Fixtures prove extraction for representative package/namespace, class, method, type, and
-      reference structures appropriate to each grammar.
+      field, and reference structures appropriate to each grammar.
 - [ ] Symbol visibility and duplicate names affect ranking data only; they never cause undisclosed omissions.
       Reopened by Ticket 14 because visibility is not represented in the report model.
 - [x] Per-file parse/query limitations and unsupported extensions are carried through the shared report model.
@@ -64,6 +67,11 @@ graph ranking, explicit focus boosts, token-budget selection, and all approved c
 
 **Blocked by:** Ticket 3
 
+**Implementation status (2026-07-15):** Ranking, explicit focus boosts, bounded structural selection, and
+deterministic JSON ordering are implemented and covered by tests. Cache `auto` now reparses after a source
+fingerprint miss; manual stale selection is deterministic and explicit `--cache-file` paths are normalized
+exactly. The remaining cache safety, retention, and complete-report budget work stays with Tickets 9–11.
+
 **Acceptance criteria:**
 
 - [x] File-level lexical dependency edges are built from typed definitions and references,
@@ -83,9 +91,11 @@ graph ranking, explicit focus boosts, token-budget selection, and all approved c
 **Verification:**
 
 - [ ] Exercise focus text/path, duplicate symbols, generic/private names, and complete-report token limits
-      against the Rust and mixed-language fixtures. Reopened by Tickets 11 and 14.
+      against the Rust and mixed-language fixtures. Focus/path, duplicate-symbol, and selection-budget coverage
+      exists; generic/private ranking and complete-report limits remain reopened by Tickets 11 and 14.
 - [ ] Use a temporary XDG cache directory to prove cache hits, automatic invalidation, exact explicit-file
-      refresh, manual stale labels, and no-cache behavior. Reopened by Ticket 10.
+      refresh, manual stale labels, and no-cache behavior. Core hit/refresh/stale/no-cache coverage exists;
+      cache retention, unavailable/unmatched-file accounting, and concurrency remain reopened by Ticket 10.
 - [x] Confirm deterministic JSON ordering across repeated runs with unchanged inputs.
 - `cargo fmt --check`
 - `cargo test`

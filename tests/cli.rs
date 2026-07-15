@@ -1035,6 +1035,31 @@ fn map_cache_modes_hit_invalidate_refresh_and_disable_without_project_writes() {
     assert_eq!(first_json["map"]["ranking"], second_json["map"]["ranking"]);
     assert_eq!(first_json["map"]["selection"], second_json["map"]["selection"]);
 
+    write_file(
+        fixture.root.join("src/lib.rs"),
+        b"pub fn refreshed() { let changed = 3; let _ = changed; }\n",
+    );
+    let auto = fixture.run(&["map", "--json"]);
+    let auto_json: Value = serde_json::from_str(&stdout(&auto)).expect("auto-refresh map JSON");
+    assert_eq!(auto_json["map"]["cache"]["status"], "refreshed");
+    assert_eq!(
+        auto_json["map"]["cache"]["refreshed"],
+        serde_json::json!(["src/lib.rs"])
+    );
+    let auto_lib = auto_json["map"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "src/lib.rs")
+        .expect("refreshed Rust file");
+    assert!(
+        auto_lib["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| { symbol["name"] == "refreshed" && symbol["role"] == "definition" })
+    );
+
     let always = fixture.run(&["map", "--cache", "always", "--json"]);
     let always_json: Value = serde_json::from_str(&stdout(&always)).expect("always-refresh map JSON");
     assert_eq!(always_json["map"]["cache"]["status"], "refreshed");

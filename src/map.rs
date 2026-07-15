@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use gix::bstr::ByteSlice;
 use ignore::WalkBuilder;
@@ -420,20 +421,15 @@ impl CacheStore {
     fn load(
         &self, path: &str, support: &LanguageSupport, fingerprint: &str, mode: CacheMode,
     ) -> Option<(ParsedSource, bool)> {
-        if matches!(mode, CacheMode::Disabled | CacheMode::Always | CacheMode::Files) {
-            let record = self.read_record(
-                self.record_path(path, support, Some(fingerprint))?,
-                false,
-                path,
-                support,
-                fingerprint,
-            )?;
-            return (!record.1).then_some(record);
+        let current = self.record_path(path, support, Some(fingerprint))?;
+        if let Some(record) = self.read_record(current.clone(), false, path, support, fingerprint)
+            && !record.1
+        {
+            return Some(record);
         }
 
-        let current = self.record_path(path, support, Some(fingerprint))?;
-        if let Some(record) = self.read_record(current.clone(), false, path, support, fingerprint) {
-            return Some(record);
+        if mode != CacheMode::Manual {
+            return None;
         }
 
         let directory = current.parent()?;
@@ -442,7 +438,11 @@ impl CacheStore {
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|candidate| candidate.extension().is_some_and(|extension| extension == "json"))
             .collect::<Vec<_>>();
-        candidates.sort();
+        candidates.sort_by(|left, right| {
+            cache_record_mtime(right)
+                .cmp(&cache_record_mtime(left))
+                .then_with(|| left.cmp(right))
+        });
         candidates
             .into_iter()
             .find_map(|candidate| self.read_record(candidate, true, path, support, fingerprint))
@@ -857,20 +857,41 @@ fn source_fingerprint(source: &[u8]) -> String {
     stable_hash_bytes(source)
 }
 
+fn cache_record_mtime(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(UNIX_EPOCH)
+}
+
 fn cache_file_requested(path: &str, requested: &[String], repository_root: &Path) -> bool {
     requested.iter().any(|requested| {
-        let requested = requested.replace('\\', "/");
-        if requested.trim().is_empty() {
-            return false;
-        }
-        if let Ok(absolute) = fs::canonicalize(&requested)
-            && let Ok(relative) = absolute.strip_prefix(repository_root)
-        {
-            return relative.to_string_lossy().replace('\\', "/") == path;
-        }
-        let requested = requested.trim_start_matches("./");
-        requested == path || path.ends_with(&format!("/{requested}"))
+        normalized_cache_file_path(requested, repository_root).is_some_and(|normalized| normalized == path)
     })
+}
+
+fn normalized_cache_file_path(requested: &str, repository_root: &Path) -> Option<String> {
+    let requested = requested.trim().replace('\\', "/");
+    if requested.is_empty() {
+        return None;
+    }
+    let requested_path = Path::new(&requested);
+    let relative = if requested_path.is_absolute() {
+        requested_path.strip_prefix(repository_root).ok()?
+    } else {
+        requested_path
+    };
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(component) => components.push(component.to_str()?.to_owned()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                components.pop()?;
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 fn cache_status(mode: CacheMode, stats: &CacheStats) -> CacheStatus {
@@ -1911,6 +1932,7 @@ import java.util.List;
 
 public class Service extends BaseService implements Runner {
     private class Hidden {}
+    private Helper helper;
 
     public Result run(Input input) {
         return new Result(helper(input));
@@ -1961,6 +1983,9 @@ namespace Example.App {
         }));
         assert!(parsed_java.symbols.iter().any(|symbol| {
             symbol.name == "Hidden" && symbol.kind == SymbolKind::Class && symbol.role == SymbolRole::Definition
+        }));
+        assert!(parsed_java.symbols.iter().any(|symbol| {
+            symbol.name == "helper" && symbol.kind == SymbolKind::Field && symbol.role == SymbolRole::Definition
         }));
         let java_run = parsed_java
             .symbols
