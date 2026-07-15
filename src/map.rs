@@ -1258,6 +1258,7 @@ fn walk_files(root: &Path, repository_root: &Path, standard_filters: bool) -> (B
     let mut builder = WalkBuilder::new(root);
     builder
         .standard_filters(standard_filters)
+        .hidden(false)
         .follow_links(false)
         .sort_by_file_path(|left, right| left.cmp(right));
     let mut files = BTreeMap::new();

@@ -757,6 +757,27 @@ fn focused_history_commands_support_scopes_and_explicit_overrides() {
 }
 
 #[test]
+fn scoped_history_activity_and_envelope_counts_only_include_affected_commits() {
+    let fixture = HistoryFixtureRepository::new();
+    let output = fixture.run(&["history", "activity", "src", "--json"]);
+    let value: Value = serde_json::from_str(&stdout(&output)).expect("valid scoped activity JSON");
+
+    assert!(output.status.success());
+    assert_eq!(value["history"]["scope_path"], "src");
+    assert_eq!(value["history"]["commits_seen"], 4);
+    assert_eq!(value["history"]["non_merge_commits_seen"], 4);
+    assert_eq!(
+        value["history"]["activity"]["months"]
+            .as_array()
+            .expect("scoped activity months")
+            .iter()
+            .map(|month| month["commits"].as_u64().expect("monthly commit count"))
+            .sum::<u64>(),
+        4
+    );
+}
+
+#[test]
 fn every_history_operation_renders_in_markdown_and_json() {
     let fixture = HistoryFixtureRepository::new();
     for operation in ["history", "churn", "contributors", "bugs", "activity", "firefighting"] {
@@ -861,6 +882,41 @@ fn map_inventory_and_rust_findings_are_reported_semantically() {
         findings
             .iter()
             .any(|finding| { finding["kind"] == "ambiguous_reference" && finding["path"] == "src/use.rs" })
+    );
+}
+
+#[test]
+fn hidden_untracked_sources_are_included_but_hidden_ignored_sources_are_recorded() {
+    let fixture = MapFixtureRepository::new();
+    write_file(
+        fixture.root.join(".gitignore"),
+        b"src/ignored.rs\nsrc/.ignored-hidden.rs\n",
+    );
+    write_file(fixture.root.join("src/.hidden.rs"), b"pub fn hidden() {}\n");
+    write_file(
+        fixture.root.join("src/.ignored-hidden.rs"),
+        b"pub fn ignored_hidden() {}\n",
+    );
+
+    let output = fixture.run(&["map", "--no-cache", "--json"]);
+    let value: Value = serde_json::from_str(&stdout(&output)).expect("valid hidden-file map JSON");
+
+    assert!(output.status.success());
+    assert!(
+        value["map"]["files"]
+            .as_array()
+            .expect("map files")
+            .iter()
+            .any(|file| file["path"] == "src/.hidden.rs" && file["worktree_state"] == "untracked")
+    );
+    assert!(
+        value["map"]["omissions"]
+            .as_array()
+            .expect("map omissions")
+            .iter()
+            .any(|omission| {
+                omission["path"] == "src/.ignored-hidden.rs" && omission["reason"] == "ignored_untracked"
+            })
     );
 }
 

@@ -87,6 +87,10 @@ impl CommitRecord {
     fn evidence(&self, paths: Vec<String>) -> CommitEvidence {
         CommitEvidence { id: self.id.clone(), subject: self.subject.clone(), paths }
     }
+
+    fn affects_scope(&self, scope: &str) -> bool {
+        scope == "." || !scoped_paths(&self.paths, scope).is_empty()
+    }
 }
 
 pub fn analyze(path: &Path, settings: HistorySettings, operation: Option<HistoryOperation>) -> Result<HistoryReport> {
@@ -117,16 +121,21 @@ pub fn analyze(path: &Path, settings: HistorySettings, operation: Option<History
         .then(|| analyze_contributors(&records, &scope.relative_path, &settings, now));
     let bugs = include(HistoryOperation::Bugs)
         .then(|| analyze_bugs(&records, &scope.relative_path, &settings, now, &churn_analysis.paths));
-    let activity = include(HistoryOperation::Activity).then(|| analyze_activity(&records));
+
+    let activity = include(HistoryOperation::Activity).then(|| analyze_activity(&records, &scope.relative_path));
     let firefighting = include(HistoryOperation::Firefighting)
         .then(|| analyze_firefighting(&records, &scope.relative_path, &settings, now));
+    let scoped_records = records
+        .iter()
+        .filter(|record| record.affects_scope(&scope.relative_path));
 
-    let non_merge_commits_seen = records.iter().filter(|record| !record.is_merge).count();
+    let commits_seen = scoped_records.clone().count();
+    let non_merge_commits_seen = scoped_records.filter(|record| !record.is_merge).count();
     Ok(HistoryReport {
         repository_root: scope.repository_root.to_string_lossy().into_owned(),
         scope_path: scope.relative_path,
         settings,
-        commits_seen: records.len(),
+        commits_seen,
         non_merge_commits_seen,
         churn,
         contributors,
@@ -216,9 +225,9 @@ fn analyze_bugs(
     }
 }
 
-fn analyze_activity(records: &[CommitRecord]) -> ActivityReport {
+fn analyze_activity(records: &[CommitRecord], scope: &str) -> ActivityReport {
     let mut months = BTreeMap::new();
-    for record in records {
+    for record in records.iter().filter(|record| record.affects_scope(scope)) {
         *months
             .entry(utils::month_for_timestamp(record.author_seconds))
             .or_insert(0) += 1;
