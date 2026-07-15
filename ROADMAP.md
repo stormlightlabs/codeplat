@@ -247,6 +247,13 @@ These are correctness requirements, not optional polish.
 
 ### Hostile-repository containment
 
+**Implementation status (2026-07-15):** The current boundary is enforced by `src/security.rs`: Git paths
+are validated from bytes, repository opening uses isolated restrictive gix options, status comparison
+avoids the filter-aware status pipeline, worktree reads use Unix descriptor-relative no-follow traversal,
+and cache roots/writes are checked against the canonical repository root. Non-Unix targets retain the
+component reparse/symlink checks but use a weaker standard-library race fallback; cross-platform fixture
+execution remains part of the release gate.
+
 - Treat tree, index, status, and walk paths as untrusted byte strings. Accept only non-empty relative
   paths made of normal components; reject absolute paths, `.` and `..`, platform separator tricks,
   NULs, and lossy-decoding collisions before joining a worktree path.

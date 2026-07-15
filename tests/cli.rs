@@ -256,12 +256,16 @@ impl MapFixtureRepository {
     }
 
     fn run(&self, arguments: &[&str]) -> Output {
+        self.command(arguments).output().expect("run map fixture command")
+    }
+
+    fn command(&self, arguments: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
         command
             .args(arguments)
             .current_dir(&self.root)
             .env("XDG_CACHE_HOME", &self.cache);
-        command.output().expect("run map fixture command")
+        command
     }
 }
 
@@ -865,7 +869,7 @@ fn every_history_operation_renders_in_markdown_and_json() {
 #[test]
 fn map_inventory_and_rust_findings_are_reported_semantically() {
     let fixture = MapFixtureRepository::new();
-    let output = fixture.run(&["map", "--json"]);
+    let output = fixture.run(&["map", "--no-cache", "--json"]);
     let json = stdout(&output);
     let value: Value = serde_json::from_str(&json).expect("valid map JSON");
 
@@ -1165,6 +1169,226 @@ fn map_cache_modes_hit_invalidate_refresh_and_disable_without_project_writes() {
     let missing_changed_file = fixture.run(&["map", "--cache", "files", "--json"]);
     assert_eq!(missing_changed_file.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&missing_changed_file.stderr).contains("requires at least one"));
+}
+
+#[cfg(unix)]
+#[test]
+fn hostile_worktree_symlink_is_omitted_without_reading_or_caching_target_content() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = MapFixtureRepository::new();
+    let outside = fixture.temporary_root.join("outside.rs");
+    write_file(&outside, b"pub fn outside_secret() {}\n");
+    symlink(&outside, fixture.root.join("src/outside.rs")).expect("create hostile source symlink");
+
+    let output = fixture.run(&["map", "--no-cache", "--json"]);
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid hostile-worktree JSON");
+    assert!(
+        output.status.success(),
+        "hostile map failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!stdout(&output).contains("outside_secret"));
+    assert!(
+        json["map"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| file["path"] != "src/outside.rs")
+    );
+    assert!(
+        json["map"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|omission| omission["path"] == "src/outside.rs" && omission["reason"] == "symlink")
+    );
+    assert_eq!(
+        fs::read_dir(&fixture.cache).unwrap().count(),
+        0,
+        "no-cache must not write cache data"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn worktree_swap_race_never_emits_content_from_a_replaced_directory() {
+    use std::os::unix::fs::symlink;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::thread;
+
+    let fixture = MapFixtureRepository::new();
+    let outside = fixture.temporary_root.join("race-outside");
+    fs::create_dir_all(&outside).expect("create race target directory");
+    write_file(outside.join("race.rs"), b"pub fn race_outside_secret() {}\n");
+    write_file(fixture.root.join("src/race.rs"), b"pub fn race_inside() {}\n");
+
+    let running = Arc::new(AtomicBool::new(true));
+    let attacker_running = Arc::clone(&running);
+    let source = fixture.root.join("src");
+    let moved = fixture.root.join("src-real");
+    let link_target = outside.clone();
+    let attacker = thread::spawn(move || {
+        while attacker_running.load(Ordering::Acquire) {
+            if fs::rename(&source, &moved).is_ok() {
+                if symlink(&link_target, &source).is_ok() {
+                    thread::yield_now();
+                    let _ = fs::remove_file(&source);
+                }
+                let _ = fs::rename(&moved, &source);
+            }
+        }
+    });
+
+    let output = fixture.run(&["map", "--no-cache", "--json"]);
+    running.store(false, Ordering::Release);
+    attacker.join().expect("join worktree swap fixture");
+
+    assert!(
+        output.status.success(),
+        "swap-race map failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("race_outside_secret"));
+}
+
+#[test]
+fn malformed_tree_path_is_rejected_before_source_read_or_cache_write() {
+    let fixture = MapFixtureRepository::new();
+    let repository = gix::open(&fixture.root).expect("open malformed-tree fixture repository");
+    let blob = repository
+        .write_object(gix::objs::Blob { data: b"pub fn outside() {}\n".to_vec() })
+        .expect("write malformed-tree blob")
+        .detach();
+    let tree = repository
+        .write_object(gix::objs::Tree {
+            entries: vec![gix::objs::tree::Entry {
+                mode: gix::objs::tree::EntryKind::Blob.into(),
+                filename: "../outside.rs".into(),
+                oid: blob,
+            }],
+        })
+        .expect("write malformed tree")
+        .detach();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time is after the Unix epoch")
+        .as_secs() as i64;
+    let commit = write_commit(
+        &repository,
+        tree,
+        &[],
+        "Malformed Tree Fixture",
+        "malformed@example.com",
+        now,
+        "Malformed path fixture",
+    );
+    drop(repository);
+    write_file(fixture.root.join(".git/HEAD"), b"ref: refs/heads/main\n");
+    write_file(
+        fixture.root.join(".git/refs/heads/main"),
+        format!("{commit}\n").as_bytes(),
+    );
+
+    let output = fixture.run(&["map", "--json"]);
+    assert_eq!(output.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("safety"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("outside"));
+    assert_eq!(fs::read_dir(&fixture.cache).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_root_symlink_into_repository_is_rejected_before_any_write() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = MapFixtureRepository::new();
+    let cache_target = fixture.root.join("cache-target");
+    fs::create_dir_all(&cache_target).expect("create cache target");
+    let cache_link = fixture.root.join("cache-link");
+    symlink(&cache_target, &cache_link).expect("create cache-root symlink");
+
+    let output = fixture
+        .command(&["map", "--json"])
+        .env("XDG_CACHE_HOME", &cache_link)
+        .output()
+        .expect("run cache containment fixture");
+    assert_eq!(output.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cache root"));
+    assert_eq!(
+        fs::read_dir(&cache_target).unwrap().count(),
+        0,
+        "cache writes must not cross a symlink"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_filter_configuration_and_attributes_never_execute_a_sentinel() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = MapFixtureRepository::new();
+    let marker = fixture.temporary_root.join("filter-ran");
+    let sentinel = fixture.temporary_root.join("filter-sentinel.sh");
+    write_file(
+        &sentinel,
+        format!("#!/bin/sh\nprintf ran >> '{}'\n", marker.display()).as_bytes(),
+    );
+    let mut permissions = fs::metadata(&sentinel).expect("sentinel metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&sentinel, permissions).expect("make sentinel executable");
+    write_file(fixture.root.join(".gitattributes"), b"src/*.rs filter=hostile\n");
+    write_file(
+        fixture.root.join(".git/config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n[filter \"hostile\"]\n\tprocess = {}\n\tclean = {}\n\tsmudge = {}\n",
+            sentinel.display(),
+            sentinel.display(),
+            sentinel.display()
+        )
+        .as_bytes(),
+    );
+
+    let output = fixture.run(&["map", "--json"]);
+    assert!(
+        output.status.success(),
+        "filter fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!marker.exists(), "repository-controlled filter sentinel executed");
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn non_utf8_worktree_paths_are_typed_omissions_and_never_become_lossy_output() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = MapFixtureRepository::new();
+    let invalid_name = OsString::from_vec(b"bad\xff.rs".to_vec());
+    write_file(
+        fixture.root.join("src").join(invalid_name),
+        b"pub fn hidden_outside() {}\n",
+    );
+
+    let output = fixture.run(&["map", "--no-cache", "--json"]);
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid non-UTF-8 path JSON");
+    assert!(
+        output.status.success(),
+        "non-UTF-8 fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!stdout(&output).contains("hidden_outside"));
+    assert!(
+        json["map"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|omission| omission["reason"] == "unsafe_path")
+    );
 }
 
 #[test]

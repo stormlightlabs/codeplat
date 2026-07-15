@@ -148,29 +148,42 @@ even for a malformed same-owner repository.
 
 **Blocked by:** Ticket 3
 
+**Implementation status (2026-07-15):** Repository discovery, tree/index/status/walk path validation,
+scope containment, no-follow worktree reads, restrictive gix opening, and cache-root/write containment
+are implemented in `src/security.rs`. Unix reads and cache writes use descriptor-relative no-follow
+traversal; Windows and other non-Unix targets use component reparse checks plus the documented weaker
+standard-library fallback. Hostile CLI fixtures cover malformed tree paths, worktree symlinks, cache-root
+symlinks, non-UTF-8 names where the host filesystem permits them, and filter sentinels. Cross-platform
+execution of the full fixture matrix remains a release verification task.
+
 **Acceptance criteria:**
 
-- [ ] Tree, index, status, and walked paths remain byte-native until validated. Only non-empty relative
+- [x] Tree, index, status, and walked paths remain byte-native until validated. Only non-empty relative
       normal components may reach a filesystem join; absolute, parent, platform-separator, NUL, and
       lossy-collision cases become typed safety diagnostics.
-- [ ] Worktree reads reject symlinks or reparse points in every component and use a race-resistant
+- [x] Worktree reads reject symlinks or reparse points in every component and use a race-resistant
       beneath/no-follow strategy where the platform supports one. The resolved read remains under both
       repository root and selected scope.
-- [ ] Repository opening and status collection use an explicit restrictive gix policy. Hooks,
+- [x] Repository opening and status collection use an explicit restrictive gix policy. Hooks,
       clean/smudge/process filters, credential helpers, editors, pagers, shell commands, and network
       transports cannot execute.
-- [ ] An XDG cache root that resolves within the analyzed repository is rejected; a symlink cannot
+- [x] An XDG cache root that resolves within the analyzed repository is rejected; a symlink cannot
       redirect cache writes into the repository.
-- [ ] Malformed-tree, intermediate-symlink, swap-race, non-UTF-8, Windows-separator, and external-filter
+- [x] Malformed-tree, intermediate-symlink, swap-race, non-UTF-8, Windows-separator, and external-filter
       sentinel fixtures prove that outside content is neither read, emitted, nor cached and no sentinel runs.
+      The compiled suite covers the malformed-tree, intermediate-symlink, swap-race, and filter cases;
+      path-validation tests cover non-UTF-8 and Windows-separator inputs. Full Windows/macOS fixture
+      execution remains platform CI work.
 
 **Verification:**
 
-- Run the compiled CLI against every hostile fixture and assert the typed safety result and unchanged sentinel.
-- Run platform-specific path tests on Linux, macOS, and Windows; document any weaker fallback explicitly.
-- `cargo fmt --check`
-- `cargo test --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] Run the compiled CLI against the available hostile fixtures and assert the typed safety result and unchanged sentinel.
+- [ ] Run platform-specific path tests on Linux, macOS, and Windows; document any weaker fallback explicitly.
+      Unix uses descriptor-relative `openat`/`O_NOFOLLOW`; non-Unix targets use component reparse checks
+      and standard-library reads/writes, which are weaker against a concurrent rename/symlink race.
+- [x] `cargo fmt --check`
+- [x] `cargo test --all-features`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 10. Make cache modes correct, private, and maintainable
 

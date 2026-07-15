@@ -15,6 +15,7 @@ use crate::report::{
     MapInventory, MapReport, MapSelection, MapSnippet, OmissionReason, SourceFile, SourceLanguage, SourceLocation,
     SourceOmission, SourceSymbol, SymbolKind, SymbolRole, WorktreeState,
 };
+use crate::security;
 
 const MAX_CONTEXT_CHARS: usize = 180;
 const DEFAULT_MAP_TOKENS: usize = 1_000;
@@ -297,6 +298,8 @@ pub enum MapError {
     Input { path: PathBuf, reason: String },
     #[error("map analysis failed while {operation}: {reason}")]
     Analysis { operation: &'static str, reason: String },
+    #[error("map safety check failed while {operation}: {reason}")]
+    Safety { operation: &'static str, reason: String },
 }
 
 impl From<MapError> for ExitCategory {
@@ -305,6 +308,7 @@ impl From<MapError> for ExitCategory {
             MapError::Discovery { .. } => ExitCategory::Repository,
             MapError::Input { .. } => ExitCategory::Input,
             MapError::Analysis { .. } => ExitCategory::Analysis,
+            MapError::Safety { .. } => ExitCategory::Input,
         }
     }
 }
@@ -315,6 +319,7 @@ impl From<&MapError> for ExitCategory {
             MapError::Discovery { .. } => ExitCategory::Repository,
             MapError::Input { .. } => ExitCategory::Input,
             MapError::Analysis { .. } => ExitCategory::Analysis,
+            MapError::Safety { .. } => ExitCategory::Input,
         }
     }
 }
@@ -323,6 +328,15 @@ impl MapError {
     fn analysis(operation: &'static str, error: impl std::fmt::Display) -> Self {
         Self::Analysis { operation, reason: error.to_string() }
     }
+
+    fn safety(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Safety { operation, reason: error.to_string() }
+    }
+}
+
+enum WalkIssue {
+    Traversal(String),
+    Safety(String),
 }
 
 #[derive(Clone, Debug)]
@@ -346,11 +360,6 @@ impl Default for MapSettings {
             cache_files: Vec::new(),
         }
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Scope {
-    relative_path: String,
 }
 
 #[derive(Clone, Debug)]
@@ -396,12 +405,14 @@ struct CacheStats {
 }
 
 impl CacheStore {
-    fn new(repository_root: &Path, scope_path: &str) -> Self {
-        Self {
-            root: cache_root(),
+    fn new(repository_root: &Path, scope_path: &str) -> Result<Self> {
+        let root = security::cache_root(repository_root)
+            .map_err(|error| MapError::safety("resolving the cache root", error))?;
+        Ok(Self {
+            root,
             repository_root: repository_root.to_string_lossy().into_owned(),
             scope_path: scope_path.to_owned(),
-        }
+        })
     }
 
     fn record_path(&self, path: &str, support: &LanguageSupport, fingerprint: Option<&str>) -> Option<PathBuf> {
@@ -433,6 +444,10 @@ impl CacheStore {
         }
 
         let directory = current.parent()?;
+        let root = self.root.as_ref()?;
+        if security::cache_path_is_safe(root, directory).is_err() {
+            return None;
+        }
         let entries = fs::read_dir(directory).ok()?;
         let mut candidates = entries
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -445,13 +460,17 @@ impl CacheStore {
         });
         candidates
             .into_iter()
+            .filter(|candidate| security::cache_path_is_safe(root, candidate).is_ok())
             .find_map(|candidate| self.read_record(candidate, true, path, support, fingerprint))
     }
 
     fn read_record(
         &self, path: PathBuf, stale: bool, expected_path: &str, support: &LanguageSupport, fingerprint: &str,
     ) -> Option<(ParsedSource, bool)> {
-        let bytes = fs::read(path).ok()?;
+        let bytes = self
+            .root
+            .as_ref()
+            .and_then(|root| security::read_cache_file(root, &path).ok())?;
         let record: CacheRecord = serde_json::from_slice(&bytes).ok()?;
         if record.schema_version != CACHE_SCHEMA_VERSION
             || record.tool_version != CACHE_TOOL_VERSION
@@ -468,10 +487,6 @@ impl CacheStore {
 
     fn write(&self, path: &str, support: &LanguageSupport, fingerprint: &str, parsed: &ParsedSource) -> Option<String> {
         let record_path = self.record_path(path, support, Some(fingerprint))?;
-        let parent = record_path.parent()?;
-        if let Err(error) = fs::create_dir_all(parent) {
-            return Some(format!("could not create the Setaryb cache directory: {error}"));
-        }
         let record = CacheRecord {
             schema_version: CACHE_SCHEMA_VERSION,
             tool_version: CACHE_TOOL_VERSION.to_owned(),
@@ -487,7 +502,8 @@ impl CacheStore {
             Ok(bytes) => bytes,
             Err(error) => return Some(format!("could not serialize the source-map cache record: {error}")),
         };
-        fs::write(record_path, bytes)
+        let root = self.root.as_ref()?;
+        security::write_cache_file(root, &record_path, &bytes)
             .err()
             .map(|error| format!("could not write the source-map cache record: {error}"))
     }
@@ -503,28 +519,15 @@ struct SnippetCandidate {
 
 pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     let selected_path = absolute_path(path)?;
-    let repository = gix::discover(&selected_path)
-        .map_err(|source| MapError::Discovery { path: selected_path.clone(), source: Box::new(source) })?;
-    let repository_root = repository.workdir().ok_or_else(|| MapError::Input {
-        path: selected_path.clone(),
-        reason: "the discovered repository has no worktree".to_owned(),
+    let repository = security::discover_repository(&selected_path)
+        .map_err(|source| MapError::Discovery { path: selected_path.clone(), source })?;
+    let scope = security::resolve_scope(&repository, &selected_path).map_err(|error| match error {
+        security::ScopeError::Input(reason) => MapError::Input { path: selected_path.clone(), reason },
+        security::ScopeError::Safety(error) => MapError::safety("resolving the analysis scope", error),
     })?;
-    let repository_root = fs::canonicalize(repository_root)
-        .map_err(|error| MapError::Input { path: repository_root.to_owned(), reason: error.to_string() })?;
-    let relative_path = selected_path
-        .strip_prefix(&repository_root)
-        .map_err(|_| MapError::Input {
-            path: selected_path.clone(),
-            reason: format!("path is outside repository `{}`", repository_root.display()),
-        })?;
-    let relative_path = if relative_path.as_os_str().is_empty() {
-        ".".to_owned()
-    } else {
-        relative_path.to_string_lossy().replace('\\', "/")
-    };
-    let scope = Scope { relative_path };
+    let repository_root = &scope.repository_root;
 
-    let exclusions = build_exclusions(&repository_root, &settings.excludes)?;
+    let exclusions = build_exclusions(repository_root, &settings.excludes)?;
     if settings.map_tokens == 0 {
         return Err(MapError::Input {
             path: selected_path,
@@ -537,7 +540,15 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             reason: "files cache mode requires at least one changed-file path".to_owned(),
         });
     }
-    let cache = CacheStore::new(&repository_root, &scope.relative_path);
+    let cache = if settings.cache_mode == CacheMode::Disabled {
+        CacheStore {
+            root: None,
+            repository_root: repository_root.to_string_lossy().into_owned(),
+            scope_path: scope.relative_path.clone(),
+        }
+    } else {
+        CacheStore::new(repository_root, &scope.relative_path)?
+    };
     let mut cache_stats = CacheStats::default();
     let mut cache_limitations = Vec::new();
     if settings.cache_mode != CacheMode::Disabled && cache.root.is_none() {
@@ -552,11 +563,11 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         &repository
             .head_tree_id_or_empty()
             .map_err(|error| MapError::analysis("resolving the repository HEAD tree", error))?,
-        "",
+        b"",
         &mut tracked_paths,
     )?;
     collect_index_files(&repository, &mut tracked_paths)?;
-    let modified_paths = collect_modified_paths(&repository)?;
+    let modified_paths = collect_modified_paths(&repository, repository_root)?;
 
     let mut candidates = BTreeMap::new();
     for path in tracked_paths
@@ -567,7 +578,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         candidates.insert(path, Candidate { state, symlink: false });
     }
 
-    let (visible_paths, visible_errors) = walk_files(&selected_path, &repository_root, true);
+    let (visible_paths, visible_errors) = walk_files(&scope.selected_path, repository_root, true);
     for (path, symlink) in &visible_paths {
         if is_git_internal(path) || !in_scope(path, &scope.relative_path) {
             continue;
@@ -578,15 +589,15 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             .or_insert(Candidate { state: WorktreeState::Untracked, symlink: *symlink });
     }
 
-    let (all_paths, all_errors) = walk_files(&selected_path, &repository_root, false);
+    let (all_paths, all_errors) = walk_files(&scope.selected_path, repository_root, false);
     let visible_path_set: BTreeSet<_> = visible_paths.keys().cloned().collect();
     let mut omissions = Vec::new();
     for error in visible_errors.into_iter().chain(all_errors) {
-        omissions.push(SourceOmission {
-            path: scope.relative_path.clone(),
-            reason: OmissionReason::TraversalError,
-            detail: error,
-        });
+        let (reason, detail) = match error {
+            WalkIssue::Traversal(detail) => (OmissionReason::TraversalError, detail),
+            WalkIssue::Safety(detail) => (OmissionReason::UnsafePath, detail),
+        };
+        omissions.push(SourceOmission { path: scope.relative_path.clone(), reason, detail });
     }
     for (path, symlink) in all_paths {
         if is_git_internal(&path)
@@ -642,21 +653,26 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             });
             continue;
         }
-        let source = match fs::read(&absolute) {
+        let source = match security::read_worktree_file(repository_root, &scope.selected_path, &path) {
             Ok(source) => source,
+            Err(security::ReadError::Safety(error)) => {
+                let reason = if matches!(error.kind, security::PathSafetyKind::Symlink) {
+                    OmissionReason::Symlink
+                } else {
+                    OmissionReason::UnsafePath
+                };
+                omissions.push(SourceOmission { path, reason, detail: error.to_string() });
+                continue;
+            }
             Err(error) => {
-                omissions.push(SourceOmission {
-                    path,
-                    reason: OmissionReason::ReadError,
-                    detail: format!("The source file could not be read: {error}"),
-                });
+                omissions.push(SourceOmission { path, reason: OmissionReason::ReadError, detail: error.to_string() });
                 continue;
             }
         };
         let fingerprint = source_fingerprint(&source);
         let forced_refresh = matches!(settings.cache_mode, CacheMode::Always)
             || (settings.cache_mode == CacheMode::Files
-                && cache_file_requested(&path, &settings.cache_files, &repository_root));
+                && cache_file_requested(&path, &settings.cache_files, repository_root));
         let (parsed, stale) = if settings.cache_mode != CacheMode::Disabled && !forced_refresh {
             match cache.load(&path, support, &fingerprint, settings.cache_mode) {
                 Some((parsed, stale)) => {
@@ -819,21 +835,6 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             refreshed: cache_stats.refreshed,
             stale: cache_stats.stale,
         },
-    })
-}
-
-fn cache_root() -> Option<PathBuf> {
-    if let Some(xdg_cache_home) = std::env::var_os("XDG_CACHE_HOME")
-        && !xdg_cache_home.is_empty()
-    {
-        let xdg_cache_home = PathBuf::from(xdg_cache_home);
-        if xdg_cache_home.is_absolute() {
-            return Some(xdg_cache_home.join("setaryb"));
-        }
-    }
-    std::env::var_os("HOME").and_then(|home| {
-        let home = PathBuf::from(home);
-        home.is_absolute().then(|| home.join(".cache/setaryb"))
     })
 }
 
@@ -1181,14 +1182,7 @@ fn token_count(text: &str) -> usize {
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
-    let path = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| MapError::analysis("reading the current directory", error))?
-            .join(path)
-    };
-    fs::canonicalize(&path).map_err(|error| MapError::Input { path, reason: error.to_string() })
+    security::absolute_input_path(path).map_err(|error| MapError::analysis("reading the current directory", error))
 }
 
 fn build_exclusions(root: &Path, exclusions: &[String]) -> Result<Option<Gitignore>> {
@@ -1219,19 +1213,36 @@ fn explicitly_excluded(exclusions: Option<&Gitignore>, path: &Path) -> bool {
 }
 
 fn collect_tree_files(
-    repository: &gix::Repository, tree_id: &gix::Id<'_>, prefix: &str, files: &mut BTreeSet<String>,
+    repository: &gix::Repository, tree_id: &gix::Id<'_>, prefix: &[u8], files: &mut BTreeSet<String>,
 ) -> Result<()> {
     let tree = repository
         .find_tree(*tree_id)
         .map_err(|error| MapError::analysis("reading the tracked source tree", error))?;
+    let mut names = BTreeSet::new();
     for entry in tree.iter() {
         let entry = entry.map_err(|error| MapError::analysis("decoding a tracked tree entry", error))?;
-        let name = entry.filename().to_str_lossy();
-        let path = if prefix.is_empty() { name.into_owned() } else { format!("{prefix}/{name}") };
+        if !names.insert(entry.filename().as_bytes().to_owned()) {
+            return Err(MapError::safety(
+                "decoding a tracked tree path",
+                security::PathSafetyError { kind: security::PathSafetyKind::Collision },
+            ));
+        }
+        let mut path_bytes = prefix.to_vec();
+        if !path_bytes.is_empty() {
+            path_bytes.push(b'/');
+        }
+        path_bytes.extend_from_slice(entry.filename().as_bytes());
+        let path = security::validate_repository_path(&path_bytes)
+            .map_err(|error| MapError::safety("decoding a tracked tree path", error))?;
         if entry.mode().is_tree() {
-            collect_tree_files(repository, &entry.id(), &path, files)?;
+            collect_tree_files(repository, &entry.id(), path.as_bytes(), files)?;
         } else {
-            files.insert(path);
+            if !files.insert(path) {
+                return Err(MapError::safety(
+                    "decoding a tracked tree path",
+                    security::PathSafetyError { kind: security::PathSafetyKind::Collision },
+                ));
+            }
         }
     }
     Ok(())
@@ -1241,41 +1252,52 @@ fn collect_index_files(repository: &gix::Repository, files: &mut BTreeSet<String
     let index = repository
         .index_or_empty()
         .map_err(|error| MapError::analysis("reading the worktree index", error))?;
-    for path in index.entries_with_paths_by_filter_map(|path, _| Some(path.to_str_lossy().into_owned())) {
-        files.insert(path.1);
+    for (path, _) in index.entries_with_paths_by_filter_map(|_, entry| Some(entry.id)) {
+        let path = security::validate_repository_path(path.as_bytes())
+            .map_err(|error| MapError::safety("decoding a worktree index path", error))?;
+        files.insert(path);
     }
     Ok(())
 }
 
-fn collect_modified_paths(repository: &gix::Repository) -> Result<BTreeSet<String>> {
+fn collect_modified_paths(repository: &gix::Repository, repository_root: &Path) -> Result<BTreeSet<String>> {
     let index = repository
         .index_or_load_from_head_or_empty()
         .map_err(|error| MapError::analysis("loading the worktree index for status", error))?;
-    let iterator = repository
-        .status(gix::progress::Discard)
-        .map_err(|error| MapError::analysis("starting worktree status", error))?
-        .index(index)
-        .index_worktree_submodules(None)
-        .untracked_files(gix::status::UntrackedFiles::None)
-        .into_iter(Vec::<gix::bstr::BString>::new())
-        .map_err(|error| MapError::analysis("computing worktree status", error))?;
     let mut modified = BTreeSet::new();
-    for item in iterator {
-        let item = item.map_err(|error| MapError::analysis("reading worktree status", error))?;
-        match item {
-            gix::status::Item::IndexWorktree(gix::status::index_worktree::Item::Modification { rela_path, .. }) => {
-                modified.insert(rela_path.to_str_lossy().into_owned());
+    // The gix status pipeline is deliberately not used here: it can consult
+    // repository attributes and configure clean/smudge/process filters. Byte
+    // comparison against the index blob gives the needed modified-path signal
+    // without executing repository-controlled programs.
+    for (path, id) in index.entries_with_paths_by_filter_map(|_, entry| Some(entry.id)) {
+        let path = security::validate_repository_path(path.as_bytes())
+            .map_err(|error| MapError::safety("decoding a status path", error))?;
+        let worktree = match security::read_worktree_file(repository_root, repository_root, &path) {
+            Ok(bytes) => bytes,
+            Err(security::ReadError::Safety(_)) => {
+                modified.insert(path);
+                continue;
             }
-            gix::status::Item::TreeIndex(change) => {
-                modified.insert(change.location().to_str_lossy().into_owned());
+            Err(security::ReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                modified.insert(path);
+                continue;
             }
-            gix::status::Item::IndexWorktree(_) => {}
+            Err(security::ReadError::Io(_)) => {
+                modified.insert(path);
+                continue;
+            }
+        };
+        let blob = repository
+            .find_blob(id)
+            .map_err(|error| MapError::analysis("reading an index blob for status", error))?;
+        if blob.data != worktree {
+            modified.insert(path);
         }
     }
     Ok(modified)
 }
 
-fn walk_files(root: &Path, repository_root: &Path, standard_filters: bool) -> (BTreeMap<String, bool>, Vec<String>) {
+fn walk_files(root: &Path, repository_root: &Path, standard_filters: bool) -> (BTreeMap<String, bool>, Vec<WalkIssue>) {
     let mut builder = WalkBuilder::new(root);
     builder
         .standard_filters(standard_filters)
@@ -1284,11 +1306,14 @@ fn walk_files(root: &Path, repository_root: &Path, standard_filters: bool) -> (B
         .sort_by_file_path(|left, right| left.cmp(right));
     let mut files = BTreeMap::new();
     let mut errors = Vec::new();
+    let mut native_paths = BTreeMap::<String, PathBuf>::new();
     for item in builder.build() {
         let entry = match item {
             Ok(entry) => entry,
             Err(error) => {
-                errors.push(format!("ignore traversal reported an error: {error}"));
+                errors.push(WalkIssue::Traversal(format!(
+                    "ignore traversal reported an error: {error}"
+                )));
                 continue;
             }
         };
@@ -1301,7 +1326,20 @@ fn walk_files(root: &Path, repository_root: &Path, standard_filters: bool) -> (B
         let Some(path) = entry.path().strip_prefix(repository_root).ok() else {
             continue;
         };
-        let path = path.to_string_lossy().replace('\\', "/");
+        let path = match security::validate_os_relative_path(path) {
+            Ok(path) => path,
+            Err(error) => {
+                errors.push(WalkIssue::Safety(format!("walked path rejected: {error}")));
+                continue;
+            }
+        };
+        if native_paths.get(&path).is_some_and(|previous| previous != entry.path()) {
+            errors.push(WalkIssue::Safety(
+                "two filesystem paths collapsed to one validated repository path".to_owned(),
+            ));
+            continue;
+        }
+        native_paths.insert(path.clone(), entry.path().to_owned());
         files.insert(path, entry.path_is_symlink());
     }
     (files, errors)

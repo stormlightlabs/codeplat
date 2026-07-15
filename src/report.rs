@@ -274,6 +274,7 @@ pub enum OmissionReason {
     UnsupportedLanguage,
     ExplicitExclusion,
     Symlink,
+    UnsafePath,
     ReadError,
     TraversalError,
 }
@@ -285,6 +286,7 @@ impl OmissionReason {
             Self::UnsupportedLanguage => "unsupported_language",
             Self::ExplicitExclusion => "explicit_exclusion",
             Self::Symlink => "symlink",
+            Self::UnsafePath => "unsafe_path",
             Self::ReadError => "read_error",
             Self::TraversalError => "traversal_error",
         }

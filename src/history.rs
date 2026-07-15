@@ -11,6 +11,7 @@ use crate::report::{
     ActivityReport, BugReport, ChurnReport, CommitEvidence, ContributorCount, ContributorReport, FirefightingReport,
     HistoryOperation, HistoryReport, HistorySettings, MonthlyActivity, PathCount,
 };
+use crate::security;
 use crate::utils;
 
 const CHURN_CAVEAT: &str =
@@ -36,6 +37,8 @@ pub enum HistoryError {
     Input { path: PathBuf, reason: String },
     #[error("history analysis failed while {operation}: {reason}")]
     Analysis { operation: &'static str, reason: String },
+    #[error("history safety check failed while {operation}: {reason}")]
+    Safety { operation: &'static str, reason: String },
 }
 
 impl From<HistoryError> for ExitCategory {
@@ -44,6 +47,7 @@ impl From<HistoryError> for ExitCategory {
             HistoryError::Discovery { .. } => ExitCategory::Repository,
             HistoryError::Input { .. } => ExitCategory::Input,
             HistoryError::Analysis { .. } => ExitCategory::Analysis,
+            HistoryError::Safety { .. } => ExitCategory::Input,
         }
     }
 }
@@ -54,6 +58,7 @@ impl From<&HistoryError> for ExitCategory {
             HistoryError::Discovery { .. } => ExitCategory::Repository,
             HistoryError::Input { .. } => ExitCategory::Input,
             HistoryError::Analysis { .. } => ExitCategory::Analysis,
+            HistoryError::Safety { .. } => ExitCategory::Input,
         }
     }
 }
@@ -62,12 +67,10 @@ impl HistoryError {
     fn analysis(operation: &'static str, error: impl std::fmt::Display) -> Self {
         Self::Analysis { operation, reason: error.to_string() }
     }
-}
 
-#[derive(Debug)]
-struct Scope {
-    repository_root: PathBuf,
-    relative_path: String,
+    fn safety(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Safety { operation, reason: error.to_string() }
+    }
 }
 
 #[derive(Debug)]
@@ -102,9 +105,12 @@ pub fn analyze(path: &Path, settings: HistorySettings, operation: Option<History
     }
 
     let selected_path = absolute_path(path)?;
-    let repository = gix::discover(&selected_path)
-        .map_err(|source| HistoryError::Discovery { path: selected_path.clone(), source: Box::new(source) })?;
-    let scope = resolve_scope(&repository, &selected_path)?;
+    let repository = security::discover_repository(&selected_path)
+        .map_err(|source| HistoryError::Discovery { path: selected_path.clone(), source })?;
+    let scope = security::resolve_scope(&repository, &selected_path).map_err(|error| match error {
+        security::ScopeError::Input(reason) => HistoryError::Input { path: selected_path.clone(), reason },
+        security::ScopeError::Safety(error) => HistoryError::safety("resolving the analysis scope", error),
+    })?;
     let head = repository
         .head_id()
         .map_err(|error| HistoryError::analysis("resolving HEAD", error))?;
@@ -271,27 +277,6 @@ fn analyze_firefighting(
     }
 }
 
-fn resolve_scope(repository: &gix::Repository, selected_path: &Path) -> Result<Scope> {
-    let repository_root = repository.workdir().ok_or_else(|| HistoryError::Input {
-        path: selected_path.to_owned(),
-        reason: "the discovered repository has no worktree".to_owned(),
-    })?;
-    let repository_root = std::fs::canonicalize(repository_root)
-        .map_err(|error| HistoryError::Input { path: repository_root.to_owned(), reason: error.to_string() })?;
-    let relative = selected_path
-        .strip_prefix(&repository_root)
-        .map_err(|_| HistoryError::Input {
-            path: selected_path.to_owned(),
-            reason: format!("path is outside repository `{}`", repository_root.display()),
-        })?;
-    let relative_path = if relative.as_os_str().is_empty() {
-        ".".to_owned()
-    } else {
-        relative.to_string_lossy().replace('\\', "/")
-    };
-    Ok(Scope { repository_root, relative_path })
-}
-
 fn collect_commits(repository: &gix::Repository, head: gix::Id<'_>) -> Result<Vec<CommitRecord>> {
     let walk = repository
         .rev_walk([head])
@@ -432,16 +417,18 @@ fn changed_paths(
 fn tree_entries(tree: &gix::Tree<'_>) -> Result<BTreeMap<String, (gix::objs::tree::EntryMode, gix::ObjectId)>> {
     let decoded = gix::objs::TreeRef::from_bytes(&tree.data, tree.id.kind())
         .map_err(|error| HistoryError::analysis("decoding a directory tree", error))?;
-    Ok(decoded
-        .entries
-        .into_iter()
-        .map(|entry| {
-            (
-                entry.filename.to_str_lossy().into_owned(),
-                (entry.mode, entry.oid.to_owned()),
-            )
-        })
-        .collect())
+    let mut entries = BTreeMap::new();
+    for entry in decoded.entries {
+        let name = security::validate_component(entry.filename.as_bytes())
+            .map_err(|error| HistoryError::safety("decoding a Git tree path", error))?;
+        if entries.insert(name, (entry.mode, entry.oid.to_owned())).is_some() {
+            return Err(HistoryError::safety(
+                "decoding a Git tree path",
+                security::PathSafetyError { kind: security::PathSafetyKind::Collision },
+            ));
+        }
+    }
+    Ok(entries)
 }
 
 fn contributor_counts(records: Vec<&CommitRecord>) -> Vec<ContributorCount> {
@@ -478,14 +465,7 @@ fn contributor_counts(records: Vec<&CommitRecord>) -> Vec<ContributorCount> {
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
-    let path = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| HistoryError::analysis("reading the current directory", error))?
-            .join(path)
-    };
-    std::fs::canonicalize(&path).map_err(|error| HistoryError::Input { path, reason: error.to_string() })
+    security::absolute_input_path(path).map_err(|error| HistoryError::analysis("reading the current directory", error))
 }
 
 fn scoped_paths(paths: &[String], scope: &str) -> Vec<String> {
