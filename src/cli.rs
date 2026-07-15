@@ -150,12 +150,19 @@ impl ApplicationError {
     about = "Read-only repository orientation for people and coding agents.",
     long_about = "Setaryb produces a concise, evidence-backed repository briefing.
 
+The default command combines Git-history signals with a ranked source map.
+
 Use `map` or `history` for focused reports.
 
 Examples:
-    setaryb
+    setaryb .
+    setaryb --json .
+    setaryb --focus parser --focus-path src .
+    setaryb --no-cache .
     setaryb map --json
     setaryb history contributors .
+
+See https://github.com/stormlightlabs/setaryb/issues for support and bug reports.
 
 Exit status:
     0  success
@@ -179,7 +186,11 @@ struct Cli {
     #[command(subcommand)]
     command: Option<SubcommandName>,
 
-    #[arg(value_name = "PATH", default_value = ".")]
+    #[arg(
+        value_name = "PATH",
+        default_value = ".",
+        help = "Repository or subdirectory to analyze (default: current directory)."
+    )]
     path: PathBuf,
 }
 
@@ -246,12 +257,18 @@ impl Cli {
 #[command(after_help = "Examples:
     setaryb map
     setaryb map --json
+
+Support: https://github.com/stormlightlabs/setaryb/issues
 ")]
 struct MapCommand {
     #[command(flatten)]
     options: MapOptions,
 
-    #[arg(value_name = "PATH", default_value = ".")]
+    #[arg(
+        value_name = "PATH",
+        default_value = ".",
+        help = "Repository or subdirectory to analyze (default: current directory)."
+    )]
     path: PathBuf,
 }
 
@@ -335,6 +352,8 @@ impl MapOptions {
 #[command(after_help = "Examples:
     setaryb history
     setaryb history contributors .
+
+Support: https://github.com/stormlightlabs/setaryb/issues
 ")]
 struct HistoryCommand {
     #[command(flatten)]
@@ -343,7 +362,11 @@ struct HistoryCommand {
     #[command(subcommand)]
     operation: Option<HistorySubcommand>,
 
-    #[arg(value_name = "PATH", default_value = ".")]
+    #[arg(
+        value_name = "PATH",
+        default_value = ".",
+        help = "Repository or subdirectory to analyze (default: current directory)."
+    )]
     path: PathBuf,
 }
 
@@ -351,12 +374,18 @@ struct HistoryCommand {
 #[command(after_help = "Examples:
     setaryb history churn
     setaryb history bugs --json
+
+Support: https://github.com/stormlightlabs/setaryb/issues
 ")]
 struct HistoryOperationCommand {
     #[command(flatten)]
     options: HistoryOptions,
 
-    #[arg(value_name = "PATH", default_value = ".")]
+    #[arg(
+        value_name = "PATH",
+        default_value = ".",
+        help = "Repository or subdirectory to analyze (default: current directory)."
+    )]
     path: PathBuf,
 }
 

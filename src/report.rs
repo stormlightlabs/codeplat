@@ -354,41 +354,26 @@ pub struct Report {
 }
 
 impl Report {
-    pub fn foundation(request: CommandRequest) -> Self {
-        let (summary, limitations) = match (&request.command.name, request.command.operation) {
-            (CommandName::Briefing, _) => (
-                "The command and rendering foundation is ready; repository analysis will be added in subsequent tickets.",
-                vec![
-                    Limitation::new("History analysis is not available in this build."),
-                    Limitation::new("Source-map analysis is not available in this build."),
-                ],
-            ),
-            (CommandName::Map, _) => (
-                "The map command contract and renderers are ready; source-map analysis will be added in a subsequent ticket.",
-                vec![Limitation::new("Source-map analysis is not available in this build.")],
-            ),
-            (CommandName::History, _) => (
-                "The history command contract and renderers are ready; Git-history analysis will be added in a subsequent ticket.",
-                vec![Limitation::new("History analysis is not available in this build.")],
-            ),
-        };
-
-        Self {
-            schema_version: SCHEMA_VERSION,
-            scope: ReportScope::from(request.command.path.clone()),
-            command: request.command,
-            status: ReportStatus::Foundation,
-            summary: summary.to_owned(),
-            findings: Vec::new(),
-            limitations,
-            history: None,
-            map: None,
-        }
-    }
-
     pub fn analyze(request: CommandRequest) -> Result<Self, ReportError> {
         match request.command.name {
-            CommandName::Briefing => Ok(Self::foundation(request)),
+            CommandName::Briefing => {
+                let path = request.command.path.clone();
+                let scope = ReportScope::from(path.clone());
+                let history_report = history::analyze(&path, request.history, None).map_err(ReportError::History)?;
+                let map_report = map::analyze(&path, &request.map).map_err(ReportError::Map)?;
+
+                Ok(Self {
+                    schema_version: SCHEMA_VERSION,
+                    scope,
+                    command: request.command,
+                    status: ReportStatus::Analyzed,
+                    summary: briefing_summary(&history_report, &map_report),
+                    findings: Vec::new(),
+                    limitations: Vec::new(),
+                    history: Some(history_report),
+                    map: Some(map_report),
+                })
+            }
             CommandName::History => {
                 let scope = ReportScope::from(request.command.path.clone());
                 let history_report =
@@ -520,6 +505,18 @@ fn map_summary(map: &MapReport) -> String {
             map.inventory.omitted
         )
     }
+}
+
+fn briefing_summary(history: &HistoryReport, map: &MapReport) -> String {
+    format!(
+        "Analyzed {} reachable commits ({} non-merge) and {} source files; ranked {} files within a {}-token source-map budget, with {} paths omitted in the selected scope.",
+        history.commits_seen,
+        history.non_merge_commits_seen,
+        map.inventory.analyzed,
+        map.ranking.len(),
+        map.selection.token_budget,
+        map.inventory.omitted,
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -787,12 +784,6 @@ pub struct Finding {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Limitation {
     pub detail: String,
-}
-
-impl Limitation {
-    fn new(detail: impl Into<String>) -> Self {
-        Self { detail: detail.into() }
-    }
 }
 
 struct Render;

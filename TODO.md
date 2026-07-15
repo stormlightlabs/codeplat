@@ -107,15 +107,20 @@ exactly. The remaining cache safety, retention, and complete-report budget work 
 briefing that joins history and source-map findings through the shared report model. This ticket completes
 the product flow.
 
+**Implementation status (2026-07-15):** The default command now renders one analyzed report containing all
+five history signals and the ranked source map in Markdown or JSON. Existing language provenance and
+partial/unsupported analysis diagnostics remain attached to the map evidence. Trust-boundary and resource
+hardening follow-up remains tracked by Tickets 9 through 14.
+
 **Blocked by:** Tickets 2, 4, 5, 6, and 7
 
 **Acceptance criteria:**
 
-- [ ] The default command combines the five history diagnostics and the ranked source map in one
+- [x] The default command combines the five history diagnostics and the ranked source map in one
       shared Markdown/JSON report without duplicating or re-parsing data.
-- [ ] All first-class languages have query-pack provenance, support-status documentation, fixture
+- [x] All first-class languages have query-pack provenance, support-status documentation, fixture
       coverage, and actionable unsupported/partial-analysis messages.
-- [ ] Top-level and subcommand help lead with examples, document output/cache/color/scope/focus semantics,
+- [x] Top-level and subcommand help lead with examples, document output/cache/color/scope/focus semantics,
       and give users an issue or support path.
 - [ ] JSON schema compatibility tests, Markdown readability snapshots, exit-code checks, and no-ANSI-stdout
       checks cover the final command surface.

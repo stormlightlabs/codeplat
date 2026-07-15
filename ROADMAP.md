@@ -56,10 +56,11 @@ larger report.
   all five history diagnostics, cache modes, graph ranking, and Tree-sitter query packs for all
   seven first-class language families.
 - Feature implementations for Tickets 1 through 7 exist, and the local formatting, test, Clippy,
-  documentation, and release-build checks pass. The suite currently contains 35 tests; audit-reopened
+  documentation, and release-build checks pass. The suite currently contains 38 tests; audit-reopened
   acceptance boxes remain unchecked in `TODO.md`.
-- The default `setaryb [PATH]` command is still a successful foundation placeholder rather than the
-  promised integrated briefing, so Ticket 8 remains incomplete.
+- The default `setaryb [PATH]` command now renders the promised integrated briefing: one typed report
+  contains all five history diagnostics and the ranked, cache-aware source map. The remaining audit
+  hardening and release criteria are tracked by Tickets 9 through 14.
 - The **2026-07-14** audit found release-blocking trust-boundary, cache-validity,
   bounded-output, resource-limit, history-scope, and report-provenance gaps. Tickets 9 through 14
   define the stabilization work; they supersede checked acceptance criteria where the audit produced
@@ -451,8 +452,8 @@ Keep language query files and test fixtures as first-class, versioned assets rat
    C# grammars and query packs.
 5. **Relevant compact maps (implemented mechanically, quality gate failed):** add lexical graph construction, deterministic rank/focus scoring,
    token-budget selection, cache modes, and cache observability.
-6. **Integrated briefing:** replace the successful foundation placeholder with the shared history, map,
-   limitations, provenance, and next-read report.
+6. **Integrated briefing (implemented):** render the shared history, map, limitations, provenance, and
+   ranked next-read evidence through the default command.
 7. **Trust and resource hardening:** close hostile-path/filter execution, stale cache, scope, bounded-work,
    bounded-output, graph-signal, and machine-contract tickets with fixtures.
 8. **Distributable v1:** complete help and documentation, cross-platform output/exit compatibility,

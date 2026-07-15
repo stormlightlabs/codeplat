@@ -546,6 +546,7 @@ fn root_map_and_history_help_are_complete() {
         assert!(help.contains("Examples:"));
         assert!(help.contains("--format <FORMAT>"));
         assert!(help.contains("--json"));
+        assert!(help.contains("github.com/stormlightlabs/setaryb/issues"));
         if arguments.first().copied() == Some("map") {
             assert!(help.contains("--exclude <GLOB>"));
         }
@@ -553,16 +554,75 @@ fn root_map_and_history_help_are_complete() {
 }
 
 #[test]
-fn commands_parse_with_default_paths_and_emit_actionable_foundation_guidance() {
-    let fixture = FixtureRepository::new();
-    let output = fixture.run(&[]);
+fn default_command_combines_history_and_ranked_source_map() {
+    let fixture = MixedMapFixtureRepository::new();
+    let output = fixture.run(&[
+        "--no-cache",
+        "--focus",
+        "Service",
+        "--focus-path",
+        "src",
+        "--map-tokens",
+        "120",
+        "--json",
+    ]);
+    let json = stdout(&output);
+    let value: Value = serde_json::from_str(&json).expect("valid integrated briefing JSON");
+
+    assert!(
+        output.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_plain_report(&json);
+    assert_eq!(value["command"]["name"], "briefing");
+    assert_eq!(value["status"], "analyzed");
+    assert!(
+        value["summary"]
+            .as_str()
+            .expect("briefing summary")
+            .contains("reachable commits")
+    );
+    assert!(value["history"]["churn"].is_object());
+    assert!(value["history"]["contributors"].is_object());
+    assert!(value["history"]["bugs"].is_object());
+    assert!(value["history"]["activity"].is_object());
+    assert!(value["history"]["firefighting"].is_object());
+    assert_eq!(value["map"]["query_pack"], "mixed");
+    assert_eq!(value["map"]["cache"]["status"], "disabled");
+    assert_eq!(value["map"]["selection"]["token_budget"], 120);
+    assert!(value["map"]["selection"]["estimated_tokens"].as_u64().unwrap() <= 120);
+    assert!(value["map"]["query_packs"]["javascript"].is_string());
+    assert!(value["map"]["query_packs"]["typescript"].is_string());
+}
+
+#[test]
+fn default_markdown_briefing_keeps_history_and_map_sections_readable() {
+    let fixture = MixedMapFixtureRepository::new();
+    let output = fixture.run(&["--no-cache"]);
     let markdown = stdout(&output);
 
-    assert!(output.status.success(), "command failed: {markdown}");
+    assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    assert!(markdown.contains("Status: Foundation"));
-    assert!(markdown.contains("not available in this build"));
     assert_plain_report(&markdown);
+    assert!(markdown.starts_with("# Setaryb briefing\n"));
+    assert!(markdown.contains("Status: Analyzed"));
+    for section in [
+        "## History analysis",
+        "### Churn hotspots",
+        "### Contributor concentration",
+        "### Bug-related clusters",
+        "### Monthly activity",
+        "### Firefighting commits",
+        "## Source map",
+        "### Ranked map selection",
+        "### Map limitations",
+    ] {
+        assert!(markdown.contains(section), "missing Markdown section: {section}");
+    }
+    assert!(markdown.contains("Query packs:"));
+    assert!(markdown.contains("Tree-sitter"));
 }
 
 #[test]
@@ -577,8 +637,8 @@ fn history_without_commits_uses_the_analysis_exit_category() {
 
 #[test]
 fn json_rendering_is_versioned_semantic_and_plain() {
-    let fixture = FixtureRepository::new();
-    let output = fixture.run(&["--json"]);
+    let fixture = MixedMapFixtureRepository::new();
+    let output = fixture.run(&["--no-cache", "--json"]);
     let json = stdout(&output);
 
     assert!(output.status.success());
@@ -588,7 +648,9 @@ fn json_rendering_is_versioned_semantic_and_plain() {
     let value: Value = serde_json::from_str(&json).expect("valid JSON report");
     assert_eq!(value["schema_version"], 1);
     assert_eq!(value["command"]["name"], "briefing");
-    assert_eq!(value["status"], "foundation");
+    assert_eq!(value["status"], "analyzed");
+    assert!(value["history"].is_object());
+    assert!(value["map"].is_object());
 }
 
 #[test]
@@ -1450,9 +1512,9 @@ fn java_and_c_sharp_map_is_first_class_and_preserves_visibility_duplicates_and_l
 
 #[test]
 fn format_json_and_json_alias_share_the_report_renderer() {
-    let fixture = FixtureRepository::new();
-    let format_output = fixture.run(&["--format", "json"]);
-    let alias_output = fixture.run(&["--json"]);
+    let fixture = MixedMapFixtureRepository::new();
+    let format_output = fixture.run(&["--no-cache", "--format", "json"]);
+    let alias_output = fixture.run(&["--no-cache", "--json"]);
 
     assert!(format_output.status.success());
     assert!(alias_output.status.success());
@@ -1509,9 +1571,9 @@ fn markdown_snapshot_is_direct_and_readable() {
 
 #[test]
 fn color_options_never_change_json_stdout() {
-    let fixture = FixtureRepository::new();
-    let never = fixture.run(&["--color", "never", "--json"]);
-    let always = fixture.run(&["--color", "always", "--json"]);
+    let fixture = MixedMapFixtureRepository::new();
+    let never = fixture.run(&["--no-cache", "--color", "never", "--json"]);
+    let always = fixture.run(&["--no-cache", "--color", "always", "--json"]);
 
     assert!(never.status.success());
     assert!(always.status.success());

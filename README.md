@@ -3,7 +3,8 @@
 Setaryb (Setāreyāb, Persian for “astrolabe”) is a CLI to help you orient yourself
 in a new codebase.
 
-It produces two focused reports:
+Its default command produces one integrated briefing, and two focused reports are
+available when you needs only one evidence family:
 
 - `map` inventories the current worktree and extracts structural maps for Rust, JavaScript,
   JSX, TypeScript, TSX, Python, Ruby, Java, and C# source files.
@@ -21,15 +22,33 @@ cargo build --release
 Then run it from a Git worktree:
 
 ```sh
-./target/release/setaryb map
-./target/release/setaryb map --json
-./target/release/setaryb map src --exclude 'src/generated/**' --json
-./target/release/setaryb history
-./target/release/setaryb history contributors src --json
+setaryb
+setaryb --json
+setaryb map
+setaryb map --json
+setaryb map src --exclude 'src/generated/**' --json
+setaryb history
+setaryb history contributors src --json
 ```
 
 `PATH` defaults to the current directory. `setaryb` discovers the enclosing
 Git repository and keeps the selected scope inside that repository.
+
+## Default briefing
+
+`setaryb [PATH]` combines all five history diagnostics with the ranked source
+map in one versioned Markdown or JSON report. The source map accepts the same
+focus, token-budget, exclusion, cache, and color controls described below:
+
+```sh
+setaryb --focus parser --focus-path src --map-tokens 500 .
+setaryb --no-cache --json .
+```
+
+The report keeps history caveats, source-map limitations, query-pack provenance,
+partial-file diagnostics, and omitted-path reasons beside the evidence they
+qualify. This makes unsupported or partially parsed files actionable instead of
+silently dropping them.
 
 ## Commands
 
@@ -106,24 +125,3 @@ Reports go to stdout without ANSI escape sequences and diagnostics go to stderr.
 
 Diagnostic color can be controlled with `--color auto|always|never` or `--no-color`.
 Color settings never change report stdout.
-
-## Map limitations
-
-The source map is lexical. It does not resolve imports, types, macros, runtime
-behavior, or semantic call relationships. A name with multiple definition candidates
-is reported as ambiguous instead of being presented as a resolved edge.
-
-Parse and query limitations remain attached to the affected file so other language
-findings are retained.
-
-The ranked map uses lexical PageRank-style centrality.
-
-Generic and underscore-prefixed names may be downweighted for ranking only but remain
-available in the full JSON evidence. The token budget bounds selected structural snippets
-and keeps their source locations when context is elided.
-
-Unsupported files, read failures, symlinks, and partial parses remain visible in the report.
-
-Java and C# query-pack provenance is reported as `java-v1` and `c-sharp-v1` in mixed-language
-maps. Their lexical findings include package/namespace, type, method, property, and field
-symbols where the grammar exposes them; visibility is not treated as a reason to omit a symbol.
