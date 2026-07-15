@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gix::bstr::ByteSlice;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::cli::ExitCategory;
@@ -19,8 +21,11 @@ use crate::security;
 
 const MAX_CONTEXT_CHARS: usize = 180;
 const DEFAULT_MAP_TOKENS: usize = 1_000;
-const CACHE_SCHEMA_VERSION: u16 = 1;
-const CACHE_TOOL_VERSION: &str = "setaryb-map-v7";
+const CACHE_SCHEMA_VERSION: u16 = 2;
+const CACHE_TOOL_VERSION: &str = "setaryb-map-v8";
+const CACHE_MAX_RECORDS_PER_REPOSITORY: usize = 256;
+const CACHE_MAX_BYTES_PER_REPOSITORY: u64 = 32 * 1024 * 1024;
+const CACHE_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
 const RANK_SCALE: f64 = 1_000_000.0;
 const PAGE_RANK_DAMPING: f64 = 0.85;
 const PAGE_RANK_ITERATIONS: usize = 24;
@@ -381,11 +386,12 @@ struct CacheRecord {
     schema_version: u16,
     tool_version: String,
     repository_root: String,
-    scope_path: String,
     path: String,
     language: SourceLanguage,
     query_pack: String,
+    query_digest: String,
     fingerprint: String,
+    created_at: u128,
     parsed: ParsedSource,
 }
 
@@ -393,80 +399,327 @@ struct CacheRecord {
 struct CacheStore {
     root: Option<PathBuf>,
     repository_root: String,
-    scope_path: String,
+    repository_id: String,
 }
 
 #[derive(Debug, Default)]
 struct CacheStats {
+    matched: usize,
+    unmatched: usize,
+    unavailable: usize,
     hits: usize,
     misses: usize,
     refreshed: Vec<String>,
     stale: Vec<String>,
 }
 
+#[derive(Debug)]
+struct CacheLookup {
+    parsed: ParsedSource,
+    stale: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheCommand {
+    Path,
+    Status,
+    Prune,
+    Clear,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheControlReport {
+    pub operation: String,
+    pub path: Option<String>,
+    pub exists: bool,
+    pub repositories: usize,
+    pub records: usize,
+    pub bytes: u64,
+    pub removed_records: usize,
+    pub removed_bytes: u64,
+    pub max_records_per_repository: usize,
+    pub max_bytes_per_repository: u64,
+    pub max_age_seconds: u64,
+}
+
+#[derive(Debug)]
+struct CacheFileInfo {
+    path: PathBuf,
+    bytes: u64,
+    timestamp: u128,
+    repository_id: Option<String>,
+}
+
+/// Inspect or mutate only Setaryb's configured cache root. This deliberately
+/// does not discover a Git repository or access a worktree.
+pub fn cache_control(command: CacheCommand) -> Result<CacheControlReport> {
+    let root =
+        security::configured_cache_root().map_err(|error| MapError::safety("resolving the cache root", error))?;
+    let operation = match command {
+        CacheCommand::Path => "path",
+        CacheCommand::Status => "status",
+        CacheCommand::Prune => "prune",
+        CacheCommand::Clear => "clear",
+    };
+    let Some(root) = root else {
+        return Ok(CacheControlReport {
+            operation: operation.to_owned(),
+            path: None,
+            exists: false,
+            repositories: 0,
+            records: 0,
+            bytes: 0,
+            removed_records: 0,
+            removed_bytes: 0,
+            max_records_per_repository: CACHE_MAX_RECORDS_PER_REPOSITORY,
+            max_bytes_per_repository: CACHE_MAX_BYTES_PER_REPOSITORY,
+            max_age_seconds: CACHE_MAX_AGE_SECONDS,
+        });
+    };
+
+    let exists = root.is_dir();
+    let mut removed_records = 0;
+    let mut removed_bytes = 0;
+    if exists && command == CacheCommand::Prune {
+        let repositories = root.join("repositories");
+        for repository in direct_directories(&repositories)? {
+            let (removed, bytes) = prune_cache_directory(&root, &repository)
+                .map_err(|error| MapError::analysis("pruning the cache", error))?;
+            removed_records += removed;
+            removed_bytes += bytes;
+        }
+    } else if exists && command == CacheCommand::Clear {
+        let repositories = root.join("repositories");
+        for repository in direct_directories(&repositories)? {
+            if security::cache_path_is_safe(&root, &repository).is_err() {
+                continue;
+            }
+            let info = collect_cache_files(&root, &repository)?;
+            removed_records += info.len();
+            removed_bytes += info.iter().map(|entry| entry.bytes).sum::<u64>();
+            fs::remove_dir_all(repository).map_err(|error| MapError::analysis("clearing the cache", error))?;
+        }
+    }
+
+    let files = if root.is_dir() { collect_cache_files(&root, &root.join("repositories"))? } else { Vec::new() };
+    let repositories = files
+        .iter()
+        .filter_map(|entry| entry.repository_id.as_deref())
+        .collect::<BTreeSet<_>>()
+        .len();
+    Ok(CacheControlReport {
+        operation: operation.to_owned(),
+        path: Some(root.to_string_lossy().into_owned()),
+        exists,
+        repositories,
+        records: files.len(),
+        bytes: files.iter().map(|entry| entry.bytes).sum(),
+        removed_records,
+        removed_bytes,
+        max_records_per_repository: CACHE_MAX_RECORDS_PER_REPOSITORY,
+        max_bytes_per_repository: CACHE_MAX_BYTES_PER_REPOSITORY,
+        max_age_seconds: CACHE_MAX_AGE_SECONDS,
+    })
+}
+
+fn direct_directories(path: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(MapError::analysis("reading the cache", error)),
+    };
+    let mut directories = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(|file_type| file_type.is_dir() && !file_type.is_symlink())
+                .map(|_| entry.path())
+        })
+        .collect::<Vec<_>>();
+    directories.sort();
+    Ok(directories)
+}
+
+fn collect_cache_files(root: &Path, directory: &Path) -> Result<Vec<CacheFileInfo>> {
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    if security::cache_path_is_safe(root, directory).is_err() {
+        return Ok(Vec::new());
+    }
+    let repository_id = directory
+        .strip_prefix(root.join("repositories"))
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        .map(str::to_owned);
+    let mut files = Vec::new();
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(MapError::analysis("reading the cache", error)),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(MapError::analysis("reading the cache", error)),
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(MapError::analysis("reading the cache", error)),
+        };
+        let path = entry.path();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            files.extend(collect_cache_files(root, &path)?);
+        } else if file_type.is_file() && path.extension().is_some_and(|extension| extension == "json") {
+            if security::cache_path_is_safe(root, &path).is_err() {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(MapError::analysis("reading cache metadata", error)),
+            };
+            let timestamp = security::read_cache_file(root, &path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<CacheRecord>(&bytes).ok())
+                .map(|record| record.created_at)
+                .unwrap_or_else(|| {
+                    metadata
+                        .modified()
+                        .ok()
+                        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default()
+                });
+            files.push(CacheFileInfo { path, bytes: metadata.len(), timestamp, repository_id: repository_id.clone() });
+        }
+    }
+    Ok(files)
+}
+
+fn prune_cache_directory(root: &Path, repository: &Path) -> std::result::Result<(usize, u64), String> {
+    let mut files = collect_cache_files(root, repository).map_err(|error| error.to_string())?;
+    files.sort_by(|left, right| {
+        right
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let cutoff = unix_timestamp().saturating_sub(u128::from(CACHE_MAX_AGE_SECONDS) * 1_000_000_000);
+    let mut remove = files
+        .iter()
+        .filter(|entry| entry.timestamp < cutoff)
+        .map(|entry| entry.path.clone())
+        .collect::<BTreeSet<_>>();
+    let mut remaining = files
+        .iter()
+        .filter(|entry| !remove.contains(&entry.path))
+        .collect::<Vec<_>>();
+    let mut remaining_bytes = remaining.iter().map(|entry| entry.bytes).sum::<u64>();
+    while remaining.len() > CACHE_MAX_RECORDS_PER_REPOSITORY || remaining_bytes > CACHE_MAX_BYTES_PER_REPOSITORY {
+        let Some(entry) = remaining.pop() else {
+            break;
+        };
+        remaining_bytes = remaining_bytes.saturating_sub(entry.bytes);
+        remove.insert(entry.path.clone());
+    }
+    let mut removed_bytes = 0;
+    for path in &remove {
+        if security::cache_path_is_safe(root, path).is_err() {
+            continue;
+        }
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            removed_bytes += metadata.len();
+        }
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok((remove.len(), removed_bytes))
+}
+
 impl CacheStore {
-    fn new(repository_root: &Path, scope_path: &str) -> Result<Self> {
+    fn new(repository_root: &Path) -> Result<Self> {
         let root = security::cache_root(repository_root)
             .map_err(|error| MapError::safety("resolving the cache root", error))?;
-        Ok(Self {
-            root,
-            repository_root: repository_root.to_string_lossy().into_owned(),
-            scope_path: scope_path.to_owned(),
-        })
+        let repository_root = repository_root.to_string_lossy().into_owned();
+        Ok(Self { root, repository_id: digest_hex(repository_root.as_bytes()), repository_root })
     }
 
-    fn record_path(&self, path: &str, support: &LanguageSupport, fingerprint: Option<&str>) -> Option<PathBuf> {
+    fn repository_path(&self) -> Option<PathBuf> {
+        self.root
+            .as_ref()
+            .map(|root| root.join("repositories").join(&self.repository_id))
+    }
+
+    fn record_directory(&self, path: &str, support: &LanguageSupport) -> Option<PathBuf> {
         let root = self.root.as_ref()?;
         let identity = format!(
-            "{CACHE_TOOL_VERSION}\n{}\n{}\n{}\n{}\n{}",
+            "{CACHE_TOOL_VERSION}\n{}\n{}\n{}\n{}",
             self.repository_root,
-            self.scope_path,
+            path,
             support.language.label(),
-            support.query_pack,
-            path
+            query_digest(support),
         );
-        let records = root.join("maps").join(stable_hash(&identity)).join(stable_hash(path));
-        Some(records.join(format!("{}.json", fingerprint.unwrap_or("latest"))))
+        Some(
+            root.join("repositories")
+                .join(&self.repository_id)
+                .join("files")
+                .join(digest_hex(identity.as_bytes())),
+        )
     }
 
-    fn load(
-        &self, path: &str, support: &LanguageSupport, fingerprint: &str, mode: CacheMode,
-    ) -> Option<(ParsedSource, bool)> {
-        let current = self.record_path(path, support, Some(fingerprint))?;
-        if let Some(record) = self.read_record(current.clone(), false, path, support, fingerprint)
-            && !record.1
-        {
-            return Some(record);
+    fn record_path(&self, path: &str, support: &LanguageSupport, fingerprint: &str) -> Option<PathBuf> {
+        Some(
+            self.record_directory(path, support)?
+                .join(format!("{fingerprint}.json")),
+        )
+    }
+
+    fn load(&self, path: &str, support: &LanguageSupport, fingerprint: &str, mode: CacheMode) -> Option<CacheLookup> {
+        let directory = self.record_directory(path, support)?;
+        let root = self.root.as_ref()?;
+        if security::cache_path_is_safe(root, &directory).is_err() {
+            return None;
         }
 
         if mode != CacheMode::Manual {
-            return None;
+            let current = self.record_path(path, support, fingerprint)?;
+            let record = self.read_record(current, path, support)?;
+            return (record.fingerprint == fingerprint).then_some(CacheLookup { parsed: record.parsed, stale: false });
         }
 
-        let directory = current.parent()?;
-        let root = self.root.as_ref()?;
-        if security::cache_path_is_safe(root, directory).is_err() {
-            return None;
-        }
         let entries = fs::read_dir(directory).ok()?;
         let mut candidates = entries
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|candidate| candidate.extension().is_some_and(|extension| extension == "json"))
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
-            cache_record_mtime(right)
-                .cmp(&cache_record_mtime(left))
+            self.cache_record_created_at(right)
+                .cmp(&self.cache_record_created_at(left))
+                .then_with(|| cache_record_mtime(right).cmp(&cache_record_mtime(left)))
                 .then_with(|| left.cmp(right))
         });
         candidates
             .into_iter()
             .filter(|candidate| security::cache_path_is_safe(root, candidate).is_ok())
-            .find_map(|candidate| self.read_record(candidate, true, path, support, fingerprint))
+            .find_map(|candidate| {
+                let record = self.read_record(candidate, path, support)?;
+                Some(CacheLookup { parsed: record.parsed, stale: record.fingerprint != fingerprint })
+            })
     }
 
-    fn read_record(
-        &self, path: PathBuf, stale: bool, expected_path: &str, support: &LanguageSupport, fingerprint: &str,
-    ) -> Option<(ParsedSource, bool)> {
+    fn read_record(&self, path: PathBuf, expected_path: &str, support: &LanguageSupport) -> Option<CacheRecord> {
         let bytes = self
             .root
             .as_ref()
@@ -475,27 +728,37 @@ impl CacheStore {
         if record.schema_version != CACHE_SCHEMA_VERSION
             || record.tool_version != CACHE_TOOL_VERSION
             || record.repository_root != self.repository_root
-            || record.scope_path != self.scope_path
             || record.path != expected_path
             || record.language != support.language
             || record.query_pack != support.query_pack
+            || record.query_digest != query_digest(support)
         {
             return None;
         }
-        Some((record.parsed, stale || record.fingerprint != fingerprint))
+        Some(record)
+    }
+
+    fn cache_record_created_at(&self, path: &Path) -> u128 {
+        self.root
+            .as_ref()
+            .and_then(|root| security::read_cache_file(root, path).ok())
+            .and_then(|bytes| serde_json::from_slice::<CacheRecord>(&bytes).ok())
+            .map(|record| record.created_at)
+            .unwrap_or_default()
     }
 
     fn write(&self, path: &str, support: &LanguageSupport, fingerprint: &str, parsed: &ParsedSource) -> Option<String> {
-        let record_path = self.record_path(path, support, Some(fingerprint))?;
+        let record_path = self.record_path(path, support, fingerprint)?;
         let record = CacheRecord {
             schema_version: CACHE_SCHEMA_VERSION,
             tool_version: CACHE_TOOL_VERSION.to_owned(),
             repository_root: self.repository_root.clone(),
-            scope_path: self.scope_path.clone(),
             path: path.to_owned(),
             language: support.language,
             query_pack: support.query_pack.to_owned(),
+            query_digest: query_digest(support),
             fingerprint: fingerprint.to_owned(),
+            created_at: unix_timestamp(),
             parsed: parsed.clone(),
         };
         let bytes = match serde_json::to_vec(&record) {
@@ -503,9 +766,22 @@ impl CacheStore {
             Err(error) => return Some(format!("could not serialize the source-map cache record: {error}")),
         };
         let root = self.root.as_ref()?;
-        security::write_cache_file(root, &record_path, &bytes)
+        if let Err(error) = security::write_cache_file(root, &record_path, &bytes) {
+            return Some(format!("could not write the source-map cache record: {error}"));
+        }
+        self.prune_repository()
             .err()
-            .map(|error| format!("could not write the source-map cache record: {error}"))
+            .map(|error| format!("could not prune source-map cache records: {error}"))
+    }
+
+    fn prune_repository(&self) -> std::result::Result<(usize, u64), String> {
+        let Some(root) = self.root.as_ref() else {
+            return Ok((0, 0));
+        };
+        let Some(repository_path) = self.repository_path() else {
+            return Ok((0, 0));
+        };
+        prune_cache_directory(root, &repository_path)
     }
 }
 
@@ -544,10 +820,10 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         CacheStore {
             root: None,
             repository_root: repository_root.to_string_lossy().into_owned(),
-            scope_path: scope.relative_path.clone(),
+            repository_id: digest_hex(repository_root.to_string_lossy().as_bytes()),
         }
     } else {
-        CacheStore::new(repository_root, &scope.relative_path)?
+        CacheStore::new(repository_root)?
     };
     let mut cache_stats = CacheStats::default();
     let mut cache_limitations = Vec::new();
@@ -617,6 +893,31 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         omissions.push(SourceOmission { path, reason, detail: detail.to_owned() });
     }
 
+    let requested_cache_files = settings
+        .cache_files
+        .iter()
+        .filter_map(|path| normalized_cache_file_path(path, repository_root))
+        .collect::<BTreeSet<_>>();
+    if settings.cache_mode == CacheMode::Files {
+        let eligible_cache_paths = candidates
+            .iter()
+            .filter(|(path, candidate)| {
+                support_for_path(Path::new(path)).is_some()
+                    && !candidate.symlink
+                    && !explicitly_excluded(exclusions.as_ref(), &repository_root.join(path))
+                    && !fs::symlink_metadata(repository_root.join(path))
+                        .map(|metadata| metadata.file_type().is_symlink())
+                        .unwrap_or(false)
+            })
+            .map(|(path, _)| path.clone())
+            .collect::<BTreeSet<_>>();
+        cache_stats.matched = requested_cache_files
+            .iter()
+            .filter(|path| eligible_cache_paths.contains(*path))
+            .count();
+        cache_stats.unmatched = requested_cache_files.len().saturating_sub(cache_stats.matched);
+    }
+
     let inventory = inventory(&candidates);
     let mut files = Vec::new();
     let mut findings = Vec::new();
@@ -670,45 +971,10 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             }
         };
         let fingerprint = source_fingerprint(&source);
-        let forced_refresh = matches!(settings.cache_mode, CacheMode::Always)
-            || (settings.cache_mode == CacheMode::Files
-                && cache_file_requested(&path, &settings.cache_files, repository_root));
-        let (parsed, stale) = if settings.cache_mode != CacheMode::Disabled && !forced_refresh {
-            match cache.load(&path, support, &fingerprint, settings.cache_mode) {
-                Some((parsed, stale)) => {
-                    cache_stats.hits += 1;
-                    if stale {
-                        cache_stats.stale.push(path.clone());
-                    }
-                    (parsed, stale)
-                }
-                None if settings.cache_mode == CacheMode::Manual => {
-                    cache_stats.misses += 1;
-                    files.push(SourceFile {
-                        path: path.clone(),
-                        language: support.language,
-                        extension: extension_for_path(Path::new(&path)),
-                        worktree_state: candidate.state,
-                        status: FileAnalysisStatus::Partial,
-                        symbols: Vec::new(),
-                        limitations: vec![
-                            "Manual cache mode found no cached analysis for this file and did not refresh it."
-                                .to_owned(),
-                        ],
-                    });
-                    continue;
-                }
-                None => {
-                    cache_stats.misses += 1;
-                    let parsed = parse_source(&source, support);
-                    if let Some(error) = cache.write(&path, support, &fingerprint, &parsed) {
-                        cache_limitations.push(error);
-                    }
-                    cache_stats.refreshed.push(path.clone());
-                    (parsed, false)
-                }
-            }
-        } else {
+        let requested = requested_cache_files.contains(&path);
+        let forced_refresh =
+            matches!(settings.cache_mode, CacheMode::Always) || (settings.cache_mode == CacheMode::Files && requested);
+        let (parsed, stale) = if settings.cache_mode == CacheMode::Disabled || forced_refresh {
             let parsed = parse_source(&source, support);
             if settings.cache_mode != CacheMode::Disabled {
                 if let Some(error) = cache.write(&path, support, &fingerprint, &parsed) {
@@ -717,6 +983,41 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 cache_stats.refreshed.push(path.clone());
             }
             (parsed, false)
+        } else {
+            let lookup_mode =
+                if settings.cache_mode == CacheMode::Files { CacheMode::Auto } else { settings.cache_mode };
+            match cache.load(&path, support, &fingerprint, lookup_mode) {
+                Some(lookup) => {
+                    cache_stats.hits += 1;
+                    if lookup.stale {
+                        cache_stats.stale.push(path.clone());
+                    }
+                    (lookup.parsed, lookup.stale)
+                }
+                None => {
+                    cache_stats.misses += 1;
+                    if matches!(settings.cache_mode, CacheMode::Manual | CacheMode::Files) {
+                        cache_stats.unavailable += 1;
+                        omissions.push(SourceOmission {
+                            path: path.clone(),
+                            reason: OmissionReason::CacheUnavailable,
+                            detail: if settings.cache_mode == CacheMode::Manual {
+                                "Manual cache mode found no usable record for this file and did not refresh it."
+                            } else {
+                                "Files cache mode did not refresh this unrequested file because no current cache record was available."
+                            }
+                            .to_owned(),
+                        });
+                        continue;
+                    }
+                    let parsed = parse_source(&source, support);
+                    if let Some(error) = cache.write(&path, support, &fingerprint, &parsed) {
+                        cache_limitations.push(error);
+                    }
+                    cache_stats.refreshed.push(path.clone());
+                    (parsed, false)
+                }
+            }
         };
         let ParsedSource { symbols, findings: file_findings, status, mut limitations } = parsed;
         if stale {
@@ -832,42 +1133,49 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             status: cache_status,
             hits: cache_stats.hits,
             misses: cache_stats.misses,
+            matched: cache_stats.matched,
+            unmatched: cache_stats.unmatched,
+            unavailable: cache_stats.unavailable,
             refreshed: cache_stats.refreshed,
             stale: cache_stats.stale,
         },
     })
 }
 
-fn stable_hash(input: &str) -> String {
-    stable_hash_bytes(input.as_bytes())
-}
-
-fn stable_hash_bytes(bytes: &[u8]) -> String {
-    let mut first = 0xcbf29ce484222325_u64;
-    let mut second = 0x9e3779b185ebca87_u64;
-    for byte in bytes {
-        first ^= u64::from(*byte);
-        first = first.wrapping_mul(0x100000001b3);
-        second ^= u64::from(*byte).wrapping_add(0x9e37);
-        second = second.rotate_left(7).wrapping_mul(0x517cc1b727220a95);
+fn digest_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(output, "{byte:02x}").expect("writing to a String cannot fail");
     }
-    format!("{first:016x}{second:016x}")
+    output
 }
 
 fn source_fingerprint(source: &[u8]) -> String {
-    stable_hash_bytes(source)
+    digest_hex(source)
+}
+
+fn query_digest(support: &LanguageSupport) -> String {
+    let mut identity = Vec::new();
+    identity.extend_from_slice(support.query_pack.as_bytes());
+    identity.push(0);
+    identity.extend_from_slice(support.definitions.as_bytes());
+    identity.push(0);
+    identity.extend_from_slice(support.references.as_bytes());
+    digest_hex(&identity)
+}
+
+fn unix_timestamp() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
 }
 
 fn cache_record_mtime(path: &Path) -> std::time::SystemTime {
-    fs::metadata(path)
+    fs::symlink_metadata(path)
         .and_then(|metadata| metadata.modified())
         .unwrap_or(UNIX_EPOCH)
-}
-
-fn cache_file_requested(path: &str, requested: &[String], repository_root: &Path) -> bool {
-    requested.iter().any(|requested| {
-        normalized_cache_file_path(requested, repository_root).is_some_and(|normalized| normalized == path)
-    })
 }
 
 fn normalized_cache_file_path(requested: &str, repository_root: &Path) -> Option<String> {
@@ -2115,6 +2423,41 @@ namespace Example.App {
             SourceLanguage::CSharp
         );
         assert!(support_for_path(Path::new("module.vue")).is_none());
+    }
+
+    #[test]
+    fn cache_file_paths_normalize_without_basename_matching_or_scope_leaks() {
+        let repository = Path::new("/repo");
+        assert_eq!(
+            normalized_cache_file_path("src\\lib.rs", repository),
+            Some("src/lib.rs".to_owned())
+        );
+        assert_eq!(
+            normalized_cache_file_path("/repo/src/./lib.rs", repository),
+            Some("src/lib.rs".to_owned())
+        );
+        assert_eq!(
+            normalized_cache_file_path("lib.rs", repository),
+            Some("lib.rs".to_owned())
+        );
+        assert_eq!(normalized_cache_file_path("../src/lib.rs", repository), None);
+    }
+
+    #[test]
+    fn cache_pruning_is_count_bounded_and_path_deterministic() {
+        let root = std::env::temp_dir().join(format!("setaryb-cache-prune-{}", std::process::id()));
+        let repository = root.join("repositories").join("repo");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&repository).expect("create cache prune fixture");
+        for index in 0..(CACHE_MAX_RECORDS_PER_REPOSITORY + 4) {
+            fs::write(repository.join(format!("record-{index:03}.json")), b"{}").expect("write cache prune record");
+        }
+
+        let (removed, _) = prune_cache_directory(&root, &repository).expect("prune cache fixture");
+        assert_eq!(removed, 4);
+        let remaining = collect_cache_files(&root, &repository).expect("read pruned cache fixture");
+        assert_eq!(remaining.len(), CACHE_MAX_RECORDS_PER_REPOSITORY);
+        fs::remove_dir_all(root).expect("remove cache prune fixture");
     }
 
     #[test]

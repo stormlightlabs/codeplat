@@ -3,6 +3,9 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CACHE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathSafetyKind {
@@ -238,31 +241,31 @@ fn restrictive_open_options() -> gix::open::Options {
 }
 
 pub fn cache_root(repository_root: &Path) -> Result<Option<PathBuf>, CacheRootError> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".cache"))
-        });
-    let Some(base) = base else {
+    match cache_base_path() {
+        Some(configured) => {
+            let resolved = resolve_existing(&configured)?;
+            if is_within(repository_root, &configured) || is_within(repository_root, &resolved) {
+                Err(CacheRootError::InsideRepository)
+            } else {
+                Ok(Some(resolved))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+/// Resolve the configured Setaryb cache root without consulting a repository.
+/// Cache-management commands use this so they never discover or modify a target worktree.
+pub fn configured_cache_root() -> Result<Option<PathBuf>, CacheRootError> {
+    let Some(candidate) = cache_base_path() else {
         return Ok(None);
     };
-    if !base.is_absolute() {
-        return Ok(None);
-    }
-    let candidate = base.join("setaryb");
-    let resolved = resolve_existing(&candidate)?;
-    if is_within(repository_root, &candidate) || is_within(repository_root, &resolved) {
-        return Err(CacheRootError::InsideRepository);
-    }
-    Ok(Some(resolved))
+    Ok(Some(resolve_existing(&candidate)?))
 }
 
 pub fn write_cache_file(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), CacheWriteError> {
-    cache_path_is_safe(root, path).map_err(CacheWriteError::Safety)?;
     fs::create_dir_all(root)?;
+    set_private_directory(root)?;
     cache_path_is_safe(root, path).map_err(CacheWriteError::Safety)?;
     if fs::symlink_metadata(path).is_ok_and(|metadata| is_reparse_or_symlink(&metadata)) {
         return Err(CacheWriteError::Safety(PathSafetyError::new(
@@ -278,7 +281,24 @@ pub fn write_cache_file(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), Ca
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cache record has no parent"))?;
         fs::create_dir_all(parent)?;
         cache_path_is_safe(root, path).map_err(CacheWriteError::Safety)?;
-        write_file_no_follow(path, bytes)?;
+        let temporary = parent.join(format!(
+            ".{}.tmp-{}-{}",
+            path.file_name().and_then(|name| name.to_str()).unwrap_or("record"),
+            std::process::id(),
+            CACHE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        write_file_no_follow(&temporary, bytes)?;
+        match fs::rename(&temporary, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                // Windows does not replace an existing file with rename. The
+                // temporary file is complete, so the fallback still avoids
+                // exposing truncated JSON; Unix uses the atomic rename path.
+                fs::remove_file(path)?;
+                fs::rename(&temporary, path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
@@ -335,6 +355,33 @@ pub fn read_worktree_file(
     {
         Ok(fs::read(candidate)?)
     }
+}
+
+fn cache_base_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".cache"))
+        });
+    let base = base?;
+    if !base.is_absolute() {
+        return None;
+    }
+    Some(base.join("setaryb"))
+}
+
+#[cfg(unix)]
+fn set_private_directory(path: &Path) -> Result<(), io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_directory(_path: &Path) -> Result<(), io::Error> {
+    Ok(())
 }
 
 fn reject_repository_config(meta: &gix::config::file::Metadata) -> bool {
@@ -444,6 +491,9 @@ fn write_cache_beneath(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), Cac
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(root)
         .map_err(map_cache_open_error)?;
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
 
     for component in &components[..components.len().saturating_sub(1)] {
         let name = std::ffi::CString::new(component.as_bytes()).expect("validated paths contain no NUL");
@@ -473,18 +523,28 @@ fn write_cache_beneath(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), Cac
         if fd < 0 {
             return Err(map_cache_open_error(io::Error::last_os_error()));
         }
-        directory = unsafe { File::from_raw_fd(fd) };
+        let child = unsafe { File::from_raw_fd(fd) };
+        if unsafe { libc::fchmod(child.as_raw_fd(), 0o700) } < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        directory = child;
     }
 
     let Some(filename) = components.last() else {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "cache record has no filename").into());
     };
-    let name = std::ffi::CString::new(filename.as_bytes()).expect("validated paths contain no NUL");
+    let final_name = std::ffi::CString::new(filename.as_bytes()).expect("validated paths contain no NUL");
+    let temporary_name = format!(
+        ".{filename}.tmp-{}-{}",
+        std::process::id(),
+        CACHE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let temporary_name = std::ffi::CString::new(temporary_name).expect("temporary names contain no NUL");
     let fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            temporary_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o600,
         )
     };
@@ -492,8 +552,31 @@ fn write_cache_beneath(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), Cac
         return Err(map_cache_open_error(io::Error::last_os_error()));
     }
     let mut file = unsafe { File::from_raw_fd(fd) };
-    file.write_all(bytes)?;
-    Ok(())
+    let result = (|| -> Result<(), CacheWriteError> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        if unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                temporary_name.as_ptr(),
+                directory.as_raw_fd(),
+                final_name.as_ptr(),
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        if unsafe { libc::fsync(directory.as_raw_fd()) } < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        unsafe {
+            libc::unlinkat(directory.as_raw_fd(), temporary_name.as_ptr(), 0);
+        }
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -516,7 +599,9 @@ fn map_cache_open_error(error: io::Error) -> CacheWriteError {
 
 #[cfg(not(unix))]
 fn write_file_no_follow(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
-    fs::write(path, bytes)
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 fn is_within(root: &Path, path: &Path) -> bool {

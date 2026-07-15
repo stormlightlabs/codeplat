@@ -4,7 +4,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -518,6 +518,26 @@ fn write_file(path: impl AsRef<Path>, contents: &[u8]) {
 
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("stdout is UTF-8")
+}
+
+fn cache_json_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_owned()];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                directories.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "json") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
 }
 
 fn assert_plain_report(output: &str) {
@@ -1169,6 +1189,255 @@ fn map_cache_modes_hit_invalidate_refresh_and_disable_without_project_writes() {
     let missing_changed_file = fixture.run(&["map", "--cache", "files", "--json"]);
     assert_eq!(missing_changed_file.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&missing_changed_file.stderr).contains("requires at least one"));
+}
+
+#[test]
+fn files_cache_mode_refreshes_only_exact_requested_paths_and_reports_unavailable_files() {
+    let fixture = MapFixtureRepository::new();
+    let output = fixture.run(&[
+        "map",
+        "--cache",
+        "files",
+        "--cache-file",
+        "src/lib.rs",
+        "--cache-file",
+        "lib.rs",
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "files cache failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid files cache JSON");
+    let cache = &json["map"]["cache"];
+    assert_eq!(cache["matched"], 1);
+    assert_eq!(cache["unmatched"], 1);
+    assert_eq!(cache["unavailable"], 6);
+    assert_eq!(cache["hits"], 0);
+    assert_eq!(cache["misses"], 6);
+    assert_eq!(cache["refreshed"], serde_json::json!(["src/lib.rs"]));
+    assert_eq!(json["map"]["files"].as_array().unwrap().len(), 1);
+    assert_eq!(json["map"]["files"][0]["path"], "src/lib.rs");
+    assert!(
+        json["map"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|omission| { omission["reason"] == "cache_unavailable" && omission["path"] == "src/one.rs" })
+    );
+}
+
+#[test]
+fn files_cache_mode_does_not_match_duplicate_basenames() {
+    let fixture = MapFixtureRepository::new();
+    fs::create_dir_all(fixture.root.join("src/a")).expect("create first duplicate-basename directory");
+    fs::create_dir_all(fixture.root.join("src/b")).expect("create second duplicate-basename directory");
+    write_file(fixture.root.join("src/a/shared.rs"), b"pub fn first_shared() {}\n");
+    write_file(fixture.root.join("src/b/shared.rs"), b"pub fn second_shared() {}\n");
+
+    let output = fixture.run(&[
+        "map",
+        "--cache",
+        "files",
+        "--cache-file",
+        "src/a/shared.rs",
+        "--cache-file",
+        "shared.rs",
+        "--json",
+    ]);
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid duplicate-basename cache JSON");
+    assert_eq!(json["map"]["cache"]["matched"], 1);
+    assert_eq!(json["map"]["cache"]["unmatched"], 1);
+    assert_eq!(
+        json["map"]["cache"]["refreshed"],
+        serde_json::json!(["src/a/shared.rs"])
+    );
+    assert!(json["map"]["files"].as_array().unwrap().iter().any(|file| {
+        file["path"] == "src/a/shared.rs"
+            && file["symbols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|symbol| symbol["name"] == "first_shared")
+    }));
+    assert!(
+        !json["map"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| { file["path"] == "src/b/shared.rs" })
+    );
+}
+
+#[test]
+fn cache_records_are_reused_across_report_scopes_and_manual_uses_the_newest_record() {
+    let fixture = MapFixtureRepository::new();
+    let initial = fixture.run(&["map", "--json"]);
+    assert!(initial.status.success());
+
+    let scoped = fixture.run(&["map", "src", "--json"]);
+    assert!(
+        scoped.status.success(),
+        "scoped map failed: {}",
+        String::from_utf8_lossy(&scoped.stderr)
+    );
+    let scoped_json: Value = serde_json::from_slice(&scoped.stdout).expect("valid scoped map JSON");
+    assert_eq!(scoped_json["map"]["scope_path"], "src");
+    assert_eq!(scoped_json["map"]["cache"]["status"], "hit");
+    assert_eq!(scoped_json["map"]["cache"]["hits"], 7);
+
+    write_file(fixture.root.join("src/lib.rs"), b"pub fn newest_cached() {}\n");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let refreshed = fixture.run(&["map", "--json"]);
+    assert!(refreshed.status.success());
+    write_file(fixture.root.join("src/lib.rs"), b"pub fn current_not_cached() {}\n");
+    let manual = fixture.run(&["map", "--cache", "manual", "--json"]);
+    assert!(
+        manual.status.success(),
+        "manual map failed: {}",
+        String::from_utf8_lossy(&manual.stderr)
+    );
+    let manual_json: Value = serde_json::from_slice(&manual.stdout).expect("valid manual map JSON");
+    let lib = manual_json["map"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "src/lib.rs")
+        .expect("manual cached lib file");
+    assert!(
+        lib["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| { symbol["name"] == "newest_cached" && symbol["role"] == "definition" })
+    );
+    assert!(
+        !lib["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| { symbol["name"] == "current_not_cached" })
+    );
+    assert_eq!(manual_json["map"]["cache"]["status"], "stale");
+}
+
+#[test]
+fn corrupt_cache_record_refreshes_and_cache_controls_do_not_touch_the_repository() {
+    let fixture = MapFixtureRepository::new();
+    let initial = fixture.run(&["map", "--json"]);
+    assert!(initial.status.success());
+    let records = cache_json_files(&fixture.cache.join("setaryb"));
+    assert_eq!(records.len(), 7);
+    write_file(&records[0], b"not valid JSON\n");
+
+    let refreshed = fixture.run(&["map", "--json"]);
+    assert!(
+        refreshed.status.success(),
+        "refresh failed: {}",
+        String::from_utf8_lossy(&refreshed.stderr)
+    );
+    let refreshed_json: Value = serde_json::from_slice(&refreshed.stdout).expect("valid refresh JSON");
+    assert_eq!(refreshed_json["map"]["cache"]["status"], "refreshed");
+    assert_eq!(refreshed_json["map"]["cache"]["misses"], 1);
+    assert_eq!(refreshed_json["map"]["cache"]["refreshed"].as_array().unwrap().len(), 1);
+
+    let source_before = fs::read(fixture.root.join("src/lib.rs")).expect("read source before cache control");
+    let status = fixture.run(&["cache", "status", "--json"]);
+    assert!(
+        status.status.success(),
+        "cache status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_json: Value = serde_json::from_slice(&status.stdout).expect("valid cache status JSON");
+    assert_eq!(status_json["records"], 7);
+    assert_eq!(status_json["repositories"], 1);
+    assert!(status_json["path"].as_str().unwrap().ends_with("setaryb"));
+
+    let path = fixture.run(&["cache", "path", "--json"]);
+    assert!(path.status.success());
+    let path_json: Value = serde_json::from_slice(&path.stdout).expect("valid cache path JSON");
+    assert_eq!(path_json["operation"], "path");
+
+    let outside_cache_file = fixture.temporary_root.join("outside-cache.json");
+    write_file(&outside_cache_file, b"must remain outside the cache root\n");
+    let prune = fixture.run(&["cache", "prune", "--json"]);
+    assert!(
+        prune.status.success(),
+        "cache prune failed: {}",
+        String::from_utf8_lossy(&prune.stderr)
+    );
+    assert!(
+        outside_cache_file.exists(),
+        "cache prune crossed the configured cache root"
+    );
+
+    let clear = fixture.run(&["cache", "clear", "--json"]);
+    assert!(
+        clear.status.success(),
+        "cache clear failed: {}",
+        String::from_utf8_lossy(&clear.stderr)
+    );
+    let clear_json: Value = serde_json::from_slice(&clear.stdout).expect("valid cache clear JSON");
+    assert_eq!(clear_json["removed_records"], 7);
+    assert_eq!(clear_json["records"], 0);
+    assert_eq!(
+        fs::read(fixture.root.join("src/lib.rs")).expect("read source after cache control"),
+        source_before
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_directories_and_records_are_user_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = MapFixtureRepository::new();
+    let output = fixture.run(&["map", "--json"]);
+    assert!(output.status.success());
+    let cache_root = fixture.cache.join("setaryb");
+    assert_eq!(fs::metadata(&cache_root).unwrap().permissions().mode() & 0o777, 0o700);
+    for record in cache_json_files(&cache_root) {
+        assert_eq!(fs::metadata(record).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn concurrent_cache_writers_leave_only_complete_json_records() {
+    let fixture = MapFixtureRepository::new();
+    let children = (0..4)
+        .map(|_| {
+            fixture
+                .command(&["map", "--cache", "always", "--json"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn concurrent cache writer")
+        })
+        .collect::<Vec<_>>();
+    for child in children {
+        let output = child.wait_with_output().expect("wait for concurrent cache writer");
+        assert!(
+            output.status.success(),
+            "concurrent cache writer failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "concurrent map output is invalid JSON ({error}); stdout={} bytes, stderr={}",
+                output.stdout.len(),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    }
+
+    let records = cache_json_files(&fixture.cache.join("setaryb"));
+    assert_eq!(records.len(), 7);
+    for record in records {
+        let bytes = fs::read(record).expect("read concurrent cache record");
+        serde_json::from_slice::<Value>(&bytes).expect("concurrent cache record is complete JSON");
+    }
 }
 
 #[cfg(unix)]

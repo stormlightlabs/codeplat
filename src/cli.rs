@@ -7,8 +7,9 @@ use anyhow::Context;
 use clap::{ArgAction, ColorChoice, Parser, Subcommand, ValueEnum, builder::Styles, error::ErrorKind};
 use owo_colors::OwoColorize;
 
-use crate::map::MapSettings;
+use crate::map::{CacheCommand, CacheControlReport, MapSettings};
 use crate::report::{CacheMode, CommandDescriptor, HistoryOperation, HistorySettings, Report};
+use crate::utils;
 
 #[derive(Debug, Subcommand)]
 enum SubcommandName {
@@ -16,6 +17,31 @@ enum SubcommandName {
     Map(MapCommand),
     /// Produce Git-history findings, or select one focused history signal.
     History(HistoryCommand),
+    /// Inspect or control retained source-analysis cache data.
+    Cache(CacheCommandCli),
+}
+
+#[derive(Clone, Copy, Debug, clap::Subcommand)]
+enum CacheOperation {
+    /// Print the configured cache root.
+    Path,
+    /// Report cache record count, size, repositories, and retention limits.
+    Status,
+    /// Remove expired and over-limit records.
+    Prune,
+    /// Remove all Setaryb cache records.
+    Clear,
+}
+
+impl From<CacheOperation> for CacheCommand {
+    fn from(operation: CacheOperation) -> Self {
+        match operation {
+            CacheOperation::Path => Self::Path,
+            CacheOperation::Status => Self::Status,
+            CacheOperation::Prune => Self::Prune,
+            CacheOperation::Clear => Self::Clear,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -143,6 +169,12 @@ impl ApplicationError {
     }
 }
 
+#[derive(Debug, clap::Args)]
+struct CacheCommandCli {
+    #[command(subcommand)]
+    operation: CacheOperation,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "setaryb",
@@ -229,6 +261,11 @@ impl From<Cli> for CommandRequest {
                     ),
                 }
             }
+            Some(SubcommandName::Cache(_)) => (
+                CommandDescriptor::map(cli.path),
+                HistorySettings::default(),
+                default_map_settings,
+            ),
         };
 
         CommandRequest { command, history, map: map_settings }
@@ -586,6 +623,16 @@ where
 fn invoke<W: Write>(cli: Cli, stdout: &mut W) -> anyhow::Result<()> {
     let output_format = cli.output_format()?;
     cli.validate()?;
+    if let Some(SubcommandName::Cache(cache)) = &cli.command {
+        let report = crate::map::cache_control(cache.operation.into())
+            .map_err(|error| ApplicationError::Report(crate::report::ReportError::Map(error)))?;
+        let output = render_cache_control(&report, output_format)?;
+        stdout
+            .write_all(output.as_bytes())
+            .context("could not write the cache report to stdout")?;
+        stdout.flush().context("could not flush cache report stdout")?;
+        return Ok(());
+    }
     let report = Report::analyze(cli.into()).map_err(ApplicationError::Report)?;
     let output = report.render(output_format).map_err(ApplicationError::Render)?;
 
@@ -594,6 +641,37 @@ fn invoke<W: Write>(cli: Cli, stdout: &mut W) -> anyhow::Result<()> {
         .context("could not write the report to stdout")?;
     stdout.flush().context("could not flush report stdout")?;
     Ok(())
+}
+
+fn render_cache_control(report: &CacheControlReport, format: OutputFormat) -> Result<String, ApplicationError> {
+    match format {
+        OutputFormat::Json => {
+            let mut output = serde_json::to_string_pretty(report).map_err(ApplicationError::Render)?;
+            output.push('\n');
+            Ok(output)
+        }
+        OutputFormat::Markdown => {
+            let path = utils::escape_inline_code(report.path.as_deref().unwrap_or("not configured"));
+            let mut output = format!("# Setaryb cache {}\n\n", report.operation);
+            output.push_str(&format!("Path: `{path}`\n"));
+            output.push_str(&format!("Exists: {}\n", report.exists));
+            output.push_str(&format!(
+                "Records: {} ({} bytes) across {} repositories\n",
+                report.records, report.bytes, report.repositories
+            ));
+            output.push_str(&format!(
+                "Retention: {} records, {} bytes, {} seconds\n",
+                report.max_records_per_repository, report.max_bytes_per_repository, report.max_age_seconds
+            ));
+            if report.removed_records > 0 {
+                output.push_str(&format!(
+                    "Removed: {} records ({} bytes)\n",
+                    report.removed_records, report.removed_bytes
+                ));
+            }
+            Ok(output)
+        }
+    }
 }
 
 fn write_diagnostic<W: Write, D: std::fmt::Display>(

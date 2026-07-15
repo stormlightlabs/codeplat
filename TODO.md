@@ -68,9 +68,9 @@ graph ranking, explicit focus boosts, token-budget selection, and all approved c
 **Blocked by:** Ticket 3
 
 **Implementation status (2026-07-15):** Ranking, explicit focus boosts, bounded structural selection, and
-deterministic JSON ordering are implemented and covered by tests. Cache `auto` now reparses after a source
-fingerprint miss; manual stale selection is deterministic and explicit `--cache-file` paths are normalized
-exactly. The remaining cache safety, retention, and complete-report budget work stays with Tickets 9–11.
+deterministic JSON ordering are implemented and covered by tests. Ticket 10 completes cache identity, mode,
+retention, privacy, atomic-write, and observability behavior. Generic/private ranking and complete-report
+budget work remains with Tickets 11 and 14.
 
 **Acceptance criteria:**
 
@@ -82,20 +82,20 @@ exactly. The remaining cache safety, retention, and complete-report budget work 
       but remain available in output when selected or requested.
 - [x] `--map-tokens` defaults to 1,000 and selects structural snippets with location-preserving
       elision instead of full source bodies.
-- [ ] Cache data lives only under a safe XDG Setaryb cache path and is isolated by repository, scope,
-      query-pack, tool/schema, and source-content fingerprint. Reopened by Tickets 9 and 10 because an
-      XDG path can resolve inside the repository and retention is unbounded.
-- [ ] `auto`, `always`, `files`, `manual`, and `--no-cache` work as specified; manual mode labels
-      possible staleness and never refreshes silently. Reopened by Ticket 10.
+- [x] Cache data lives only under a safe XDG Setaryb cache path and is isolated by canonical repository,
+      exact path, query-pack content, tool/schema, and source-content fingerprint. Cache roots resolving
+      inside the repository are rejected and retention is bounded by Ticket 10.
+- [x] `auto`, `always`, `files`, `manual`, and `--no-cache` work as specified; manual mode labels
+      possible staleness and never refreshes silently.
 
 **Verification:**
 
 - [ ] Exercise focus text/path, duplicate symbols, generic/private names, and complete-report token limits
       against the Rust and mixed-language fixtures. Focus/path, duplicate-symbol, and selection-budget coverage
       exists; generic/private ranking and complete-report limits remain reopened by Tickets 11 and 14.
-- [ ] Use a temporary XDG cache directory to prove cache hits, automatic invalidation, exact explicit-file
-      refresh, manual stale labels, and no-cache behavior. Core hit/refresh/stale/no-cache coverage exists;
-      cache retention, unavailable/unmatched-file accounting, and concurrency remain reopened by Ticket 10.
+- [x] Use a temporary XDG cache directory to prove cache hits, automatic invalidation, exact explicit-file
+      refresh, manual stale labels, no-cache behavior, retention, unavailable/unmatched-file accounting,
+      permissions, corruption recovery, and concurrency.
 - [x] Confirm deterministic JSON ordering across repeated runs with unchanged inputs.
 - `cargo fmt --check`
 - `cargo test`
@@ -194,28 +194,35 @@ give users safe control over retained source-derived metadata.
 
 **Blocked by:** Ticket 7
 
+**Implementation status (2026-07-15):** Cache resolution is an explicit mode state machine. Content and
+query-pack identities use SHA-256, file records are independent of report scope, manual mode selects the
+newest valid record, and `files` mode reports exact matched/unmatched/unavailable outcomes without counting
+unavailable files as analyzed. Records use private atomic replacement, bounded per-repository retention, and
+the `cache path|status|prune|clear` controls. Regression coverage includes scope reuse, duplicate basenames,
+corruption, permissions, and concurrent writers.
+
 **Acceptance criteria:**
 
-- [ ] In `auto`, a changed content fingerprint reparses current bytes and reports `refreshed`; it never
+- [x] In `auto`, a changed content fingerprint reparses current bytes and reports `refreshed`; it never
       returns stale tags. In `manual`, only the newest available record may be reused and is visibly stale.
-- [ ] In `files`, only exactly normalized caller-named paths refresh. Matched, unmatched, unavailable,
+- [x] In `files`, only exactly normalized caller-named paths refresh. Matched, unmatched, unavailable,
       hit, miss, stale, and refreshed counts are distinct; cache-unavailable files are not counted as analyzed.
-- [ ] Records are keyed by collision-resistant content identity plus exact grammar/query-pack content,
+- [x] Records are keyed by collision-resistant content identity plus exact grammar/query-pack content,
       are independent of report scope, and are written with user-private permissions using atomic replace.
-- [ ] Concurrent readers/writers cannot observe truncated JSON or lose the newest record. Per-repository
+- [x] Concurrent readers/writers cannot observe truncated JSON or lose the newest record. Per-repository
       count/age/size retention is bounded and deterministic.
-- [ ] `setaryb cache path|status|prune|clear` reports and controls retention without touching the target
+- [x] `setaryb cache path|status|prune|clear` reports and controls retention without touching the target
       repository; `--no-cache` still performs no cache I/O.
-- [ ] Regression tests prime a cache, edit source, exercise every mode, use duplicate basenames, pass an
+- [x] Regression tests prime a cache, edit source, exercise every mode, use duplicate basenames, pass an
       unmatched `--cache-file`, corrupt an entry, and run concurrent processes.
 
 **Verification:**
 
-- Run the cache fixture matrix under a temporary XDG directory and assert current symbols plus exact state counts.
-- Inspect created directories/files for expected permissions and prove pruning never crosses the Setaryb cache root.
-- `cargo fmt --check`
-- `cargo test --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] Run the cache fixture matrix under a temporary XDG directory and assert current symbols plus exact state counts.
+- [x] Inspect created directories/files for expected permissions and prove pruning never crosses the Setaryb cache root.
+- [x] `cargo fmt --check`
+- [x] `cargo test --all-features`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 11. Bound analysis work and the complete emitted report
 

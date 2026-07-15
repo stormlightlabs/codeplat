@@ -273,6 +273,7 @@ pub enum OmissionReason {
     IgnoredUntracked,
     UnsupportedLanguage,
     ExplicitExclusion,
+    CacheUnavailable,
     Symlink,
     UnsafePath,
     ReadError,
@@ -285,6 +286,7 @@ impl OmissionReason {
             Self::IgnoredUntracked => "ignored_untracked",
             Self::UnsupportedLanguage => "unsupported_language",
             Self::ExplicitExclusion => "explicit_exclusion",
+            Self::CacheUnavailable => "cache_unavailable",
             Self::Symlink => "symlink",
             Self::UnsafePath => "unsafe_path",
             Self::ReadError => "read_error",
@@ -602,6 +604,16 @@ pub struct MapSnippet {
 pub struct MapCacheReport {
     pub mode: CacheMode,
     pub status: CacheStatus,
+    /// Number of normalized `--cache-file` names that matched eligible paths.
+    #[serde(default)]
+    pub matched: usize,
+    /// Number of normalized `--cache-file` names that matched no eligible path.
+    #[serde(default)]
+    pub unmatched: usize,
+    /// Number of eligible paths that could not be analyzed because this mode
+    /// did not permit a cache refresh and no usable record was available.
+    #[serde(default)]
+    pub unavailable: usize,
     pub hits: usize,
     pub misses: usize,
     pub refreshed: Vec<String>,
@@ -925,52 +937,65 @@ impl Render {
             .expect("writing to a string cannot fail");
         }
 
-        if !map.files.is_empty() {
+        if !map.files.is_empty()
+            || map.cache.matched > 0
+            || map.cache.unmatched > 0
+            || map.cache.unavailable > 0
+            || map.cache.hits > 0
+            || map.cache.misses > 0
+            || !map.cache.refreshed.is_empty()
+            || !map.cache.stale.is_empty()
+        {
             writeln!(
                 output,
-                "Cache: {} ({}) — {} hits, {} misses, {} refreshed, {} stale",
+                "Cache: {} ({}) — {} matched, {} unmatched, {} unavailable, {} hits, {} misses, {} refreshed, {} stale",
                 map.cache.mode.label(),
                 map.cache.status.label(),
+                map.cache.matched,
+                map.cache.unmatched,
+                map.cache.unavailable,
                 map.cache.hits,
                 map.cache.misses,
                 map.cache.refreshed.len(),
                 map.cache.stale.len()
             )
             .expect("writing to a string cannot fail");
-            writeln!(
-                output,
-                "Ranking: {} files; map budget {} tokens, selected {}",
-                map.ranking.len(),
-                map.selection.token_budget,
-                map.selection.estimated_tokens
-            )
-            .expect("writing to a string cannot fail");
-            Render::section_heading(output, "Ranked map selection");
-            if map.selection.snippets.is_empty() {
-                writeln!(output, "No structural snippets fit the map token budget.")
-                    .expect("writing to a string cannot fail");
-            } else {
-                for snippet in &map.selection.snippets {
-                    let location = Self::format_location(&snippet.symbol.location);
-                    let scope = if snippet.symbol.scope.is_empty() {
-                        "root".to_owned()
-                    } else {
-                        snippet.symbol.scope.join("::")
-                    };
-                    writeln!(
-                        output,
-                        "- `{}` — {} `{}` at {} in `{}` (score {}, {} tokens) — `{}`{}",
-                        utils::escape_inline_code(&snippet.path),
-                        snippet.symbol.kind.label(),
-                        utils::escape_inline_code(&snippet.symbol.name),
-                        location,
-                        utils::escape_inline_code(&scope),
-                        snippet.score,
-                        snippet.estimated_tokens,
-                        utils::escape_inline_code(&snippet.symbol.context),
-                        if snippet.truncated { " (elided)" } else { "" }
-                    )
-                    .expect("writing to a string cannot fail");
+            if !map.files.is_empty() {
+                writeln!(
+                    output,
+                    "Ranking: {} files; map budget {} tokens, selected {}",
+                    map.ranking.len(),
+                    map.selection.token_budget,
+                    map.selection.estimated_tokens
+                )
+                .expect("writing to a string cannot fail");
+                Render::section_heading(output, "Ranked map selection");
+                if map.selection.snippets.is_empty() {
+                    writeln!(output, "No structural snippets fit the map token budget.")
+                        .expect("writing to a string cannot fail");
+                } else {
+                    for snippet in &map.selection.snippets {
+                        let location = Self::format_location(&snippet.symbol.location);
+                        let scope = if snippet.symbol.scope.is_empty() {
+                            "root".to_owned()
+                        } else {
+                            snippet.symbol.scope.join("::")
+                        };
+                        writeln!(
+                            output,
+                            "- `{}` — {} `{}` at {} in `{}` (score {}, {} tokens) — `{}`{}",
+                            utils::escape_inline_code(&snippet.path),
+                            snippet.symbol.kind.label(),
+                            utils::escape_inline_code(&snippet.symbol.name),
+                            location,
+                            utils::escape_inline_code(&scope),
+                            snippet.score,
+                            snippet.estimated_tokens,
+                            utils::escape_inline_code(&snippet.symbol.context),
+                            if snippet.truncated { " (elided)" } else { "" }
+                        )
+                        .expect("writing to a string cannot fail");
+                    }
                 }
             }
         }

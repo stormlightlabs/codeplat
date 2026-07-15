@@ -81,12 +81,21 @@ setaryb map --cache always
 setaryb map --cache files --cache-file src/parser.rs
 setaryb map --cache manual
 setaryb map --no-cache
+setaryb cache path
+setaryb cache status
+setaryb cache prune
+setaryb cache clear
 ```
 
 Cache records are stored under `$XDG_CACHE_HOME/setaryb` (or `~/.cache/setaryb`) and
-are keyed by repository, scope, query pack, tool schema, path, and source content.
+are keyed by canonical repository, exact path, language/query-pack content, tool schema,
+and source content. Records are reusable across map scopes.
 
-Manual mode never refreshes silently and labels stale or unavailable records.
+Manual mode never refreshes silently and labels stale or unavailable records. `files` mode
+refreshes only exact normalized `--cache-file` paths; its report distinguishes matched,
+unmatched, unavailable, hit, miss, stale, and refreshed files. Cache records are private,
+atomically replaced, and retained within deterministic per-repository count, age, and size
+limits. The `cache` commands inspect or control this retained data without analyzing a repository.
 
 ### `setaryb history [OPERATION] [OPTIONS] [PATH]`
 

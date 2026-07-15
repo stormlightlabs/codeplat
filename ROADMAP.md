@@ -228,7 +228,7 @@ map only if the report makes that limitation explicit.
 - Cache parsed/tagged source-analysis inputs and reusable map-selection inputs in
   `$XDG_CACHE_HOME/setaryb`, falling back to `~/.cache/setaryb`.
 - Never create or alter state in the target repository.
-- Separate cache identity by canonical repository root, scope, language-query-pack version,
+- Separate cache identity by canonical repository root, exact path, language-query-pack version,
   tool/schema version, and source-content fingerprint.
   Cache validation must not make a stale entry appear current.
 - `auto` validates and refreshes stale records; `always` reparses eligible inputs; `files`
