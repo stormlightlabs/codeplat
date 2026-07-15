@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,111 @@ pub const DEFAULT_RECENT_WINDOW_DAYS: u32 = 180;
 pub const DEFAULT_BUG_KEYWORDS: &[&str] = &["fix", "bug", "broken"];
 /// The default case-insensitive firefighting commit-message keywords.
 pub const DEFAULT_FIREFIGHTING_KEYWORDS: &[&str] = &["revert", "hotfix", "emergency", "rollback"];
+
+/// Controls how much evidence is emitted after analysis completes.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisProfile {
+    /// Emit a bounded navigation briefing suitable for the default command.
+    #[default]
+    Compact,
+    /// Emit the largest bounded evidence collections allowed by the resource limits.
+    Evidence,
+}
+
+/// Why a collection was not emitted in full.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncationReason {
+    CollectionLimit,
+    OutputBudget,
+    ResourceLimit,
+    Unsupported,
+}
+
+/// Counts for an emitted collection. `total` is the observed count before the
+/// profile or a resource limit selected the returned sample.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CollectionSummary {
+    pub total: usize,
+    pub returned: usize,
+    pub truncated: bool,
+    pub reason: Option<TruncationReason>,
+}
+
+impl Default for CollectionSummary {
+    fn default() -> Self {
+        Self::complete(0)
+    }
+}
+
+impl CollectionSummary {
+    pub fn complete(total: usize) -> Self {
+        Self { total, returned: total, truncated: false, reason: None }
+    }
+
+    pub fn bounded(total: usize, returned: usize, reason: TruncationReason) -> Self {
+        Self {
+            total,
+            returned: returned.min(total),
+            truncated: returned < total,
+            reason: (returned < total).then_some(reason),
+        }
+    }
+}
+
+/// Resource ceilings are part of the report so a partial result is
+/// interpretable without relying on process-local defaults.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ReportLimits {
+    pub max_files: usize,
+    pub max_file_bytes: usize,
+    pub max_total_bytes: usize,
+    pub max_syntax_depth: usize,
+    pub max_symbols_per_file: usize,
+    pub max_symbols: usize,
+    pub max_candidates_per_reference: usize,
+    pub max_edges: usize,
+    pub max_findings: usize,
+    pub max_commits: usize,
+    pub max_history_evidence: usize,
+    pub max_elapsed_ms: u64,
+    pub max_output_bytes: usize,
+}
+
+impl ReportLimits {
+    pub const fn for_profile(profile: AnalysisProfile) -> Self {
+        let (max_symbols_per_file, max_symbols, max_edges, max_findings, max_history_evidence) = match profile {
+            AnalysisProfile::Compact => (128, 20_000, 2_000, 2_000, 128),
+            AnalysisProfile::Evidence => (2_048, 100_000, 20_000, 20_000, 2_000),
+        };
+        Self {
+            max_files: 4_096,
+            max_file_bytes: 1_024 * 1_024,
+            max_total_bytes: 64 * 1_024 * 1_024,
+            max_syntax_depth: 2_048,
+            max_symbols_per_file,
+            max_symbols,
+            max_candidates_per_reference: 32,
+            max_edges,
+            max_findings,
+            max_commits: 100_000,
+            max_history_evidence,
+            max_elapsed_ms: match profile {
+                AnalysisProfile::Compact => 30_000,
+                AnalysisProfile::Evidence => 120_000,
+            },
+            max_output_bytes: 8 * 1_024 * 1_024,
+        }
+    }
+}
+
+impl Default for ReportLimits {
+    fn default() -> Self {
+        Self::for_profile(AnalysisProfile::Compact)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReportError {
@@ -278,6 +384,8 @@ pub enum OmissionReason {
     UnsafePath,
     ReadError,
     TraversalError,
+    Oversized,
+    Binary,
 }
 
 impl OmissionReason {
@@ -291,6 +399,8 @@ impl OmissionReason {
             Self::UnsafePath => "unsafe_path",
             Self::ReadError => "read_error",
             Self::TraversalError => "traversal_error",
+            Self::Oversized => "oversized",
+            Self::Binary => "binary",
         }
     }
 }
@@ -345,6 +455,10 @@ impl Default for HistorySettings {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Report {
     pub schema_version: u16,
+    #[serde(default)]
+    pub profile: AnalysisProfile,
+    #[serde(default)]
+    pub limits: ReportLimits,
     pub command: CommandDescriptor,
     pub scope: ReportScope,
     pub status: ReportStatus,
@@ -363,11 +477,16 @@ impl Report {
             CommandName::Briefing => {
                 let path = request.command.path.clone();
                 let scope = ReportScope::from(path.clone());
-                let history_report = history::analyze(&path, request.history, None).map_err(ReportError::History)?;
-                let map_report = map::analyze(&path, &request.map).map_err(ReportError::Map)?;
+                let history_report =
+                    history::analyze(&path, request.history, None, request.profile).map_err(ReportError::History)?;
+                let mut map_settings = request.map;
+                map_settings.profile = request.profile;
+                let map_report = map::analyze(&path, &map_settings).map_err(ReportError::Map)?;
 
                 Ok(Self {
                     schema_version: SCHEMA_VERSION,
+                    profile: request.profile,
+                    limits: ReportLimits::for_profile(request.profile),
                     scope,
                     command: request.command,
                     status: ReportStatus::Analyzed,
@@ -380,12 +499,18 @@ impl Report {
             }
             CommandName::History => {
                 let scope = ReportScope::from(request.command.path.clone());
-                let history_report =
-                    history::analyze(&request.command.path, request.history, request.command.operation)
-                        .map_err(ReportError::History)?;
+                let history_report = history::analyze(
+                    &request.command.path,
+                    request.history,
+                    request.command.operation,
+                    request.profile,
+                )
+                .map_err(ReportError::History)?;
 
                 Ok(Self {
                     schema_version: SCHEMA_VERSION,
+                    profile: request.profile,
+                    limits: ReportLimits::for_profile(request.profile),
                     scope,
                     command: request.command,
                     status: ReportStatus::Analyzed,
@@ -401,9 +526,13 @@ impl Report {
             }
             CommandName::Map => {
                 let scope = ReportScope::from(request.command.path.clone());
-                let map_report = map::analyze(&request.command.path, &request.map).map_err(ReportError::Map)?;
+                let mut map_settings = request.map;
+                map_settings.profile = request.profile;
+                let map_report = map::analyze(&request.command.path, &map_settings).map_err(ReportError::Map)?;
                 Ok(Self {
                     schema_version: SCHEMA_VERSION,
+                    profile: request.profile,
+                    limits: ReportLimits::for_profile(request.profile),
                     scope,
                     command: request.command,
                     status: ReportStatus::Analyzed,
@@ -419,14 +548,24 @@ impl Report {
 
     /// Render a report from the shared typed model without parsing or transforming Markdown.
     pub fn render(&self, format: OutputFormat) -> Result<String, serde_json::Error> {
-        match format {
+        let output = match format {
             OutputFormat::Markdown => Ok(self.render_markdown()),
             OutputFormat::Json => {
                 let mut output = serde_json::to_string_pretty(self)?;
                 output.push('\n');
                 Ok(output)
             }
+        }?;
+        if output.len() > self.limits.max_output_bytes {
+            return Err(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "rendered report exceeds the {}-byte output limit; use the compact profile or a narrower scope",
+                    self.limits.max_output_bytes
+                ),
+            )));
         }
+        Ok(output)
     }
 
     fn render_markdown(&self) -> String {
@@ -530,6 +669,10 @@ pub struct HistoryReport {
     pub settings: HistorySettings,
     pub commits_seen: usize,
     pub non_merge_commits_seen: usize,
+    #[serde(default)]
+    pub collections: HistoryCollections,
+    #[serde(default)]
+    pub limitations: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub churn: Option<ChurnReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -542,8 +685,23 @@ pub struct HistoryReport {
     pub firefighting: Option<FirefightingReport>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HistoryCollections {
+    pub commits: CollectionSummary,
+    pub churn_paths: CollectionSummary,
+    pub contributors_overall: CollectionSummary,
+    pub contributors_recent: CollectionSummary,
+    pub bug_paths: CollectionSummary,
+    pub bug_overlap_paths: CollectionSummary,
+    pub bug_commits: CollectionSummary,
+    pub activity_months: CollectionSummary,
+    pub firefighting_commits: CollectionSummary,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MapReport {
+    #[serde(default)]
+    pub profile: AnalysisProfile,
     pub repository_root: String,
     pub scope_path: String,
     pub query_pack: String,
@@ -560,6 +718,19 @@ pub struct MapReport {
     pub ranking: Vec<FileRank>,
     pub selection: MapSelection,
     pub cache: MapCacheReport,
+    #[serde(default)]
+    pub collections: MapCollections,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapCollections {
+    pub files: CollectionSummary,
+    pub symbols: CollectionSummary,
+    pub omissions: CollectionSummary,
+    pub findings: CollectionSummary,
+    pub edges: CollectionSummary,
+    pub ranking: CollectionSummary,
+    pub snippets: CollectionSummary,
 }
 
 /// One file-level lexical dependency candidate. This is intentionally not a
@@ -876,6 +1047,22 @@ impl Render {
             utils::escape_inline_code(&history.settings.firefighting_keywords.join("`, `"))
         )
         .expect("writing to a string cannot fail");
+        if history.collections.commits.truncated
+            || history.collections.churn_paths.truncated
+            || history.collections.contributors_overall.truncated
+            || history.collections.contributors_recent.truncated
+            || history.collections.bug_paths.truncated
+            || history.collections.bug_overlap_paths.truncated
+            || history.collections.bug_commits.truncated
+            || history.collections.activity_months.truncated
+            || history.collections.firefighting_commits.truncated
+        {
+            writeln!(
+                output,
+                "Evidence collections are bounded; JSON contains totals and truncation reasons."
+            )
+            .expect("writing to a string cannot fail");
+        }
 
         if let Some(churn) = &history.churn {
             Render::churn_markdown(output, churn);
@@ -891,6 +1078,10 @@ impl Render {
         }
         if let Some(firefighting) = &history.firefighting {
             Render::firefighting_markdown(output, firefighting);
+        }
+        for limitation in &history.limitations {
+            writeln!(output, "- Limitation: {}", utils::sanitize_text(limitation))
+                .expect("writing to a string cannot fail");
         }
     }
 
@@ -928,6 +1119,20 @@ impl Render {
             map.inventory.omitted
         )
         .expect("writing to a string cannot fail");
+        if map.collections.files.truncated
+            || map.collections.symbols.truncated
+            || map.collections.omissions.truncated
+            || map.collections.findings.truncated
+            || map.collections.edges.truncated
+            || map.collections.ranking.truncated
+            || map.collections.snippets.truncated
+        {
+            writeln!(
+                output,
+                "Collections are bounded; JSON contains totals and truncation reasons."
+            )
+            .expect("writing to a string cannot fail");
+        }
         if !map.exclusions.is_empty() {
             writeln!(
                 output,
@@ -1221,6 +1426,8 @@ mod tests {
     fn markdown_escapes_report_content_that_could_add_control_sequences() {
         let report = Report {
             schema_version: SCHEMA_VERSION,
+            profile: AnalysisProfile::Compact,
+            limits: ReportLimits::for_profile(AnalysisProfile::Compact),
             command: CommandDescriptor::map(PathBuf::from("unsafe\u{1b}[31m-path")),
             scope: ReportScope { selected_path: "unsafe\u{1b}[31m-path".to_owned() },
             status: ReportStatus::Foundation,

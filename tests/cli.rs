@@ -601,6 +601,7 @@ fn default_command_combines_history_and_ranked_source_map() {
     assert!(output.stderr.is_empty());
     assert_plain_report(&json);
     assert_eq!(value["command"]["name"], "briefing");
+    assert_eq!(value["profile"], "compact");
     assert_eq!(value["status"], "analyzed");
     assert!(
         value["summary"]
@@ -617,6 +618,23 @@ fn default_command_combines_history_and_ranked_source_map() {
     assert_eq!(value["map"]["cache"]["status"], "disabled");
     assert_eq!(value["map"]["selection"]["token_budget"], 120);
     assert!(value["map"]["selection"]["estimated_tokens"].as_u64().unwrap() <= 120);
+    for collection in [
+        "files",
+        "symbols",
+        "omissions",
+        "findings",
+        "edges",
+        "ranking",
+        "snippets",
+    ] {
+        let summary = &value["map"]["collections"][collection];
+        assert!(summary["total"].is_u64());
+        assert!(summary["returned"].as_u64().unwrap() <= summary["total"].as_u64().unwrap());
+        assert!(summary["truncated"].is_boolean());
+        if summary["truncated"] == true {
+            assert!(summary["reason"].is_string());
+        }
+    }
     assert!(value["map"]["query_packs"]["javascript"].is_string());
     assert!(value["map"]["query_packs"]["typescript"].is_string());
 }
@@ -647,6 +665,44 @@ fn default_markdown_briefing_keeps_history_and_map_sections_readable() {
     }
     assert!(markdown.contains("Query packs:"));
     assert!(markdown.contains("Tree-sitter"));
+}
+
+#[test]
+fn evidence_profile_is_explicit_and_reports_collection_totals() {
+    let fixture = MixedMapFixtureRepository::new();
+    let output = fixture.run(&["map", "--profile", "evidence", "--no-cache", "--json"]);
+    let value: Value = serde_json::from_str(&stdout(&output)).expect("valid evidence profile JSON");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(value["profile"], "evidence");
+    assert_eq!(value["map"]["profile"], "evidence");
+    assert!(value["map"]["collections"]["files"]["returned"].as_u64().unwrap() > 0);
+    assert!(
+        value["map"]["collections"]["files"]["returned"].as_u64().unwrap()
+            <= value["map"]["collections"]["files"]["total"].as_u64().unwrap()
+    );
+}
+
+#[test]
+fn resource_bound_source_inputs_are_partial_and_typed() {
+    let fixture = FixtureRepository::new();
+    fs::create_dir_all(fixture.root.join("src")).expect("create source fixture directory");
+    let oversized = vec![b'x'; 1_048_577];
+    write_file(fixture.root.join("src/oversized.rs"), &oversized);
+    write_file(fixture.root.join("src/binary.rs"), b"fn binary() {\0 }\n");
+
+    let output = fixture.run(&["map", "--no-cache", "--json"]);
+    let value: Value = serde_json::from_str(&stdout(&output)).expect("valid bounded resource JSON");
+    let omissions = value["map"]["omissions"].as_array().expect("map omissions");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(value["limits"]["max_file_bytes"], 1_048_576);
+    assert!(omissions.iter().any(|omission| omission["reason"] == "oversized"));
+    assert!(omissions.iter().any(|omission| omission["reason"] == "binary"));
+    assert!(value["map"]["collections"]["omissions"]["total"].as_u64().unwrap() >= 2);
+    assert!(stdout(&output).len() < 8 * 1_024 * 1_024);
 }
 
 #[test]

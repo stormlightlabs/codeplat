@@ -65,6 +65,10 @@ larger report.
   bounded-output, resource-limit, history-scope, and report-provenance gaps. Tickets 9 through 14
   define the stabilization work; they supersede checked acceptance criteria where the audit produced
   contradictory evidence.
+- Ticket 11 now provides compact/evidence profiles, published work and output ceilings,
+  iterative bounded traversal, collection totals/returned/truncation metadata, and
+  operation-aware focused history scans. The compact self-map is approximately 13 KB
+  in JSON; scale benchmarks remain a release-verification task.
 - [Research notes](notes/README.md) capture the source material, Rust library boundaries, and
   the limits of Git-history and Tree-sitter-derived evidence.
 
@@ -75,9 +79,9 @@ The baseline is intentionally measured against Setaryb itself, not only tiny fix
 - `cargo fmt --check`, `cargo test --all-features`, `cargo clippy --all-targets --all-features
 -- -D warnings`, and `cargo doc --no-deps` pass.
 - The release binary is approximately 20 MiB while `gix` still uses its broad default feature set.
-- `setaryb map --no-cache --json` emits 7,332,198 bytes for eight analyzed files. The same map emits
-  423,230 bytes of Markdown with `--map-tokens 1000` and 417,506 bytes with `--map-tokens 100`.
-  This proves the current token budget does not bound the report.
+- The pre-Ticket-11 audit measured `setaryb map --no-cache --json` at 7,332,198 bytes for eight
+  analyzed files. The compact profile now emits approximately 13 KB for the current self-map,
+  and reports collection totals plus truncation reasons beside the bounded evidence.
 - The current self-map contains 11,630 symbols, 2,212 ambiguity findings, and 795 lexical edges;
   repeated bare identifiers dominate useful architectural relationships.
 
@@ -274,6 +278,10 @@ execution remains part of the release gate.
   no usable parsed record is not counted as analyzed.
 
 ### Bounded work and bounded reports
+
+Ticket 11 implementation status (2026-07-15): compact/evidence profiles and
+bounded collection metadata are implemented. Focused resource fixtures are in
+the integration suite; scale benchmarks remain release-verification work.
 
 - The default profile is compact. It emits selected structural evidence plus bounded summaries;
   exhaustive symbols, edges, findings, and commit evidence require an explicit evidence profile or

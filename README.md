@@ -43,12 +43,26 @@ focus, token-budget, exclusion, cache, and color controls described below:
 ```sh
 setaryb --focus parser --focus-path src --map-tokens 500 .
 setaryb --no-cache --json .
+setaryb --profile evidence --json .
 ```
 
 The report keeps history caveats, source-map limitations, query-pack provenance,
 partial-file diagnostics, and omitted-path reasons beside the evidence they
-qualify. This makes unsupported or partially parsed files actionable instead of
-silently dropping them.
+qualify.
+
+This makes unsupported or partially parsed files actionable instead of silently
+dropping them.
+
+The default `compact` profile returns selected snippets and bounded samples of
+files, symbols, edges, findings, omissions, and history evidence.
+
+JSON reports include each collection's observed total, returned count, truncation
+state, and reason.
+
+Use `--profile evidence` for a larger, still resource-limited evidence sample.
+
+`--map-tokens` bounds the compact map payload; tiny budgets may return only the
+highest-ranked snippet or summaries.
 
 ## Commands
 
@@ -87,15 +101,25 @@ setaryb cache prune
 setaryb cache clear
 ```
 
-Cache records are stored under `$XDG_CACHE_HOME/setaryb` (or `~/.cache/setaryb`) and
-are keyed by canonical repository, exact path, language/query-pack content, tool schema,
-and source content. Records are reusable across map scopes.
+Profiles are selected with `--profile compact` (the default) or
+`--profile evidence`.
 
-Manual mode never refreshes silently and labels stale or unavailable records. `files` mode
-refreshes only exact normalized `--cache-file` paths; its report distinguishes matched,
-unmatched, unavailable, hit, miss, stale, and refreshed files. Cache records are private,
-atomically replaced, and retained within deterministic per-repository count, age, and size
-limits. The `cache` commands inspect or control this retained data without analyzing a repository.
+Compact analysis publishes these ceilings:
+
+- 4,096 files
+- 1 MiB per file
+- 64 MiB of source bytes
+- 2,048 syntax levels
+- 20,000 symbols
+- 32 lexical candidates per reference,
+- 2,000 edges/findings
+- 100,000 reachable commits
+- 128 history evidence items per collection
+- 30 seconds of analysis work,
+- 8 MiB rendered report.
+
+Cache records are stored under `$XDG_CACHE_HOME/setaryb` (or `~/.cache/setaryb`) and
+are are reusable across map scopes.
 
 ### `setaryb history [OPERATION] [OPTIONS] [PATH]`
 

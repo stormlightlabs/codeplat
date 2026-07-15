@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gix::bstr::ByteSlice;
 use gix::revision::walk::{Sorting, iter::Error as WalkIterError};
@@ -8,22 +8,27 @@ use gix::traverse::commit::simple::CommitTimeOrder;
 
 use crate::cli::ExitCategory;
 use crate::report::{
-    ActivityReport, BugReport, ChurnReport, CommitEvidence, ContributorCount, ContributorReport, FirefightingReport,
-    HistoryOperation, HistoryReport, HistorySettings, MonthlyActivity, PathCount,
+    ActivityReport, AnalysisProfile, BugReport, ChurnReport, CollectionSummary, CommitEvidence, ContributorCount,
+    ContributorReport, FirefightingReport, HistoryCollections, HistoryOperation, HistoryReport, HistorySettings,
+    MonthlyActivity, PathCount, ReportLimits, TruncationReason,
 };
 use crate::security;
 use crate::utils;
 
 const CHURN_CAVEAT: &str =
-    "Absolute churn is not normalized by file size; active development is not automatically risky.";
+    "Absolute churn is not normalized by file size & active development is not automatically risky.";
 const CONTRIBUTOR_CAVEAT: &str =
-    "Squash merges can credit a merger rather than the original author; commit count is only a knowledge proxy.";
+    "Squash merges can credit a merger rather than the original author so commit count is only a knowledge proxy.";
 const BUG_CAVEAT: &str = "Bug clusters depend on commit-message discipline and do not prove a defect rate.";
-const ACTIVITY_CAVEAT: &str = "Cadence reflects team and release habits, not just repository health.";
+const ACTIVITY_CAVEAT: &str = "Cadence reflects team and release habits.";
 const FIREFIGHTING_CAVEAT: &str =
-    "Firefighting matches are keyword evidence, not a complete measure of release health.";
+    "Firefighting matches are keyword evidence and not a complete measure of release health.";
+const MAX_CHANGED_PATHS_PER_COMMIT: usize = 10_000;
+const MAX_TREE_NODES_PER_COMMIT: usize = 100_000;
+const MAX_TREE_ENTRIES_PER_DIRECTORY: usize = 4_096;
 
 type Result<T> = std::result::Result<T, HistoryError>;
+type TreeEntryMap = BTreeMap<String, (gix::objs::tree::EntryMode, gix::ObjectId)>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
@@ -86,6 +91,19 @@ struct CommitRecord {
     paths: Vec<String>,
 }
 
+struct CommitScan {
+    records: Vec<CommitRecord>,
+    commits_seen: usize,
+    non_merge_commits_seen: usize,
+    truncated: bool,
+    elapsed_limited: bool,
+}
+
+struct ChangedPaths {
+    paths: Vec<String>,
+    truncated: bool,
+}
+
 impl CommitRecord {
     fn evidence(&self, paths: Vec<String>) -> CommitEvidence {
         CommitEvidence { id: self.id.clone(), subject: self.subject.clone(), paths }
@@ -96,7 +114,9 @@ impl CommitRecord {
     }
 }
 
-pub fn analyze(path: &Path, settings: HistorySettings, operation: Option<HistoryOperation>) -> Result<HistoryReport> {
+pub fn analyze(
+    path: &Path, settings: HistorySettings, operation: Option<HistoryOperation>, profile: AnalysisProfile,
+) -> Result<HistoryReport> {
     if settings.window_days == 0 || settings.recent_window_days == 0 {
         return Err(HistoryError::Input {
             path: path.to_owned(),
@@ -114,7 +134,9 @@ pub fn analyze(path: &Path, settings: HistorySettings, operation: Option<History
     let head = repository
         .head_id()
         .map_err(|error| HistoryError::analysis("resolving HEAD", error))?;
-    let records = collect_commits(&repository, head)?;
+    let limits = ReportLimits::for_profile(profile);
+    let scan = collect_commits(&repository, head, &scope.relative_path, operation, &limits)?;
+    let records = scan.records;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| HistoryError::analysis("reading the current time", error))?
@@ -131,24 +153,93 @@ pub fn analyze(path: &Path, settings: HistorySettings, operation: Option<History
     let activity = include(HistoryOperation::Activity).then(|| analyze_activity(&records, &scope.relative_path));
     let firefighting = include(HistoryOperation::Firefighting)
         .then(|| analyze_firefighting(&records, &scope.relative_path, &settings, now));
-    let scoped_records = records
-        .iter()
-        .filter(|record| record.affects_scope(&scope.relative_path));
-
-    let commits_seen = scoped_records.clone().count();
-    let non_merge_commits_seen = scoped_records.filter(|record| !record.is_merge).count();
-    Ok(HistoryReport {
+    let commits_seen = scan.commits_seen;
+    let non_merge_commits_seen = scan.non_merge_commits_seen;
+    let mut limitations = Vec::new();
+    if scan.truncated {
+        limitations.push(format!(
+            "Reachable commit evidence was bounded at {}; aggregate counts include only the retained prefix.",
+            limits.max_commits
+        ));
+    }
+    if scan.elapsed_limited {
+        limitations.push(format!(
+            "History analysis stopped at the {} ms elapsed-work limit; the returned report is partial.",
+            limits.max_elapsed_ms
+        ));
+    }
+    let mut report = HistoryReport {
         repository_root: scope.repository_root.to_string_lossy().into_owned(),
         scope_path: scope.relative_path,
         settings,
         commits_seen,
         non_merge_commits_seen,
+        collections: HistoryCollections {
+            commits: if scan.truncated {
+                CollectionSummary::bounded(commits_seen, records.len(), TruncationReason::ResourceLimit)
+            } else {
+                CollectionSummary::complete(commits_seen)
+            },
+            churn_paths: CollectionSummary::complete(0),
+            contributors_overall: CollectionSummary::complete(0),
+            contributors_recent: CollectionSummary::complete(0),
+            bug_paths: CollectionSummary::complete(0),
+            bug_overlap_paths: CollectionSummary::complete(0),
+            bug_commits: CollectionSummary::complete(0),
+            activity_months: CollectionSummary::complete(0),
+            firefighting_commits: CollectionSummary::complete(0),
+        },
+        limitations,
         churn,
         contributors,
         bugs,
         activity,
         firefighting,
-    })
+    };
+    bound_history(&mut report, ReportLimits::for_profile(profile));
+    Ok(report)
+}
+
+fn bound_history(report: &mut HistoryReport, limits: ReportLimits) {
+    let mut truncated = false;
+    if let Some(churn) = &mut report.churn {
+        report.collections.churn_paths = truncate(&mut churn.paths, limits.max_history_evidence);
+        truncated |= report.collections.churn_paths.truncated;
+    }
+    if let Some(contributors) = &mut report.contributors {
+        report.collections.contributors_overall = truncate(&mut contributors.overall, limits.max_history_evidence);
+        report.collections.contributors_recent = truncate(&mut contributors.recent, limits.max_history_evidence);
+        truncated |=
+            report.collections.contributors_overall.truncated || report.collections.contributors_recent.truncated;
+    }
+    if let Some(bugs) = &mut report.bugs {
+        report.collections.bug_paths = truncate(&mut bugs.paths, limits.max_history_evidence);
+        report.collections.bug_overlap_paths = truncate(&mut bugs.overlap_paths, limits.max_history_evidence);
+        report.collections.bug_commits = truncate(&mut bugs.commits, limits.max_history_evidence);
+        truncated |= report.collections.bug_paths.truncated
+            || report.collections.bug_overlap_paths.truncated
+            || report.collections.bug_commits.truncated;
+    }
+    if let Some(activity) = &mut report.activity {
+        report.collections.activity_months = truncate(&mut activity.months, limits.max_history_evidence);
+        truncated |= report.collections.activity_months.truncated;
+    }
+    if let Some(firefighting) = &mut report.firefighting {
+        report.collections.firefighting_commits = truncate(&mut firefighting.commits, limits.max_history_evidence);
+        truncated |= report.collections.firefighting_commits.truncated;
+    }
+    if truncated {
+        report.limitations.push(format!(
+            "History evidence was bounded to {} returned items per collection; use `--profile evidence` for the larger bounded evidence profile.",
+            limits.max_history_evidence
+        ));
+    }
+}
+
+fn truncate<T>(values: &mut Vec<T>, limit: usize) -> CollectionSummary {
+    let total = values.len();
+    values.truncate(limit);
+    CollectionSummary::bounded(total, values.len(), TruncationReason::CollectionLimit)
 }
 
 fn analyze_churn(records: &[CommitRecord], scope: &str, settings: &HistorySettings, now: i64) -> ChurnReport {
@@ -173,7 +264,7 @@ fn analyze_contributors(
 ) -> ContributorReport {
     let non_merge: Vec<_> = records
         .iter()
-        .filter(|record| !record.is_merge && !scoped_paths(&record.paths, scope).is_empty())
+        .filter(|record| !record.is_merge && record.affects_scope(scope))
         .collect();
     let recent: Vec<_> = non_merge
         .iter()
@@ -277,14 +368,36 @@ fn analyze_firefighting(
     }
 }
 
-fn collect_commits(repository: &gix::Repository, head: gix::Id<'_>) -> Result<Vec<CommitRecord>> {
+fn collect_commits(
+    repository: &gix::Repository, head: gix::Id<'_>, scope: &str, operation: Option<HistoryOperation>,
+    limits: &ReportLimits,
+) -> Result<CommitScan> {
+    let needs_paths = scope != "."
+        || operation.is_none_or(|operation| {
+            matches!(
+                operation,
+                HistoryOperation::Churn | HistoryOperation::Bugs | HistoryOperation::Firefighting
+            )
+        });
+    let needs_message =
+        operation.is_none_or(|operation| matches!(operation, HistoryOperation::Bugs | HistoryOperation::Firefighting));
     let walk = repository
         .rev_walk([head])
         .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
         .all()
         .map_err(|error| HistoryError::analysis("walking revisions", error))?;
     let mut records = Vec::new();
+    let mut commits_seen = 0usize;
+    let mut non_merge_commits_seen = 0usize;
+    let mut truncated = false;
+    let mut elapsed_limited = false;
+    let scan_started = Instant::now();
     for info in walk {
+        if scan_started.elapsed().as_millis() >= u128::from(limits.max_elapsed_ms) {
+            truncated = true;
+            elapsed_limited = true;
+            break;
+        }
         let info = info.map_err(|error: WalkIterError| HistoryError::analysis("walking revisions", error))?;
         let id = info.id;
         let commit = info
@@ -302,99 +415,59 @@ fn collect_commits(repository: &gix::Repository, head: gix::Id<'_>) -> Result<Ve
         let committer_time = committer
             .time()
             .map_err(|error| HistoryError::analysis("decoding a committer timestamp", error))?;
-        let subject = commit
-            .message()
-            .map_err(|error| HistoryError::analysis("decoding a commit message", error))?
-            .summary();
-        let message = commit
-            .message_raw()
-            .map_err(|error| HistoryError::analysis("decoding a commit message", error))?
-            .to_str_lossy()
-            .into_owned();
-        let parents: Vec<_> = commit.parent_ids().collect();
-        let paths = if parents.len() <= 1 {
+        let parents: Vec<_> = commit.parent_ids().take(2).collect();
+        let is_merge = parents.len() > 1;
+        let changed = if needs_paths && !is_merge {
             changed_paths(repository, &commit, parents.first().copied())?
         } else {
-            Vec::new()
+            ChangedPaths { paths: Vec::new(), truncated: false }
+        };
+        let ChangedPaths { paths, truncated: changed_truncated } = changed;
+        if scope != "." && scoped_paths(&paths, scope).is_empty() {
+            continue;
+        }
+        commits_seen = commits_seen.saturating_add(1);
+        if !is_merge {
+            non_merge_commits_seen = non_merge_commits_seen.saturating_add(1);
+        }
+        if records.len() >= limits.max_commits {
+            truncated = true;
+            break;
+        }
+        truncated |= changed_truncated;
+        let (subject, message) = if needs_message {
+            let message = commit
+                .message_raw()
+                .map_err(|error| HistoryError::analysis("decoding a commit message", error))?
+                .to_str_lossy()
+                .into_owned();
+            let subject = commit
+                .message()
+                .map_err(|error| HistoryError::analysis("decoding a commit message", error))?
+                .summary();
+            (String::from_utf8_lossy(subject.as_ref()).trim().to_owned(), message)
+        } else {
+            (String::new(), String::new())
         };
 
         records.push(CommitRecord {
             id: id.to_string(),
-            subject: String::from_utf8_lossy(subject.as_ref()).trim().to_owned(),
+            subject,
             message,
             author_name: author.name.to_str_lossy().into_owned(),
             author_email: author.email.to_str_lossy().into_owned(),
             author_seconds: author_time.seconds,
             committer_seconds: committer_time.seconds,
-            is_merge: parents.len() > 1,
+            is_merge,
             paths,
         });
     }
-    Ok(records)
-}
-
-fn collect_tree_changes(
-    repository: &gix::Repository, previous: &gix::Tree<'_>, current: &gix::Tree<'_>, prefix: &str,
-    changed: &mut BTreeSet<String>,
-) -> Result<()> {
-    if previous.id == current.id {
-        return Ok(());
-    }
-    let previous_entries = tree_entries(previous)?;
-    let current_entries = tree_entries(current)?;
-    let names: BTreeSet<_> = previous_entries.keys().chain(current_entries.keys()).cloned().collect();
-    for name in names {
-        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
-        match (previous_entries.get(&name), current_entries.get(&name)) {
-            (Some((previous_mode, previous_id)), Some((current_mode, current_id)))
-                if previous_mode.is_tree() && current_mode.is_tree() =>
-            {
-                if previous_id != current_id {
-                    let previous_tree = repository
-                        .find_tree(*previous_id)
-                        .map_err(|error| HistoryError::analysis("reading a previous directory tree", error))?;
-                    let current_tree = repository
-                        .find_tree(*current_id)
-                        .map_err(|error| HistoryError::analysis("reading a current directory tree", error))?;
-                    collect_tree_changes(repository, &previous_tree, &current_tree, &path, changed)?;
-                }
-            }
-            (Some((previous_mode, previous_id)), Some((current_mode, current_id)))
-                if previous_mode == current_mode && previous_id == current_id => {}
-            (Some((previous_mode, previous_id)), Some((current_mode, current_id))) => {
-                collect_changed_entry(repository, *previous_mode, *previous_id, &path, changed)?;
-                collect_changed_entry(repository, *current_mode, *current_id, &path, changed)?;
-            }
-            (Some((mode, id)), None) | (None, Some((mode, id))) => {
-                collect_changed_entry(repository, *mode, *id, &path, changed)?;
-            }
-            (None, None) => continue,
-        }
-    }
-    Ok(())
-}
-
-fn collect_changed_entry(
-    repository: &gix::Repository, mode: gix::objs::tree::EntryMode, id: gix::ObjectId, path: &str,
-    changed: &mut BTreeSet<String>,
-) -> Result<()> {
-    if mode.is_tree() {
-        let tree = repository
-            .find_tree(id)
-            .map_err(|error| HistoryError::analysis("reading a changed directory tree", error))?;
-        for (name, (mode, id)) in tree_entries(&tree)? {
-            let child_path = format!("{path}/{name}");
-            collect_changed_entry(repository, mode, id, &child_path, changed)?;
-        }
-    } else {
-        changed.insert(path.to_owned());
-    }
-    Ok(())
+    Ok(CommitScan { records, commits_seen, non_merge_commits_seen, truncated, elapsed_limited })
 }
 
 fn changed_paths(
     repository: &gix::Repository, commit: &gix::Commit<'_>, parent: Option<gix::Id<'_>>,
-) -> Result<Vec<String>> {
+) -> Result<ChangedPaths> {
     let current_tree = commit
         .tree()
         .map_err(|error| HistoryError::analysis("reading a commit tree", error))?;
@@ -410,15 +483,113 @@ fn changed_paths(
         None => repository.empty_tree(),
     };
     let mut paths = BTreeSet::new();
-    collect_tree_changes(repository, &previous_tree, &current_tree, "", &mut paths)?;
-    Ok(paths.into_iter().collect())
+    let mut pairs = vec![(previous_tree.id, current_tree.id, String::new())];
+    let mut nodes_seen = 0usize;
+    let mut truncated = false;
+    while let Some((previous_id, current_id, prefix)) = pairs.pop() {
+        nodes_seen = nodes_seen.saturating_add(1);
+        if nodes_seen > MAX_TREE_NODES_PER_COMMIT || paths.len() >= MAX_CHANGED_PATHS_PER_COMMIT {
+            truncated = true;
+            break;
+        }
+        if previous_id == current_id {
+            continue;
+        }
+        let previous_tree = repository
+            .find_tree(previous_id)
+            .map_err(|error| HistoryError::analysis("reading a previous directory tree", error))?;
+        let current_tree = repository
+            .find_tree(current_id)
+            .map_err(|error| HistoryError::analysis("reading a current directory tree", error))?;
+        let (previous_entries, previous_entries_truncated) = tree_entries(&previous_tree)?;
+        let (current_entries, current_entries_truncated) = tree_entries(&current_tree)?;
+        truncated |= previous_entries_truncated || current_entries_truncated;
+        let names: BTreeSet<_> = previous_entries.keys().chain(current_entries.keys()).cloned().collect();
+        for name in names.into_iter().rev() {
+            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            match (previous_entries.get(&name), current_entries.get(&name)) {
+                (Some((previous_mode, previous_id)), Some((current_mode, current_id)))
+                    if previous_mode.is_tree() && current_mode.is_tree() =>
+                {
+                    if previous_id != current_id {
+                        pairs.push((previous_id.to_owned(), current_id.to_owned(), path));
+                    }
+                }
+                (Some((previous_mode, previous_id)), Some((current_mode, current_id)))
+                    if previous_mode == current_mode && previous_id == current_id => {}
+                (Some((previous_mode, previous_id)), Some((current_mode, current_id))) => {
+                    truncated |= collect_changed_entry_iterative(
+                        repository,
+                        *previous_mode,
+                        *previous_id,
+                        &path,
+                        &mut paths,
+                        &mut nodes_seen,
+                    )?;
+                    truncated |= collect_changed_entry_iterative(
+                        repository,
+                        *current_mode,
+                        *current_id,
+                        &path,
+                        &mut paths,
+                        &mut nodes_seen,
+                    )?;
+                }
+                (Some((mode, id)), None) | (None, Some((mode, id))) => {
+                    truncated |=
+                        collect_changed_entry_iterative(repository, *mode, *id, &path, &mut paths, &mut nodes_seen)?;
+                }
+                (None, None) => continue,
+            }
+            if truncated {
+                break;
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+    Ok(ChangedPaths { paths: paths.into_iter().collect(), truncated })
 }
 
-fn tree_entries(tree: &gix::Tree<'_>) -> Result<BTreeMap<String, (gix::objs::tree::EntryMode, gix::ObjectId)>> {
+fn collect_changed_entry_iterative(
+    repository: &gix::Repository, mode: gix::objs::tree::EntryMode, id: gix::ObjectId, path: &str,
+    changed: &mut BTreeSet<String>, nodes_seen: &mut usize,
+) -> Result<bool> {
+    let mut stack = vec![(mode, id, path.to_owned())];
+    while let Some((mode, id, path)) = stack.pop() {
+        *nodes_seen = nodes_seen.saturating_add(1);
+        if *nodes_seen > MAX_TREE_NODES_PER_COMMIT || changed.len() >= MAX_CHANGED_PATHS_PER_COMMIT {
+            return Ok(true);
+        }
+        if mode.is_tree() {
+            let tree = repository
+                .find_tree(id)
+                .map_err(|error| HistoryError::analysis("reading a changed directory tree", error))?;
+            let (entries, entries_truncated) = tree_entries(&tree)?;
+            for (name, (mode, id)) in entries.into_iter().rev() {
+                stack.push((mode, id, format!("{path}/{name}")));
+            }
+            if entries_truncated {
+                return Ok(true);
+            }
+        } else {
+            changed.insert(path);
+        }
+    }
+    Ok(false)
+}
+
+fn tree_entries(tree: &gix::Tree<'_>) -> Result<(TreeEntryMap, bool)> {
     let decoded = gix::objs::TreeRef::from_bytes(&tree.data, tree.id.kind())
         .map_err(|error| HistoryError::analysis("decoding a directory tree", error))?;
     let mut entries = BTreeMap::new();
+    let mut truncated = false;
     for entry in decoded.entries {
+        if entries.len() >= MAX_TREE_ENTRIES_PER_DIRECTORY {
+            truncated = true;
+            break;
+        }
         let name = security::validate_component(entry.filename.as_bytes())
             .map_err(|error| HistoryError::safety("decoding a Git tree path", error))?;
         if entries.insert(name, (entry.mode, entry.oid.to_owned())).is_some() {
@@ -428,7 +599,7 @@ fn tree_entries(tree: &gix::Tree<'_>) -> Result<BTreeMap<String, (gix::objs::tre
             ));
         }
     }
-    Ok(entries)
+    Ok((entries, truncated))
 }
 
 fn contributor_counts(records: Vec<&CommitRecord>) -> Vec<ContributorCount> {

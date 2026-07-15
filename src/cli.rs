@@ -8,7 +8,7 @@ use clap::{ArgAction, ColorChoice, Parser, Subcommand, ValueEnum, builder::Style
 use owo_colors::OwoColorize;
 
 use crate::map::{CacheCommand, CacheControlReport, MapSettings};
-use crate::report::{CacheMode, CommandDescriptor, HistoryOperation, HistorySettings, Report};
+use crate::report::{AnalysisProfile, CacheMode, CommandDescriptor, HistoryOperation, HistorySettings, Report};
 use crate::utils;
 
 #[derive(Debug, Subcommand)]
@@ -71,6 +71,21 @@ enum CacheModeOption {
     Always,
     Files,
     Manual,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ProfileOption {
+    Compact,
+    Evidence,
+}
+
+impl From<ProfileOption> for AnalysisProfile {
+    fn from(profile: ProfileOption) -> Self {
+        match profile {
+            ProfileOption::Compact => Self::Compact,
+            ProfileOption::Evidence => Self::Evidence,
+        }
+    }
 }
 
 impl From<CacheModeOption> for CacheMode {
@@ -228,6 +243,7 @@ struct Cli {
 
 impl From<Cli> for CommandRequest {
     fn from(cli: Cli) -> Self {
+        let profile = cli.output.profile.into();
         let default_map_settings = cli.map_options.settings();
         let (command, history, map_settings) = match cli.command {
             None => (
@@ -268,7 +284,9 @@ impl From<Cli> for CommandRequest {
             ),
         };
 
-        CommandRequest { command, history, map: map_settings }
+        let mut map = map_settings;
+        map.profile = profile;
+        CommandRequest { command, history, map, profile }
     }
 }
 
@@ -361,6 +379,7 @@ impl MapOptions {
             map_tokens: self.map_tokens,
             cache_mode: if self.no_cache { CacheMode::Disabled } else { self.cache_mode.into() },
             cache_files: self.cache_files.clone(),
+            profile: AnalysisProfile::Compact,
         }
     }
 
@@ -517,6 +536,10 @@ struct OutputOptions {
     /// Alias for `--color never`.
     #[arg(long = "no-color", global = true, action = ArgAction::SetTrue)]
     no_color: bool,
+
+    /// Evidence profile: compact (default) or bounded exhaustive evidence.
+    #[arg(long, global = true, value_enum, default_value_t = ProfileOption::Compact)]
+    profile: ProfileOption,
 }
 
 impl OutputOptions {
@@ -556,6 +579,7 @@ pub struct CommandRequest {
     pub command: CommandDescriptor,
     pub history: HistorySettings,
     pub map: MapSettings,
+    pub profile: AnalysisProfile,
 }
 
 /// Parse and execute the command line using the process environment and standard streams.
@@ -608,7 +632,7 @@ where
 
     let color_policy = cli.color_policy();
 
-    match invoke(cli, stdout).context("could not invoke Setaryb") {
+    match invoke(cli, stdout, stderr, stderr_is_terminal).context("could not invoke Setaryb") {
         Ok(()) => ExitCategory::Success,
         Err(error) => {
             let category = error
@@ -620,27 +644,42 @@ where
     }
 }
 
-fn invoke<W: Write>(cli: Cli, stdout: &mut W) -> anyhow::Result<()> {
+fn invoke<W: Write, E: Write>(
+    cli: Cli, stdout: &mut W, stderr: &mut E, stderr_is_terminal: bool,
+) -> anyhow::Result<()> {
     let output_format = cli.output_format()?;
     cli.validate()?;
     if let Some(SubcommandName::Cache(cache)) = &cli.command {
+        if stderr_is_terminal {
+            let _ = writeln!(stderr, "setaryb: reading cache metadata…");
+        }
         let report = crate::map::cache_control(cache.operation.into())
             .map_err(|error| ApplicationError::Report(crate::report::ReportError::Map(error)))?;
         let output = render_cache_control(&report, output_format)?;
-        stdout
-            .write_all(output.as_bytes())
-            .context("could not write the cache report to stdout")?;
-        stdout.flush().context("could not flush cache report stdout")?;
+        write_stdout(stdout, output.as_bytes(), "cache report")?;
         return Ok(());
+    }
+    if stderr_is_terminal {
+        let _ = writeln!(stderr, "setaryb: analyzing repository…");
     }
     let report = Report::analyze(cli.into()).map_err(ApplicationError::Report)?;
     let output = report.render(output_format).map_err(ApplicationError::Render)?;
 
-    stdout
-        .write_all(output.as_bytes())
-        .context("could not write the report to stdout")?;
-    stdout.flush().context("could not flush report stdout")?;
+    write_stdout(stdout, output.as_bytes(), "report")?;
     Ok(())
+}
+
+fn write_stdout<W: Write>(stdout: &mut W, bytes: &[u8], label: &str) -> anyhow::Result<()> {
+    match stdout.write_all(bytes) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
+        Err(error) => return Err(error).context(format!("could not write the {label} to stdout")),
+    }
+    match stdout.flush() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(error).context(format!("could not flush {label} stdout")),
+    }
 }
 
 fn render_cache_control(report: &CacheControlReport, format: OutputFormat) -> Result<String, ApplicationError> {
@@ -692,7 +731,13 @@ mod tests {
 
     #[test]
     fn no_color_alias_overrides_the_color_flag() {
-        let options = OutputOptions { format: None, json: false, color: ColorPolicy::Always, no_color: true };
+        let options = OutputOptions {
+            format: None,
+            json: false,
+            color: ColorPolicy::Always,
+            no_color: true,
+            profile: ProfileOption::Compact,
+        };
         assert_eq!(options.color_policy(), ColorPolicy::Never);
     }
 
@@ -717,6 +762,7 @@ mod tests {
             json: true,
             color: ColorPolicy::Auto,
             no_color: false,
+            profile: ProfileOption::Compact,
         };
 
         let error = options.format().expect_err("options should conflict");
@@ -729,5 +775,23 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("Exit status:"));
         assert!(help.contains("repository discovery failure"));
+    }
+
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn broken_pipe_report_output_is_a_quiet_success() {
+        let mut writer = BrokenPipeWriter;
+        assert!(write_stdout(&mut writer, b"report", "report").is_ok());
     }
 }

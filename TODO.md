@@ -233,22 +233,29 @@ produce deterministic partial evidence instead of unbounded traversal, allocatio
 
 **Blocked by:** Tickets 2 and 7
 
+**Implementation status (2026-07-15):** Compact and evidence profiles now project
+bounded collections with deterministic totals, returned counts, truncation reasons,
+published resource ceilings, bounded source/cache reads, iterative tree and syntax
+traversal, operation-aware history collection, and quiet broken-pipe handling. The
+default self-map is approximately 13 KB in JSON versus the 7.33 MB audit baseline.
+The explicit evidence profile remains capped by the same work and output ceilings.
+
 **Acceptance criteria:**
 
-- [ ] The default compact profile emits selected snippets and bounded summaries only. Exhaustive symbols,
+- [x] The default compact profile emits selected snippets and bounded summaries only. Exhaustive symbols,
       edges, findings, omissions, and commit evidence require an explicit evidence profile or pagination.
-- [ ] `--map-tokens` counts every data-dependent compact-map field and never reports an estimate above the
+- [x] `--map-tokens` counts every data-dependent compact-map field and never reports an estimate above the
       requested budget. The fixed envelope is documented and bounded; property tests cover tiny budgets.
-- [ ] Every collection exposes `total`, `returned`, and `truncated` plus a reason. Repeated ambiguity is grouped
+- [x] Every collection exposes `total`, `returned`, and `truncated` plus a reason. Repeated ambiguity is grouped
       and sampled rather than emitted once per reference occurrence.
-- [ ] Inventory prunes `.git`, ignored build/dependency/vendor directories, and nested repositories before
+- [x] Inventory prunes `.git`, ignored build/dependency/vendor directories, and nested repositories before
       descent. Hidden, non-ignored source remains eligible, and ignored omissions use bounded counts/samples.
-- [ ] Reviewed limits cover file count/bytes, total bytes, syntax depth, symbols, candidate fan-out, edges,
+- [x] Reviewed limits cover file count/bytes, total bytes, syntax depth, symbols, candidate fan-out, edges,
       findings, commits, history evidence, elapsed work, and output. Oversize/binary/deep inputs become typed
       omissions; syntax traversal cannot overflow the call stack.
-- [ ] Focused history uses an operation-aware streaming pass and computes tree diffs only when the requested
+- [x] Focused history uses an operation-aware streaming pass and computes tree diffs only when the requested
       evidence and path scope require them.
-- [ ] Long scans expose concise TTY-only stderr progress, stay quiet when non-interactive, honor interruption
+- [x] Long scans expose concise TTY-only stderr progress, stay quiet when non-interactive, honor interruption
       promptly, and cannot leave a partial cache entry or JSON document described as successful.
 - [ ] Benchmarks on Setaryb itself, a large ignored tree, high-ambiguity sources, and 10k/100k-commit fixtures
       enforce documented latency and output ceilings. The eight-file self-map is orders of magnitude smaller
@@ -256,9 +263,10 @@ produce deterministic partial evidence instead of unbounded traversal, allocatio
 
 **Verification:**
 
-- Assert byte size, estimated tokens, returned counts, and truncation metadata for compact and evidence profiles.
-- Run resource fixtures under CI-friendly time and memory ceilings and confirm useful partial output.
-- Test early pipe closure; a broken pipe terminates quietly rather than becoming exit 70.
+- [x] Assert byte size, estimated tokens, returned counts, and truncation metadata for compact and evidence profiles.
+- [x] Run resource fixtures under CI-friendly time and memory ceilings and confirm useful partial output;
+      the integration suite covers oversized and binary source inputs with typed omissions.
+- [x] Test early pipe closure; a broken pipe terminates quietly rather than becoming exit 70.
 - `cargo fmt --check`
 - `cargo test --all-features`
 - `cargo clippy --all-targets --all-features -- -D warnings`

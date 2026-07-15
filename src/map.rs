@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gix::bstr::ByteSlice;
 use ignore::WalkBuilder;
@@ -12,11 +12,7 @@ use sha2::{Digest, Sha256};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::cli::ExitCategory;
-use crate::report::{
-    CacheMode, CacheStatus, FileAnalysisStatus, FileRank, LexicalEdge, MapCacheReport, MapFinding, MapFindingKind,
-    MapInventory, MapReport, MapSelection, MapSnippet, OmissionReason, SourceFile, SourceLanguage, SourceLocation,
-    SourceOmission, SourceSymbol, SymbolKind, SymbolRole, WorktreeState,
-};
+use crate::report::*;
 use crate::security;
 
 const MAX_CONTEXT_CHARS: usize = 180;
@@ -352,6 +348,7 @@ pub struct MapSettings {
     pub map_tokens: usize,
     pub cache_mode: CacheMode,
     pub cache_files: Vec<String>,
+    pub profile: AnalysisProfile,
 }
 
 impl Default for MapSettings {
@@ -363,6 +360,7 @@ impl Default for MapSettings {
             map_tokens: DEFAULT_MAP_TOKENS,
             cache_mode: CacheMode::Auto,
             cache_files: Vec::new(),
+            profile: AnalysisProfile::Compact,
         }
     }
 }
@@ -802,6 +800,8 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         security::ScopeError::Safety(error) => MapError::safety("resolving the analysis scope", error),
     })?;
     let repository_root = &scope.repository_root;
+    let limits = ReportLimits::for_profile(settings.profile);
+    let analysis_started = Instant::now();
 
     let exclusions = build_exclusions(repository_root, &settings.excludes)?;
     if settings.map_tokens == 0 {
@@ -841,9 +841,11 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             .map_err(|error| MapError::analysis("resolving the repository HEAD tree", error))?,
         b"",
         &mut tracked_paths,
+        limits.max_files,
+        limits.max_syntax_depth,
     )?;
-    collect_index_files(&repository, &mut tracked_paths)?;
-    let modified_paths = collect_modified_paths(&repository, repository_root)?;
+    collect_index_files(&repository, &mut tracked_paths, limits.max_files)?;
+    let modified_paths = collect_modified_paths(&repository, repository_root, limits.max_file_bytes)?;
 
     let mut candidates = BTreeMap::new();
     for path in tracked_paths
@@ -854,7 +856,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         candidates.insert(path, Candidate { state, symlink: false });
     }
 
-    let (visible_paths, visible_errors) = walk_files(&scope.selected_path, repository_root, true);
+    let (visible_paths, visible_errors) = walk_files(&scope.selected_path, repository_root, true, limits.max_files);
     for (path, symlink) in &visible_paths {
         if is_git_internal(path) || !in_scope(path, &scope.relative_path) {
             continue;
@@ -865,7 +867,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             .or_insert(Candidate { state: WorktreeState::Untracked, symlink: *symlink });
     }
 
-    let (all_paths, all_errors) = walk_files(&scope.selected_path, repository_root, false);
+    let (all_paths, all_errors) = walk_files(&scope.selected_path, repository_root, false, limits.max_files);
     let visible_path_set: BTreeSet<_> = visible_paths.keys().cloned().collect();
     let mut omissions = Vec::new();
     for error in visible_errors.into_iter().chain(all_errors) {
@@ -919,9 +921,42 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     }
 
     let inventory = inventory(&candidates);
+    if candidates.len() > limits.max_files {
+        let kept = candidates
+            .keys()
+            .take(limits.max_files)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for path in candidates.keys().filter(|path| !kept.contains(*path)) {
+            omissions.push(SourceOmission {
+                path: path.clone(),
+                reason: OmissionReason::TraversalError,
+                detail: format!(
+                    "The file-count resource limit ({}) was reached before this path could be analyzed.",
+                    limits.max_files
+                ),
+            });
+        }
+        candidates.retain(|path, _| kept.contains(path));
+    }
     let mut files = Vec::new();
     let mut findings = Vec::new();
+    let mut total_source_bytes = 0usize;
+    let mut total_symbols = 0usize;
+    let mut work_limit_reached = false;
     for (path, candidate) in candidates {
+        if analysis_started.elapsed().as_millis() >= u128::from(limits.max_elapsed_ms) {
+            omissions.push(SourceOmission {
+                path: scope.relative_path.clone(),
+                reason: OmissionReason::TraversalError,
+                detail: format!(
+                    "The analysis time resource limit ({} ms) was reached before this path could be analyzed.",
+                    limits.max_elapsed_ms
+                ),
+            });
+            work_limit_reached = true;
+            break;
+        }
         let absolute = repository_root.join(&path);
         if explicitly_excluded(exclusions.as_ref(), &absolute) {
             omissions.push(SourceOmission {
@@ -954,7 +989,12 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             });
             continue;
         }
-        let source = match security::read_worktree_file(repository_root, &scope.selected_path, &path) {
+        let source = match security::read_worktree_file_limited(
+            repository_root,
+            &scope.selected_path,
+            &path,
+            limits.max_file_bytes,
+        ) {
             Ok(source) => source,
             Err(security::ReadError::Safety(error)) => {
                 let reason = if matches!(error.kind, security::PathSafetyKind::Symlink) {
@@ -966,16 +1006,44 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 continue;
             }
             Err(error) => {
-                omissions.push(SourceOmission { path, reason: OmissionReason::ReadError, detail: error.to_string() });
+                let reason = if matches!(
+                    &error,
+                    security::ReadError::Io(io_error) if io_error.kind() == std::io::ErrorKind::InvalidData
+                ) {
+                    OmissionReason::Oversized
+                } else {
+                    OmissionReason::ReadError
+                };
+                omissions.push(SourceOmission { path, reason, detail: error.to_string() });
                 continue;
             }
         };
+        if total_source_bytes.saturating_add(source.len()) > limits.max_total_bytes {
+            omissions.push(SourceOmission {
+                path,
+                reason: OmissionReason::Oversized,
+                detail: format!(
+                    "The total source-byte resource limit ({}) was reached; this file was not analyzed.",
+                    limits.max_total_bytes
+                ),
+            });
+            continue;
+        }
+        total_source_bytes = total_source_bytes.saturating_add(source.len());
+        if source.contains(&0) || std::str::from_utf8(&source).is_err() {
+            omissions.push(SourceOmission {
+                path,
+                reason: OmissionReason::Binary,
+                detail: "Binary or non-UTF-8 source input is not parsed by the Tree-sitter map.".to_owned(),
+            });
+            continue;
+        }
         let fingerprint = source_fingerprint(&source);
         let requested = requested_cache_files.contains(&path);
         let forced_refresh =
             matches!(settings.cache_mode, CacheMode::Always) || (settings.cache_mode == CacheMode::Files && requested);
         let (parsed, stale) = if settings.cache_mode == CacheMode::Disabled || forced_refresh {
-            let parsed = parse_source(&source, support);
+            let parsed = parse_source_limited(&source, support, &limits);
             if settings.cache_mode != CacheMode::Disabled {
                 if let Some(error) = cache.write(&path, support, &fingerprint, &parsed) {
                     cache_limitations.push(error);
@@ -1010,7 +1078,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                         });
                         continue;
                     }
-                    let parsed = parse_source(&source, support);
+                    let parsed = parse_source_limited(&source, support, &limits);
                     if let Some(error) = cache.write(&path, support, &fingerprint, &parsed) {
                         cache_limitations.push(error);
                     }
@@ -1019,14 +1087,24 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 }
             }
         };
-        let ParsedSource { symbols, findings: file_findings, status, mut limitations } = parsed;
+        let ParsedSource { mut symbols, findings: file_findings, status, mut limitations } = parsed;
+        let available_symbols = limits.max_symbols.saturating_sub(total_symbols);
+        if symbols.len() > available_symbols {
+            symbols.truncate(available_symbols);
+            limitations.push(format!(
+                "The symbol resource limit ({}) was reached; additional symbols were omitted from this report.",
+                limits.max_symbols
+            ));
+        }
+        total_symbols = total_symbols.saturating_add(symbols.len());
         if stale {
             limitations.push(
                 "Manual cache mode used a potentially stale source analysis; rerun with `--cache always` to refresh it."
                     .to_owned(),
             );
         }
-        findings.extend(file_findings.into_iter().map(|mut finding| {
+        let finding_limit = limits.max_findings.saturating_sub(findings.len());
+        findings.extend(file_findings.into_iter().take(finding_limit).map(|mut finding| {
             if finding.path.is_empty() {
                 finding.path = path.clone();
             }
@@ -1044,7 +1122,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         });
     }
 
-    add_ambiguity_findings(&files, &mut findings);
+    add_ambiguity_findings(&files, &mut findings, limits.max_findings);
     files.sort_by(|left, right| left.path.cmp(&right.path));
     omissions.sort_by(|left, right| {
         left.path
@@ -1100,15 +1178,28 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         );
     }
     limitations.extend(cache_limitations);
+    if work_limit_reached {
+        limitations.push(format!(
+            "Source analysis stopped at the {} ms elapsed-work limit; the returned map is partial.",
+            limits.max_elapsed_ms
+        ));
+    }
 
-    let edges = build_lexical_edges(&files);
+    let edges = build_lexical_edges(&files, limits.max_candidates_per_reference, limits.max_edges);
     let ranking = rank_files(&files, &edges, settings);
-    let selection = select_snippets(&files, &edges, &ranking, settings.map_tokens, settings);
+    let selection_budget = if settings.profile == AnalysisProfile::Evidence || settings.map_tokens < 20 {
+        settings.map_tokens
+    } else {
+        settings.map_tokens.saturating_mul(2).div_ceil(3).max(1)
+    };
+    let mut selection = select_snippets(&files, &edges, &ranking, selection_budget, settings);
+    selection.token_budget = settings.map_tokens;
     let cache_status = cache_status(settings.cache_mode, &cache_stats);
     cache_stats.refreshed.sort();
     cache_stats.stale.sort();
 
-    Ok(MapReport {
+    let mut report = MapReport {
+        profile: settings.profile,
         repository_root: repository_root.to_string_lossy().into_owned(),
         scope_path: scope.relative_path,
         query_pack,
@@ -1139,7 +1230,258 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             refreshed: cache_stats.refreshed,
             stale: cache_stats.stale,
         },
-    })
+        collections: MapCollections {
+            files: CollectionSummary::complete(0),
+            symbols: CollectionSummary::complete(0),
+            omissions: CollectionSummary::complete(0),
+            findings: CollectionSummary::complete(0),
+            edges: CollectionSummary::complete(0),
+            ranking: CollectionSummary::complete(0),
+            snippets: CollectionSummary::complete(0),
+        },
+    };
+    bound_map_report(&mut report, settings.profile, &limits);
+    Ok(report)
+}
+
+fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits: &ReportLimits) {
+    let files_total = report.files.len();
+    let symbols_total = report.files.iter().map(|file| file.symbols.len()).sum::<usize>();
+    let omissions_total = report.omissions.len();
+    let findings_total = report.findings.len();
+    let edges_total = report.edges.len();
+    let ranking_total = report.ranking.len();
+    let snippets_total = report.selection.snippets.len();
+    let (file_limit, symbols_per_file, omission_limit, finding_limit, edge_limit, ranking_limit) = match profile {
+        AnalysisProfile::Compact => (32, 16, 8, 32, 32, 16),
+        AnalysisProfile::Evidence => (
+            limits.max_files,
+            limits.max_symbols_per_file,
+            limits.max_findings,
+            limits.max_findings,
+            limits.max_edges,
+            limits.max_files,
+        ),
+    };
+
+    report.files.truncate(file_limit);
+    let mut remaining_symbols = if profile == AnalysisProfile::Compact { 128 } else { limits.max_symbols };
+    for file in &mut report.files {
+        file.symbols.truncate(symbols_per_file.min(remaining_symbols));
+        remaining_symbols = remaining_symbols.saturating_sub(file.symbols.len());
+        for limitation in &mut file.limitations {
+            *limitation = bounded_text(limitation, 512);
+        }
+    }
+    report.omissions.truncate(omission_limit);
+    for omission in &mut report.omissions {
+        omission.detail = bounded_text(&omission.detail, 256);
+    }
+    report.findings.truncate(finding_limit);
+    for finding in &mut report.findings {
+        finding.detail = bounded_text(&finding.detail, 256);
+    }
+    report.edges.truncate(edge_limit);
+    for edge in &mut report.edges {
+        edge.candidates.truncate(limits.max_candidates_per_reference);
+    }
+    report.ranking.truncate(ranking_limit);
+
+    let enforce_budget = profile == AnalysisProfile::Compact
+        && (report.selection.token_budget < 256
+            || files_total > 16
+            || symbols_total > 256
+            || omissions_total > 32
+            || findings_total > 128
+            || edges_total > 256);
+    if enforce_budget {
+        // The selection is the highest-value compact evidence. Other fields
+        // are reduced until the same requested budget accounts for every
+        // remaining data-dependent field in the map.
+        while compact_payload_tokens(report) > report.selection.token_budget {
+            if report.findings.len() > 1 {
+                report.findings.pop();
+            } else if report.selection.snippets.len() > 1 {
+                report.selection.snippets.pop();
+            } else if report.edges.len() > 1 {
+                report.edges.pop();
+            } else if report.ranking.len() > 1 {
+                report.ranking.pop();
+            } else if report.files.len() > 1 {
+                report.files.pop();
+            } else if report.omissions.len() > 1 {
+                report.omissions.pop();
+            } else {
+                report.findings.clear();
+                report.omissions.clear();
+                if report.selection.token_budget < 20 {
+                    report.edges.clear();
+                    report.ranking.clear();
+                } else {
+                    report.selection.snippets.clear();
+                }
+                break;
+            }
+        }
+    }
+
+    report.selection.estimated_tokens = if enforce_budget {
+        compact_payload_tokens(report).min(report.selection.token_budget)
+    } else {
+        report
+            .selection
+            .snippets
+            .iter()
+            .map(|snippet| snippet.estimated_tokens)
+            .sum()
+    };
+    report.collections = MapCollections {
+        files: collection_summary(
+            files_total,
+            report.files.len(),
+            profile,
+            TruncationReason::CollectionLimit,
+        ),
+        symbols: collection_summary(
+            symbols_total,
+            report.files.iter().map(|file| file.symbols.len()).sum(),
+            profile,
+            TruncationReason::CollectionLimit,
+        ),
+        omissions: collection_summary(
+            omissions_total,
+            report.omissions.len(),
+            profile,
+            TruncationReason::CollectionLimit,
+        ),
+        findings: collection_summary(
+            findings_total,
+            report.findings.len(),
+            profile,
+            TruncationReason::CollectionLimit,
+        ),
+        edges: collection_summary(
+            edges_total,
+            report.edges.len(),
+            profile,
+            TruncationReason::CollectionLimit,
+        ),
+        ranking: collection_summary(
+            ranking_total,
+            report.ranking.len(),
+            profile,
+            TruncationReason::CollectionLimit,
+        ),
+        snippets: collection_summary(
+            snippets_total,
+            report.selection.snippets.len(),
+            profile,
+            TruncationReason::OutputBudget,
+        ),
+    };
+    if [
+        report.collections.files.truncated,
+        report.collections.symbols.truncated,
+        report.collections.omissions.truncated,
+        report.collections.findings.truncated,
+        report.collections.edges.truncated,
+        report.collections.ranking.truncated,
+        report.collections.snippets.truncated,
+    ]
+    .into_iter()
+    .any(|truncated| truncated)
+    {
+        report.limitations.push(
+            "The emitted map is a bounded sample; collection totals and truncation reasons identify evidence that was not returned."
+                .to_owned(),
+        );
+    }
+}
+
+fn collection_summary(
+    total: usize, returned: usize, profile: AnalysisProfile, reason: TruncationReason,
+) -> CollectionSummary {
+    if returned >= total {
+        CollectionSummary::complete(total)
+    } else {
+        let reason = if profile == AnalysisProfile::Compact && reason == TruncationReason::CollectionLimit {
+            TruncationReason::CollectionLimit
+        } else {
+            reason
+        };
+        CollectionSummary { total, returned, truncated: true, reason: Some(reason) }
+    }
+}
+
+fn compact_payload_tokens(report: &MapReport) -> usize {
+    let mut tokens = 0usize;
+    for file in &report.files {
+        tokens = tokens.saturating_add(token_count(&file.path));
+        tokens = tokens
+            .saturating_add(token_count(file.language.label()))
+            .saturating_add(token_count(&file.extension))
+            .saturating_add(token_count(file.worktree_state.label()))
+            .saturating_add(token_count(file.status.label()));
+        tokens = tokens.saturating_add(
+            file.limitations
+                .iter()
+                .map(|limitation| token_count(limitation))
+                .sum::<usize>(),
+        );
+        for symbol in &file.symbols {
+            tokens = tokens.saturating_add(token_count(&symbol.name));
+            tokens = tokens.saturating_add(token_count(&symbol.context));
+            tokens = tokens.saturating_add(token_count(symbol.kind.label()));
+            tokens = tokens.saturating_add(token_count(symbol.role.label()));
+            tokens = tokens.saturating_add(symbol.scope.iter().map(|scope| token_count(scope)).sum::<usize>());
+            tokens = tokens.saturating_add(8);
+        }
+    }
+    for omission in &report.omissions {
+        tokens = tokens.saturating_add(token_count(&omission.path));
+        tokens = tokens.saturating_add(token_count(&omission.detail));
+    }
+    for finding in &report.findings {
+        tokens = tokens.saturating_add(token_count(finding.kind.label()));
+        tokens = tokens.saturating_add(token_count(&finding.path));
+        tokens = tokens.saturating_add(token_count(&finding.detail));
+        tokens = tokens.saturating_add(if finding.location.is_some() { 8 } else { 0 });
+    }
+    for edge in &report.edges {
+        tokens = tokens.saturating_add(token_count(&edge.source));
+        tokens = tokens.saturating_add(token_count(&edge.target));
+        tokens = tokens.saturating_add(token_count(&edge.symbol));
+        tokens = tokens.saturating_add(
+            edge.candidates
+                .iter()
+                .map(|candidate| token_count(candidate))
+                .sum::<usize>(),
+        );
+        tokens = tokens.saturating_add(if edge.ambiguous { 1 } else { 0 });
+    }
+    tokens = tokens.saturating_add(
+        report
+            .ranking
+            .iter()
+            .map(|rank| token_count(&rank.path).saturating_add(2))
+            .sum::<usize>(),
+    );
+    tokens.saturating_add(
+        report
+            .selection
+            .snippets
+            .iter()
+            .map(|snippet| snippet.estimated_tokens)
+            .sum::<usize>(),
+    )
+}
+
+fn bounded_text(text: &str, max_chars: usize) -> String {
+    let mut output = text.chars().take(max_chars).collect::<String>();
+    if text.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
@@ -1217,7 +1559,7 @@ fn cache_status(mode: CacheMode, stats: &CacheStats) -> CacheStatus {
     }
 }
 
-fn build_lexical_edges(files: &[SourceFile]) -> Vec<LexicalEdge> {
+fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edges: usize) -> Vec<LexicalEdge> {
     let mut definitions = BTreeMap::<String, BTreeSet<String>>::new();
     for file in files {
         for symbol in &file.symbols {
@@ -1239,16 +1581,26 @@ fn build_lexical_edges(files: &[SourceFile]) -> Vec<LexicalEdge> {
             let Some(candidates) = definitions.get(&symbol.name) else {
                 continue;
             };
+            let candidates = candidates.iter().take(max_candidates).cloned().collect::<Vec<_>>();
             let ambiguous = candidates.len() > 1;
-            for target in candidates {
+            for target in &candidates {
                 edges.push(LexicalEdge {
                     source: file.path.clone(),
                     target: target.clone(),
                     symbol: symbol.name.clone(),
                     ambiguous,
-                    candidates: candidates.iter().cloned().collect(),
+                    candidates: candidates.clone(),
                 });
+                if edges.len() >= max_edges {
+                    break;
+                }
             }
+            if edges.len() >= max_edges {
+                break;
+            }
+        }
+        if edges.len() >= max_edges {
+            break;
         }
     }
     edges.sort_by(|left, right| {
@@ -1464,8 +1816,8 @@ fn fit_snippet(candidate: &SnippetCandidate, budget: usize) -> Option<(SourceSym
     if full_cost <= budget {
         return Some((candidate.symbol.clone(), full_cost, false));
     }
-    let marker = " …";
-    if token_count(&format!("{prefix}{marker}")) > budget {
+    let marker = "…";
+    if token_count(&format!("{prefix} {marker}")) > budget {
         return None;
     }
     let max_chars = candidate.symbol.context.chars().count();
@@ -1521,31 +1873,48 @@ fn explicitly_excluded(exclusions: Option<&Gitignore>, path: &Path) -> bool {
 }
 
 fn collect_tree_files(
-    repository: &gix::Repository, tree_id: &gix::Id<'_>, prefix: &[u8], files: &mut BTreeSet<String>,
+    repository: &gix::Repository, tree_id: &gix::Id<'_>, prefix: &[u8], files: &mut BTreeSet<String>, max_files: usize,
+    max_depth: usize,
 ) -> Result<()> {
-    let tree = repository
-        .find_tree(*tree_id)
-        .map_err(|error| MapError::analysis("reading the tracked source tree", error))?;
-    let mut names = BTreeSet::new();
-    for entry in tree.iter() {
-        let entry = entry.map_err(|error| MapError::analysis("decoding a tracked tree entry", error))?;
-        if !names.insert(entry.filename().as_bytes().to_owned()) {
-            return Err(MapError::safety(
-                "decoding a tracked tree path",
-                security::PathSafetyError { kind: security::PathSafetyKind::Collision },
-            ));
+    let mut stack = vec![(tree_id.detach(), prefix.to_vec(), 0usize)];
+    while let Some((tree_id, prefix, depth)) = stack.pop() {
+        if files.len() >= max_files || depth > max_depth {
+            break;
         }
-        let mut path_bytes = prefix.to_vec();
-        if !path_bytes.is_empty() {
-            path_bytes.push(b'/');
+        let tree = repository
+            .find_tree(tree_id)
+            .map_err(|error| MapError::analysis("reading the tracked source tree", error))?;
+        let mut names = BTreeSet::new();
+        let mut entries = Vec::new();
+        for entry in tree.iter() {
+            if entries.len() >= max_files {
+                break;
+            }
+            let entry = entry.map_err(|error| MapError::analysis("decoding a tracked tree entry", error))?;
+            let name = entry.filename().as_bytes().to_owned();
+            if !names.insert(name) {
+                return Err(MapError::safety(
+                    "decoding a tracked tree path",
+                    security::PathSafetyError { kind: security::PathSafetyKind::Collision },
+                ));
+            }
+            entries.push(entry);
         }
-        path_bytes.extend_from_slice(entry.filename().as_bytes());
-        let path = security::validate_repository_path(&path_bytes)
-            .map_err(|error| MapError::safety("decoding a tracked tree path", error))?;
-        if entry.mode().is_tree() {
-            collect_tree_files(repository, &entry.id(), path.as_bytes(), files)?;
-        } else {
-            if !files.insert(path) {
+        entries.reverse();
+        for entry in entries {
+            if files.len() >= max_files {
+                break;
+            }
+            let mut path_bytes = prefix.clone();
+            if !path_bytes.is_empty() {
+                path_bytes.push(b'/');
+            }
+            path_bytes.extend_from_slice(entry.filename().as_bytes());
+            let path = security::validate_repository_path(&path_bytes)
+                .map_err(|error| MapError::safety("decoding a tracked tree path", error))?;
+            if entry.mode().is_tree() {
+                stack.push((entry.id().detach(), path.into_bytes(), depth.saturating_add(1)));
+            } else if !files.insert(path) {
                 return Err(MapError::safety(
                     "decoding a tracked tree path",
                     security::PathSafetyError { kind: security::PathSafetyKind::Collision },
@@ -1556,11 +1925,14 @@ fn collect_tree_files(
     Ok(())
 }
 
-fn collect_index_files(repository: &gix::Repository, files: &mut BTreeSet<String>) -> Result<()> {
+fn collect_index_files(repository: &gix::Repository, files: &mut BTreeSet<String>, max_files: usize) -> Result<()> {
     let index = repository
         .index_or_empty()
         .map_err(|error| MapError::analysis("reading the worktree index", error))?;
     for (path, _) in index.entries_with_paths_by_filter_map(|_, entry| Some(entry.id)) {
+        if files.len() >= max_files {
+            break;
+        }
         let path = security::validate_repository_path(path.as_bytes())
             .map_err(|error| MapError::safety("decoding a worktree index path", error))?;
         files.insert(path);
@@ -1568,7 +1940,9 @@ fn collect_index_files(repository: &gix::Repository, files: &mut BTreeSet<String
     Ok(())
 }
 
-fn collect_modified_paths(repository: &gix::Repository, repository_root: &Path) -> Result<BTreeSet<String>> {
+fn collect_modified_paths(
+    repository: &gix::Repository, repository_root: &Path, max_file_bytes: usize,
+) -> Result<BTreeSet<String>> {
     let index = repository
         .index_or_load_from_head_or_empty()
         .map_err(|error| MapError::analysis("loading the worktree index for status", error))?;
@@ -1580,21 +1954,22 @@ fn collect_modified_paths(repository: &gix::Repository, repository_root: &Path) 
     for (path, id) in index.entries_with_paths_by_filter_map(|_, entry| Some(entry.id)) {
         let path = security::validate_repository_path(path.as_bytes())
             .map_err(|error| MapError::safety("decoding a status path", error))?;
-        let worktree = match security::read_worktree_file(repository_root, repository_root, &path) {
-            Ok(bytes) => bytes,
-            Err(security::ReadError::Safety(_)) => {
-                modified.insert(path);
-                continue;
-            }
-            Err(security::ReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                modified.insert(path);
-                continue;
-            }
-            Err(security::ReadError::Io(_)) => {
-                modified.insert(path);
-                continue;
-            }
-        };
+        let worktree =
+            match security::read_worktree_file_limited(repository_root, repository_root, &path, max_file_bytes) {
+                Ok(bytes) => bytes,
+                Err(security::ReadError::Safety(_)) => {
+                    modified.insert(path);
+                    continue;
+                }
+                Err(security::ReadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    modified.insert(path);
+                    continue;
+                }
+                Err(security::ReadError::Io(_)) => {
+                    modified.insert(path);
+                    continue;
+                }
+            };
         let blob = repository
             .find_blob(id)
             .map_err(|error| MapError::analysis("reading an index blob for status", error))?;
@@ -1605,17 +1980,33 @@ fn collect_modified_paths(repository: &gix::Repository, repository_root: &Path) 
     Ok(modified)
 }
 
-fn walk_files(root: &Path, repository_root: &Path, standard_filters: bool) -> (BTreeMap<String, bool>, Vec<WalkIssue>) {
+fn walk_files(
+    root: &Path, repository_root: &Path, standard_filters: bool, max_entries: usize,
+) -> (BTreeMap<String, bool>, Vec<WalkIssue>) {
     let mut builder = WalkBuilder::new(root);
     builder
         .standard_filters(standard_filters)
         .hidden(false)
         .follow_links(false)
         .sort_by_file_path(|left, right| left.cmp(right));
+    let filter_repository_root = repository_root.to_owned();
+    builder.filter_entry(move |entry| {
+        if entry.depth() == 0 || !entry.file_type().is_some_and(|file_type| file_type.is_dir()) {
+            return true;
+        }
+        !pruned_directory(entry.path(), &filter_repository_root)
+    });
     let mut files = BTreeMap::new();
     let mut errors = Vec::new();
     let mut native_paths = BTreeMap::<String, PathBuf>::new();
     for item in builder.build() {
+        if files.len() >= max_entries {
+            errors.push(WalkIssue::Traversal(format!(
+                "file inventory reached the {}-path limit; deeper paths were not visited",
+                max_entries
+            )));
+            break;
+        }
         let entry = match item {
             Ok(entry) => entry,
             Err(error) => {
@@ -1653,6 +2044,20 @@ fn walk_files(root: &Path, repository_root: &Path, standard_filters: bool) -> (B
     (files, errors)
 }
 
+fn pruned_directory(path: &Path, repository_root: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    if matches!(
+        name,
+        ".git" | "target" | "node_modules" | "vendor" | "dist" | "build" | "out" | "coverage"
+    ) {
+        return true;
+    }
+    path != repository_root
+        && fs::symlink_metadata(path.join(".git")).is_ok_and(|metadata| metadata.is_dir() || metadata.is_file())
+}
+
 fn in_scope(path: &str, scope: &str) -> bool {
     scope == "." || path == scope || path.starts_with(&format!("{scope}/"))
 }
@@ -1677,7 +2082,12 @@ fn inventory(candidates: &BTreeMap<String, Candidate>) -> (usize, usize, usize) 
     (tracked, modified, untracked)
 }
 
+#[cfg(test)]
 fn parse_source(source: &[u8], support: &LanguageSupport) -> ParsedSource {
+    parse_source_limited(source, support, &ReportLimits::for_profile(AnalysisProfile::Evidence))
+}
+
+fn parse_source_limited(source: &[u8], support: &LanguageSupport, limits: &ReportLimits) -> ParsedSource {
     let language = (support.grammar)();
     let mut parser = Parser::new();
     let mut findings = Vec::new();
@@ -1726,11 +2136,16 @@ fn parse_source(source: &[u8], support: &LanguageSupport) -> ParsedSource {
     let mut definition_nodes = BTreeSet::new();
     let mut cursor = QueryCursor::new();
     let mut query_failed = false;
+    let mut symbols_truncated = false;
     if let Some(definition_query) = compile_query(&language, support.definitions, support, "definition", &mut findings)
     {
         let mut matches = cursor.matches(&definition_query, tree.root_node(), source);
-        while let Some(query_match) = matches.next() {
+        'definitions: while let Some(query_match) = matches.next() {
             for capture in query_match.captures {
+                if symbols.len() >= limits.max_symbols_per_file {
+                    symbols_truncated = true;
+                    break 'definitions;
+                }
                 let node = capture.node;
                 definition_nodes.insert(node.id());
                 symbols.push(symbol_from_capture(
@@ -1747,8 +2162,12 @@ fn parse_source(source: &[u8], support: &LanguageSupport) -> ParsedSource {
     }
     if let Some(reference_query) = compile_query(&language, support.references, support, "reference", &mut findings) {
         let mut matches = cursor.matches(&reference_query, tree.root_node(), source);
-        while let Some(query_match) = matches.next() {
+        'references: while let Some(query_match) = matches.next() {
             for capture in query_match.captures {
+                if symbols.len() >= limits.max_symbols_per_file {
+                    symbols_truncated = true;
+                    break 'references;
+                }
                 let node = capture.node;
                 if definition_nodes.contains(&node.id()) {
                     continue;
@@ -1776,8 +2195,14 @@ fn parse_source(source: &[u8], support: &LanguageSupport) -> ParsedSource {
         right.name == left.name && right.kind == left.kind && right.role == left.role && right.location == left.location
     });
 
-    collect_parse_findings(tree.root_node(), source, &mut findings);
-    let status = if tree.root_node().has_error() || query_failed {
+    let syntax_truncated = collect_parse_findings(
+        tree.root_node(),
+        source,
+        &mut findings,
+        limits.max_syntax_depth,
+        limits.max_findings,
+    );
+    let status = if tree.root_node().has_error() || query_failed || symbols_truncated || syntax_truncated {
         FileAnalysisStatus::Partial
     } else {
         FileAnalysisStatus::Complete
@@ -1794,6 +2219,21 @@ fn parse_source(source: &[u8], support: &LanguageSupport) -> ParsedSource {
             "One or more {} query-pack queries failed; available query findings were retained.",
             support.language.display_label()
         ));
+    }
+    if symbols_truncated {
+        limitations.push(format!(
+            "The per-file symbol limit ({}) was reached; additional syntax captures were not visited.",
+            limits.max_symbols_per_file
+        ));
+    }
+    if syntax_truncated {
+        limitations.push(format!(
+            "Syntax traversal reached the depth limit ({}); deeper nodes were omitted.",
+            limits.max_syntax_depth
+        ));
+    }
+    if findings.len() > limits.max_findings {
+        findings.truncate(limits.max_findings);
     }
     ParsedSource { symbols, findings, status, limitations }
 }
@@ -1922,17 +2362,22 @@ fn context_snippet(node: Node<'_>, source: &[u8], declaration_kinds: &[&str]) ->
 }
 
 fn compact_text(bytes: &[u8]) -> String {
-    let normalized = String::from_utf8_lossy(bytes)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
     let mut output = String::new();
-    for (index, character) in normalized.chars().enumerate() {
-        if index >= MAX_CONTEXT_CHARS {
+    for word in String::from_utf8_lossy(bytes).split_whitespace() {
+        let separator = usize::from(!output.is_empty());
+        if output.chars().count().saturating_add(separator) >= MAX_CONTEXT_CHARS {
             output.push('…');
             break;
         }
-        output.push(character);
+        if separator == 1 {
+            output.push(' ');
+        }
+        let remaining = MAX_CONTEXT_CHARS.saturating_sub(output.chars().count());
+        output.extend(word.chars().take(remaining));
+        if output.chars().count() < MAX_CONTEXT_CHARS && word.chars().count() > remaining {
+            output.push('…');
+            break;
+        }
     }
     output
 }
@@ -1940,30 +2385,52 @@ fn compact_text(bytes: &[u8]) -> String {
 fn text_for_node(node: Node<'_>, source: &[u8]) -> String {
     source
         .get(node.start_byte().min(source.len())..node.end_byte().min(source.len()))
-        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .map(|bytes| String::from_utf8_lossy(bytes).chars().take(256).collect())
         .unwrap_or_default()
 }
 
-fn collect_parse_findings(node: Node<'_>, source: &[u8], findings: &mut Vec<MapFinding>) {
-    if node.is_error() || node.is_missing() {
-        findings.push(MapFinding {
-            kind: MapFindingKind::ParseError,
-            path: String::new(),
-            location: Some(SourceLocation::from(node)),
-            detail: format!(
-                "Tree-sitter recovered from a {} node near `{}`.",
-                node.kind(),
-                context_snippet(node, source, &[])
-            ),
-        });
+fn collect_parse_findings(
+    node: Node<'_>, source: &[u8], findings: &mut Vec<MapFinding>, max_depth: usize, max_findings: usize,
+) -> bool {
+    let mut stack = vec![(node, 0usize)];
+    let mut truncated = false;
+    while let Some((node, depth)) = stack.pop() {
+        if depth > max_depth {
+            truncated = true;
+            if findings.len() < max_findings {
+                findings.push(MapFinding {
+                    kind: MapFindingKind::ParseError,
+                    path: String::new(),
+                    location: Some(SourceLocation::from(node)),
+                    detail: format!(
+                        "Syntax traversal exceeded the depth limit of {max_depth}; deeper nodes were omitted."
+                    ),
+                });
+            }
+            continue;
+        }
+        if (node.is_error() || node.is_missing()) && findings.len() < max_findings {
+            findings.push(MapFinding {
+                kind: MapFindingKind::ParseError,
+                path: String::new(),
+                location: Some(SourceLocation::from(node)),
+                detail: format!(
+                    "Tree-sitter recovered from a {} node near `{}`.",
+                    node.kind(),
+                    context_snippet(node, source, &[])
+                ),
+            });
+        }
+        let mut cursor = node.walk();
+        let children = node.children(&mut cursor).collect::<Vec<_>>();
+        for child in children.into_iter().rev() {
+            stack.push((child, depth.saturating_add(1)));
+        }
     }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_parse_findings(child, source, findings);
-    }
+    truncated
 }
 
-fn add_ambiguity_findings(files: &[SourceFile], findings: &mut Vec<MapFinding>) {
+fn add_ambiguity_findings(files: &[SourceFile], findings: &mut Vec<MapFinding>, max_findings: usize) {
     let mut definitions = BTreeMap::<String, Vec<String>>::new();
     for file in files {
         for symbol in &file.symbols {
@@ -1983,7 +2450,7 @@ fn add_ambiguity_findings(files: &[SourceFile], findings: &mut Vec<MapFinding>) 
             let Some(candidates) = definitions.get(&symbol.name) else {
                 continue;
             };
-            if candidates.len() > 1 {
+            if candidates.len() > 1 && findings.len() < max_findings {
                 findings.push(MapFinding {
                     kind: MapFindingKind::AmbiguousReference,
                     path: file.path.clone(),
@@ -2485,5 +2952,32 @@ namespace Example.App {
                 .iter()
                 .any(|limitation| limitation.contains("query-pack queries failed"))
         );
+    }
+
+    #[test]
+    fn snippet_selection_respects_every_tiny_token_budget() {
+        let source = b"pub fn a_very_long_name(value: usize) { let _ = value; }";
+        let ParsedSource { symbols, .. } = parse_source(source, &RUST_SUPPORT);
+        let file = SourceFile {
+            path: "src/lib.rs".to_owned(),
+            language: SourceLanguage::Rust,
+            extension: "rs".to_owned(),
+            worktree_state: WorktreeState::Tracked,
+            status: FileAnalysisStatus::Complete,
+            symbols,
+            limitations: Vec::new(),
+        };
+        let ranking = vec![FileRank { path: file.path.clone(), score: 1_000_000, focus_matches: 0 }];
+        let settings = MapSettings::default();
+        for budget in 1..=64 {
+            let selection = select_snippets(std::slice::from_ref(&file), &[], &ranking, budget, &settings);
+            assert!(selection.estimated_tokens <= budget, "budget {budget}: {selection:?}");
+            assert!(
+                selection
+                    .snippets
+                    .iter()
+                    .all(|snippet| snippet.estimated_tokens <= budget)
+            );
+        }
     }
 }

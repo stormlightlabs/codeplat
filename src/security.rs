@@ -322,6 +322,7 @@ pub fn cache_path_is_safe(root: &Path, path: &Path) -> Result<(), PathSafetyErro
 }
 
 pub fn read_cache_file(root: &Path, path: &Path) -> Result<Vec<u8>, ReadError> {
+    const MAX_CACHE_RECORD_BYTES: usize = 32 * 1024 * 1024;
     cache_path_is_safe(root, path).map_err(ReadError::Safety)?;
     #[cfg(unix)]
     {
@@ -329,16 +330,28 @@ pub fn read_cache_file(root: &Path, path: &Path) -> Result<Vec<u8>, ReadError> {
             .strip_prefix(root)
             .expect("cache path was checked to be beneath the cache root");
         let relative = validate_os_relative_path(relative)?;
-        read_beneath(root, &relative)
+        read_beneath_limited(root, &relative, MAX_CACHE_RECORD_BYTES)
     }
     #[cfg(not(unix))]
     {
-        Ok(fs::read(path)?)
+        let mut file = File::open(path)?;
+        let mut bytes = Vec::new();
+        file.take(MAX_CACHE_RECORD_BYTES.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_CACHE_RECORD_BYTES {
+            return Err(ReadError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cache record exceeds the 32 MiB read limit",
+            )));
+        }
+        Ok(bytes)
     }
 }
 
-pub fn read_worktree_file(
-    repository_root: &Path, scope_root: &Path, relative_path: &str,
+/// Read a worktree file without following path components and without
+/// allocating more than `max_bytes` plus one byte to detect oversize input.
+pub fn read_worktree_file_limited(
+    repository_root: &Path, scope_root: &Path, relative_path: &str, max_bytes: usize,
 ) -> Result<Vec<u8>, ReadError> {
     let validated = validate_repository_path(relative_path.as_bytes())?;
     let candidate = repository_root.join(&validated);
@@ -349,11 +362,20 @@ pub fn read_worktree_file(
 
     #[cfg(unix)]
     {
-        read_beneath(repository_root, &validated)
+        read_beneath_limited(repository_root, &validated, max_bytes)
     }
     #[cfg(not(unix))]
     {
-        Ok(fs::read(candidate)?)
+        let mut file = File::open(candidate)?;
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1) as u64).read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            return Err(ReadError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("file exceeds the {max_bytes}-byte analysis limit"),
+            )));
+        }
+        Ok(bytes)
     }
 }
 
@@ -437,7 +459,7 @@ fn preflight_no_follow(root: &Path, relative: &str) -> Result<(), ReadError> {
 }
 
 #[cfg(unix)]
-fn read_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, ReadError> {
+fn read_beneath_limited(root: &Path, relative: &str, max_bytes: usize) -> Result<Vec<u8>, ReadError> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -463,9 +485,15 @@ fn read_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, ReadError> {
             return Err(ReadError::Io(error));
         }
         if index + 1 == components.len() {
-            let mut file = unsafe { File::from_raw_fd(fd) };
+            let file = unsafe { File::from_raw_fd(fd) };
             let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
+            file.take(max_bytes.saturating_add(1) as u64).read_to_end(&mut bytes)?;
+            if bytes.len() > max_bytes {
+                return Err(ReadError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("file exceeds the {max_bytes}-byte analysis limit"),
+                )));
+            }
             return Ok(bytes);
         }
         directory = unsafe { File::from_raw_fd(fd) };
