@@ -187,35 +187,8 @@ execution of the full fixture matrix remains a release verification task.
 
 ## 10. Make cache modes correct, private, and maintainable
 
-**Priority:** P0 release blocker
-
-**What to build:** Replace the current fallback lookup with an explicit cache-mode state machine and
+Replace the current fallback lookup with an explicit cache-mode state machine and
 give users safe control over retained source-derived metadata.
-
-**Blocked by:** Ticket 7
-
-**Acceptance criteria:**
-
-- [x] In `auto`, a changed content fingerprint reparses current bytes and reports `refreshed`; it never
-      returns stale tags. In `manual`, only the newest available record may be reused and is visibly stale.
-- [x] In `files`, only exactly normalized caller-named paths refresh. Matched, unmatched, unavailable,
-      hit, miss, stale, and refreshed counts are distinct; cache-unavailable files are not counted as analyzed.
-- [x] Records are keyed by collision-resistant content identity plus exact grammar/query-pack content,
-      are independent of report scope, and are written with user-private permissions using atomic replace.
-- [x] Concurrent readers/writers cannot observe truncated JSON or lose the newest record. Per-repository
-      count/age/size retention is bounded and deterministic.
-- [x] `codeplat cache path|status|prune|clear` reports and controls retention without touching the target
-      repository; `--no-cache` still performs no cache I/O.
-- [x] Regression tests prime a cache, edit source, exercise every mode, use duplicate basenames, pass an
-      unmatched `--cache-file`, corrupt an entry, and run concurrent processes.
-
-**Verification:**
-
-- [x] Run the cache fixture matrix under a temporary XDG directory and assert current symbols plus exact state counts.
-- [x] Inspect created directories/files for expected permissions and prove pruning never crosses the Codeplat cache root.
-- [x] `cargo fmt --check`
-- [x] `cargo test --all-features`
-- [x] `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 11. Bound analysis work and the complete emitted report
 
@@ -268,35 +241,8 @@ The explicit evidence profile remains capped by the same work and output ceiling
 
 **Priority:** P0 release blocker
 
-**What to build:** Give agents enough typed provenance to decide whether a report is comparable and usable,
+Give agents enough typed provenance to decide whether a report is comparable and usable,
 and turn schema version 1 into a real compatibility contract.
-
-**Blocked by:** Tickets 1, 2, and 3
-
-**Acceptance criteria:**
-
-- [x] Reports include tool version, effective command/options and limits, repository identity, resolved HEAD
-      ref/OID, capture/reference time, worktree snapshot state, grammar/query-pack versions, and cache state.
-- [x] History reports include observed date range, author-versus-committer time basis, current-HEAD semantics,
-      and shallow/partial/missing-object completeness. Incomplete history is typed, not authoritative-looking.
-- [x] Byte-native Git paths remain distinct internally and have one reversible JSON representation plus a
-      readable escaped Markdown representation; invalid UTF-8 and case-collision fixtures do not merge paths.
-- [x] A committed JSON Schema and golden v1 corpus validate every report variant. CI rejects incompatible
-      removal, retyping, or semantic reuse without a schema-version change.
-- [x] A documented strict policy lets callers fail on stale, truncated, incomplete, unsupported, or partial
-      results without parsing prose; default mode still returns useful typed partial evidence.
-- [x] `codeplat capabilities --json` reports schema/query-pack/language support and active limit defaults without
-      running repository analysis.
-- [x] `codeplat doctor [PATH]` checks discovery, path-safety support, cache location/permissions, schema/query
-      availability, and effective limits without emitting source-derived evidence or changing repository state.
-
-**Verification:**
-
-- [x] Validate all JSON fixtures against the schema and deserialize historical v1 golden documents.
-- [x] Run the CLI against shallow, missing-object, dirty-worktree, non-UTF-8, and strict-policy fixtures.
-- [x] `cargo fmt --check`
-- [x] `cargo test --all-features`
-- [x] `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 13. Correct and strengthen Git-history evidence
 
@@ -307,19 +253,24 @@ signals without hiding their original evidence or caveats.
 
 **Blocked by:** Tickets 2 and 12
 
+**Implementation status (2026-07-16):** Scoped commit envelopes and activity, committed-HEAD `.mailmap`
+canonicalization, email-redacted compact contributor output, word-aware/substring keyword policies,
+matched-term evidence, current-HEAD size-normalized churn, and bounded focused scans are implemented.
+Rename continuity is explicitly reported as unavailable rather than silently implied.
+
 **Acceptance criteria:**
 
-- [ ] `history activity PATH` and `commits_seen` count only commits affecting the selected scope. Any
+- [x] `history activity PATH` and `commits_seen` count only commits affecting the selected scope. Any
       intentionally repository-wide section carries a separate explicit scope instead of inheriting `PATH`.
-- [ ] Contributor concentration applies `.mailmap` by default, records raw-to-canonical provenance, handles
+- [x] Contributor concentration applies `.mailmap` by default, records raw-to-canonical provenance, handles
       missing/case-varied identity, and omits email from compact output unless explicitly requested.
-- [ ] Bug/firefighting evidence records the matched term and uses word-aware matching by default, with an
+- [x] Bug/firefighting evidence records the matched term and uses word-aware matching by default, with an
       explicit substring mode for compatibility; `fixture`, `prefix`, and `debug` are negative tests.
-- [ ] Size-normalized churn is reported beside—not instead of—absolute churn, with the size basis and zero/
+- [x] Size-normalized churn is reported beside—not instead of—absolute churn, with the size basis and zero/
       generated/binary-file behavior explicit.
-- [ ] Rename-aware continuity is either implemented with evidence and limits or reported as unavailable;
+- [x] Rename-aware continuity is either implemented with evidence and limits or reported as unavailable;
       a renamed hotspot never silently appears to have no earlier history.
-- [ ] Focused operations decode and diff only required data, preserve deterministic ties, and expose bounded
+- [x] Focused operations decode and diff only required data, preserve deterministic ties, and expose bounded
       totals/evidence according to Ticket 11.
 
 **Verification:**

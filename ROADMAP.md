@@ -69,6 +69,9 @@ larger report.
   iterative bounded traversal, collection totals/returned/truncation metadata, and
   operation-aware focused history scans. The compact self-map is approximately 13 KB
   in JSON; scale benchmarks remain a release-verification task.
+- Ticket 13 now makes history envelopes scope-correct, applies committed `.mailmap` aliases while redacting
+  email by default, records exact word-aware keyword matches, reports current-HEAD size-normalized churn,
+  and labels rename continuity unavailable until bounded rename detection is implemented.
 - [Research notes](notes/README.md) capture the source material, Rust library boundaries, and
   the limits of Git-history and Tree-sitter-derived evidence.
 

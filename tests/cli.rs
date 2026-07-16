@@ -108,10 +108,10 @@ impl HistoryFixtureRepository {
             &repository,
             second_tree,
             &[first],
-            "Bob",
-            "bob@example.com",
+            "Robert Alias",
+            "ALIAS@example.com",
             now - 200 * day,
-            "Implement parser",
+            "Implement fixture prefix debug parser",
         );
 
         let third_tree = write_tree(
@@ -158,7 +158,11 @@ impl HistoryFixtureRepository {
         let final_tree = write_tree(
             &repository,
             &[
+                (".mailmap", "Bob <bob@example.com> Robert Alias <alias@example.com>\n"),
                 ("legacy.txt", "legacy"),
+                ("src/binary.rs", "\0binary"),
+                ("src/empty.rs", ""),
+                ("src/generated.rs", "// generated file\npub fn generated() {}"),
                 ("src/lib.rs", "pub fn parse() { 1 }"),
                 ("src/main.rs", "fn main() { 1 }"),
             ],
@@ -889,7 +893,7 @@ fn history_completeness_marks_shallow_and_missing_objects_and_strict_rejects_the
 #[test]
 fn selected_paths_and_history_operations_are_preserved_in_the_typed_report() {
     let fixture = HistoryFixtureRepository::new();
-    let output = fixture.run(&["history", "contributors", "src", "--json"]);
+    let output = fixture.run(&["history", "contributors", "src", "--include-emails", "--json"]);
     let json = stdout(&output);
 
     assert!(output.status.success());
@@ -955,7 +959,7 @@ fn history_json_contains_all_signals_evidence_and_required_caveats() {
             .as_array()
             .expect("bug evidence")
             .len(),
-        2
+        1
     );
     assert_eq!(
         value["history"]["firefighting"]["commits"]
@@ -1070,6 +1074,95 @@ fn scoped_history_activity_and_envelope_counts_only_include_affected_commits() {
             .sum::<u64>(),
         4
     );
+}
+
+#[test]
+fn contributors_apply_committed_mailmap_and_hide_emails_by_default() {
+    let fixture = HistoryFixtureRepository::new();
+    let compact = fixture.run(&["history", "contributors", "--json"]);
+    let compact: Value = serde_json::from_str(&stdout(&compact)).expect("valid compact contributor JSON");
+    let contributors = &compact["history"]["contributors"];
+
+    assert_eq!(contributors["mailmap_applied"], true);
+    let bob = contributors["overall"]
+        .as_array()
+        .expect("overall contributors")
+        .iter()
+        .find(|contributor| contributor["name"] == "Bob")
+        .expect("mailmap canonicalized Bob");
+    assert_eq!(bob["commits"], 2);
+    assert!(bob.get("email").is_none());
+    let mapping = &contributors["identity_mappings"][0];
+    assert_eq!(mapping["raw_name"], "Robert Alias");
+    assert_eq!(mapping["canonical_name"], "Bob");
+    assert!(mapping.get("raw_email").is_none());
+
+    let disclosed = fixture.run(&["history", "contributors", "--include-emails", "--json"]);
+    let disclosed: Value = serde_json::from_str(&stdout(&disclosed)).expect("valid disclosed contributor JSON");
+    let mapping = &disclosed["history"]["contributors"]["identity_mappings"][0];
+    assert_eq!(mapping["raw_email"], "ALIAS@example.com");
+    assert_eq!(mapping["canonical_email"], "bob@example.com");
+}
+
+#[test]
+fn history_keywords_are_word_aware_and_record_matches_with_substring_compatibility() {
+    let fixture = HistoryFixtureRepository::new();
+    let word = fixture.run(&["history", "bugs", "--json"]);
+    let word: Value = serde_json::from_str(&stdout(&word)).expect("valid word-aware bug JSON");
+    let commits = word["history"]["bugs"]["commits"]
+        .as_array()
+        .expect("word-aware commits");
+    assert_eq!(word["history"]["bugs"]["keyword_match"], "word");
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["matched_terms"], serde_json::json!(["bug", "fix"]));
+    assert!(
+        commits
+            .iter()
+            .all(|commit| commit["subject"] != "Implement fixture prefix debug parser")
+    );
+    assert!(
+        commits
+            .iter()
+            .all(|commit| commit["subject"] != "Emergency hotfix side work")
+    );
+
+    let substring = fixture.run(&["history", "bugs", "--keyword-match", "substring", "--json"]);
+    let substring: Value = serde_json::from_str(&stdout(&substring)).expect("valid substring bug JSON");
+    let commits = substring["history"]["bugs"]["commits"]
+        .as_array()
+        .expect("substring commits");
+    assert_eq!(commits.len(), 3);
+    assert!(commits.iter().any(|commit| {
+        commit["subject"] == "Implement fixture prefix debug parser"
+            && commit["matched_terms"] == serde_json::json!(["bug", "fix"])
+    }));
+}
+
+#[test]
+fn churn_reports_normalization_edge_cases_and_rename_unavailability() {
+    let fixture = HistoryFixtureRepository::new();
+    let output = fixture.run(&["history", "churn", "--json"]);
+    let value: Value = serde_json::from_str(&stdout(&output)).expect("valid churn JSON");
+    let churn = &value["history"]["churn"];
+    assert_eq!(churn["size_basis"], "current_head_blob_bytes");
+    assert_eq!(churn["rename_continuity"]["status"], "unavailable");
+
+    let paths = churn["paths"].as_array().expect("churn paths");
+    let path = |name: &str| {
+        paths
+            .iter()
+            .find(|path| path["path"] == name)
+            .unwrap_or_else(|| panic!("missing churn path {name}"))
+    };
+    assert_eq!(path("src/lib.rs")["size_status"], "text");
+    assert!(path("src/lib.rs")["commits_per_kib_milli"].is_number());
+    assert_eq!(path("src/generated.rs")["size_status"], "generated");
+    assert!(path("src/generated.rs")["commits_per_kib_milli"].is_number());
+    assert_eq!(path("src/empty.rs")["size_status"], "empty");
+    assert!(path("src/empty.rs").get("commits_per_kib_milli").is_none());
+    assert_eq!(path("src/binary.rs")["size_status"], "binary");
+    assert!(path("src/binary.rs").get("commits_per_kib_milli").is_none());
+    assert_eq!(path("src/side.rs")["size_status"], "missing_at_head");
 }
 
 #[test]

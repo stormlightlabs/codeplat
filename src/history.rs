@@ -19,8 +19,10 @@ const CONTRIBUTOR_CAVEAT: &str =
 
 const BUG_CAVEAT: &str = "Bug clusters depend on commit-message discipline and do not prove a defect rate.";
 const ACTIVITY_CAVEAT: &str = "Cadence reflects team and release habits.";
+
 const FIREFIGHTING_CAVEAT: &str =
     "Firefighting matches are keyword evidence and not a complete measure of release health.";
+
 const MAX_CHANGED_PATHS_PER_COMMIT: usize = 10_000;
 const MAX_TREE_NODES_PER_COMMIT: usize = 100_000;
 const MAX_TREE_ENTRIES_PER_DIRECTORY: usize = 4_096;
@@ -83,6 +85,8 @@ struct CommitRecord {
     message: String,
     author_name: String,
     author_email: String,
+    raw_author_name: String,
+    raw_author_email: String,
     author_seconds: i64,
     committer_seconds: i64,
     is_merge: bool,
@@ -104,8 +108,8 @@ struct ChangedPaths {
 }
 
 impl CommitRecord {
-    fn evidence(&self, paths: Vec<String>) -> CommitEvidence {
-        CommitEvidence { id: self.id.clone(), subject: self.subject.clone(), paths }
+    fn evidence(&self, paths: Vec<String>, matched_terms: Vec<String>) -> CommitEvidence {
+        CommitEvidence { id: self.id.clone(), subject: self.subject.clone(), paths, matched_terms }
     }
 
     fn affects_scope(&self, scope: &str) -> bool {
@@ -143,14 +147,21 @@ pub fn analyze(
         .as_secs() as i64;
     let limits = ReportLimits::for_profile(profile);
     let mut scan = collect_commits(&repository, head, &scope.relative_path, operation, &limits)?;
+    let needs_contributors = operation.is_none_or(|selected| selected == HistoryOperation::Contributors);
+    let mailmap = if needs_contributors { committed_mailmap(&repository, head)? } else { None };
+    apply_mailmap(&mut scan.records, mailmap.as_ref());
     let records = std::mem::take(&mut scan.records);
     let now = reference_seconds;
 
     let include = |candidate| operation.is_none_or(|selected| selected == candidate);
-    let churn_analysis = analyze_churn(&records, &scope.relative_path, &settings, now);
-    let churn = include(HistoryOperation::Churn).then_some(churn_analysis.clone());
+    let include_churn = include(HistoryOperation::Churn);
+    let mut churn_analysis = analyze_churn(&records, &scope.relative_path, &settings, now);
+    if include_churn {
+        add_head_sizes(&repository, head, &mut churn_analysis.paths, &limits)?;
+    }
+    let churn = include_churn.then_some(churn_analysis.clone());
     let contributors = include(HistoryOperation::Contributors)
-        .then(|| analyze_contributors(&records, &scope.relative_path, &settings, now));
+        .then(|| analyze_contributors(&records, &scope.relative_path, &settings, now, mailmap.is_some()));
     let bugs = include(HistoryOperation::Bugs)
         .then(|| analyze_bugs(&records, &scope.relative_path, &settings, now, &churn_analysis.paths));
 
@@ -195,6 +206,7 @@ pub fn analyze(
                 CollectionSummary::complete(commits_seen)
             },
             churn_paths: CollectionSummary::complete(0),
+            contributor_identity_mappings: CollectionSummary::complete(0),
             contributors_overall: CollectionSummary::complete(0),
             contributors_recent: CollectionSummary::complete(0),
             bug_paths: CollectionSummary::complete(0),
@@ -221,10 +233,13 @@ fn bound_history(report: &mut HistoryReport, limits: ReportLimits) {
         truncated |= report.collections.churn_paths.truncated;
     }
     if let Some(contributors) = &mut report.contributors {
+        report.collections.contributor_identity_mappings =
+            truncate(&mut contributors.identity_mappings, limits.max_history_evidence);
         report.collections.contributors_overall = truncate(&mut contributors.overall, limits.max_history_evidence);
         report.collections.contributors_recent = truncate(&mut contributors.recent, limits.max_history_evidence);
-        truncated |=
-            report.collections.contributors_overall.truncated || report.collections.contributors_recent.truncated;
+        truncated |= report.collections.contributor_identity_mappings.truncated
+            || report.collections.contributors_overall.truncated
+            || report.collections.contributors_recent.truncated;
     }
     if let Some(bugs) = &mut report.bugs {
         report.collections.bug_paths = truncate(&mut bugs.paths, limits.max_history_evidence);
@@ -332,13 +347,21 @@ fn analyze_churn(records: &[CommitRecord], scope: &str, settings: &HistorySettin
     }
     ChurnReport {
         window_days: settings.window_days,
+        size_basis: "current_head_blob_bytes".to_owned(),
+        rename_continuity: RenameContinuity {
+            status: "unavailable".to_owned(),
+            detail: "Rename detection is not implemented; counts follow exact paths, and a renamed or deleted path may have earlier history under another name.".to_owned(),
+        },
         paths: path_counts(counts),
-        caveats: vec![CHURN_CAVEAT.to_owned()],
+        caveats: vec![
+            CHURN_CAVEAT.to_owned(),
+            "Normalized churn uses the current HEAD blob size. Empty, binary, deleted, oversized, and resource-limited paths have no normalized rate; generated files are retained and labelled.".to_owned(),
+        ],
     }
 }
 
 fn analyze_contributors(
-    records: &[CommitRecord], scope: &str, settings: &HistorySettings, now: i64,
+    records: &[CommitRecord], scope: &str, settings: &HistorySettings, now: i64, mailmap_applied: bool,
 ) -> ContributorReport {
     let non_merge: Vec<_> = records
         .iter()
@@ -351,8 +374,10 @@ fn analyze_contributors(
         .collect();
     ContributorReport {
         recent_window_days: settings.recent_window_days,
-        overall: contributor_counts(non_merge),
-        recent: contributor_counts(recent),
+        mailmap_applied,
+        identity_mappings: identity_mappings(&non_merge, settings.include_emails),
+        overall: contributor_counts(non_merge, settings.include_emails),
+        recent: contributor_counts(recent, settings.include_emails),
         caveats: vec![CONTRIBUTOR_CAVEAT.to_owned()],
     }
 }
@@ -362,11 +387,18 @@ fn analyze_bugs(
 ) -> BugReport {
     let mut counts = BTreeMap::new();
     let mut commits = Vec::new();
-    for record in records.iter().filter(|record| {
-        !record.is_merge
-            && utils::in_window(record.committer_seconds, now, settings.window_days)
-            && utils::contains_keyword(&record.message, &settings.bug_keywords)
-    }) {
+    for record in records
+        .iter()
+        .filter(|record| !record.is_merge && utils::in_window(record.committer_seconds, now, settings.window_days))
+    {
+        let matched_terms = utils::matched_keywords(
+            &record.message,
+            &settings.bug_keywords,
+            settings.keyword_match == KeywordMatchMode::Substring,
+        );
+        if matched_terms.is_empty() {
+            continue;
+        }
         let paths = scoped_paths(&record.paths, scope);
         if paths.is_empty() {
             continue;
@@ -374,7 +406,7 @@ fn analyze_bugs(
         for path in &paths {
             *counts.entry(path.clone()).or_insert(0) += 1;
         }
-        commits.push(record.evidence(paths));
+        commits.push(record.evidence(paths, matched_terms));
     }
     let paths = path_counts(counts);
     let churn_paths: BTreeSet<_> = churn_paths.iter().map(|path| path.path.as_str()).collect();
@@ -393,6 +425,7 @@ fn analyze_bugs(
     BugReport {
         window_days: settings.window_days,
         keywords: settings.bug_keywords.clone(),
+        keyword_match: settings.keyword_match,
         paths,
         overlap_paths,
         commits,
@@ -421,14 +454,18 @@ fn analyze_firefighting(
 ) -> FirefightingReport {
     let commits = records
         .iter()
-        .filter(|record| {
-            !record.is_merge
-                && utils::in_window(record.committer_seconds, now, settings.window_days)
-                && utils::contains_keyword(&record.message, &settings.firefighting_keywords)
-        })
+        .filter(|record| !record.is_merge && utils::in_window(record.committer_seconds, now, settings.window_days))
         .filter_map(|record| {
+            let matched_terms = utils::matched_keywords(
+                &record.message,
+                &settings.firefighting_keywords,
+                settings.keyword_match == KeywordMatchMode::Substring,
+            );
+            if matched_terms.is_empty() {
+                return None;
+            }
             let paths = scoped_paths(&record.paths, scope);
-            (!paths.is_empty()).then(|| record.evidence(paths))
+            (!paths.is_empty()).then(|| record.evidence(paths, matched_terms))
         })
         .collect::<Vec<_>>();
     let mut caveats = vec![FIREFIGHTING_CAVEAT.to_owned()];
@@ -441,6 +478,7 @@ fn analyze_firefighting(
     FirefightingReport {
         window_days: settings.window_days,
         keywords: settings.firefighting_keywords.clone(),
+        keyword_match: settings.keyword_match,
         commits,
         caveats,
     }
@@ -584,12 +622,17 @@ fn collect_commits(
             (String::new(), String::new())
         };
 
+        let author_name = author.name.to_str_lossy().trim().to_owned();
+        let raw_author_email = author.email.to_str_lossy().trim().to_owned();
+        let author_email = raw_author_email.to_lowercase();
         records.push(CommitRecord {
             id: id.to_string(),
             subject,
             message,
-            author_name: author.name.to_str_lossy().into_owned(),
-            author_email: author.email.to_str_lossy().into_owned(),
+            raw_author_name: author_name.clone(),
+            raw_author_email,
+            author_name: if author_name.is_empty() { "Unknown".to_owned() } else { author_name },
+            author_email,
             author_seconds: author_time.seconds,
             committer_seconds: committer_time.seconds,
             is_merge,
@@ -745,14 +788,147 @@ fn tree_entries(tree: &gix::Tree<'_>) -> Result<(TreeEntryMap, bool)> {
     Ok((entries, truncated))
 }
 
-fn contributor_counts(records: Vec<&CommitRecord>) -> Vec<ContributorCount> {
+fn committed_mailmap(repository: &gix::Repository, head: gix::Id<'_>) -> Result<Option<gix::mailmap::Snapshot>> {
+    let tree = repository
+        .find_commit(head)
+        .map_err(|error| HistoryError::analysis("reading HEAD for .mailmap", error))?
+        .tree()
+        .map_err(|error| HistoryError::analysis("reading the HEAD tree for .mailmap", error))?;
+    let Some(entry) = tree.find_entry(".mailmap") else {
+        return Ok(None);
+    };
+    if !entry.mode().is_blob() {
+        return Ok(None);
+    }
+    let object = entry
+        .object()
+        .map_err(|error| HistoryError::analysis("reading the committed .mailmap", error))?;
+    Ok(Some(gix::mailmap::Snapshot::from_bytes(&object.data)))
+}
+
+fn apply_mailmap(records: &mut [CommitRecord], mailmap: Option<&gix::mailmap::Snapshot>) {
+    let Some(mailmap) = mailmap else {
+        return;
+    };
+    for record in records {
+        let signature = gix::actor::SignatureRef {
+            name: record.raw_author_name.as_bytes().into(),
+            email: record.raw_author_email.as_bytes().into(),
+            time: "0 +0000",
+        };
+        let resolved = mailmap.resolve_cow(signature);
+        let name = resolved.name.to_str_lossy().trim().to_owned();
+        let email = resolved.email.to_str_lossy().trim().to_lowercase();
+        record.author_name = if name.is_empty() { "Unknown".to_owned() } else { name };
+        record.author_email = email;
+    }
+}
+
+fn identity_mappings(records: &[&CommitRecord], include_emails: bool) -> Vec<IdentityMapping> {
+    let mappings = records
+        .iter()
+        .filter(|record| {
+            record.raw_author_name != record.author_name
+                || !record.raw_author_email.eq_ignore_ascii_case(&record.author_email)
+        })
+        .map(|record| IdentityMapping {
+            raw_name: if record.raw_author_name.is_empty() {
+                "Unknown".to_owned()
+            } else {
+                record.raw_author_name.clone()
+            },
+            raw_email: include_emails
+                .then(|| record.raw_author_email.clone())
+                .filter(|email| !email.is_empty()),
+            canonical_name: record.author_name.clone(),
+            canonical_email: include_emails
+                .then(|| record.author_email.clone())
+                .filter(|email| !email.is_empty()),
+        })
+        .collect::<BTreeSet<_>>();
+    mappings.into_iter().collect()
+}
+
+fn add_head_sizes(
+    repository: &gix::Repository, head: gix::Id<'_>, paths: &mut [PathCount], limits: &ReportLimits,
+) -> Result<()> {
+    let tree = repository
+        .find_commit(head)
+        .map_err(|error| HistoryError::analysis("reading HEAD for normalized churn", error))?
+        .tree()
+        .map_err(|error| HistoryError::analysis("reading the HEAD tree for normalized churn", error))?;
+    let mut total_bytes = 0usize;
+    for path in paths.iter_mut().take(limits.max_history_evidence) {
+        let entry = tree
+            .lookup_entry(path.path.split('/'))
+            .map_err(|error| HistoryError::analysis("looking up a churn path in HEAD", error))?;
+        let Some(entry) = entry.filter(|entry| entry.mode().is_blob()) else {
+            path.size_status = Some("missing_at_head".to_owned());
+            continue;
+        };
+        let size = entry
+            .id()
+            .header()
+            .map_err(|error| HistoryError::analysis("reading a churn path blob header from HEAD", error))?
+            .size();
+        path.size_bytes = Some(size);
+        if size == 0 {
+            path.size_status = Some("empty".to_owned());
+            continue;
+        }
+        let Ok(size_usize) = usize::try_from(size) else {
+            path.size_status = Some("oversized".to_owned());
+            continue;
+        };
+        if size_usize > limits.max_file_bytes {
+            path.size_status = Some("oversized".to_owned());
+            continue;
+        }
+        if total_bytes.saturating_add(size_usize) > limits.max_total_bytes {
+            path.size_status = Some("resource_limit".to_owned());
+            continue;
+        }
+        let object = entry
+            .object()
+            .map_err(|error| HistoryError::analysis("reading a churn path blob from HEAD", error))?;
+        total_bytes = total_bytes.saturating_add(size_usize);
+        if object.data.contains(&0) {
+            path.size_status = Some("binary".to_owned());
+        } else {
+            path.size_status =
+                Some(if looks_generated(&path.path, &object.data) { "generated" } else { "text" }.to_owned());
+            path.commits_per_kib_milli = Some(
+                (path.commits as u64)
+                    .saturating_mul(1_024_000)
+                    .checked_div(size)
+                    .unwrap_or(0),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn looks_generated(path: &str, data: &[u8]) -> bool {
+    let path = path.to_ascii_lowercase();
+    path.contains("/generated/")
+        || path.contains("/gen/")
+        || path.ends_with(".min.js")
+        || path.ends_with(".min.css")
+        || data.get(..data.len().min(512)).is_some_and(|prefix| {
+            String::from_utf8_lossy(prefix)
+                .to_ascii_lowercase()
+                .contains("generated")
+        })
+}
+
+fn contributor_counts(records: Vec<&CommitRecord>, include_emails: bool) -> Vec<ContributorCount> {
     let total = records.len();
     let mut counts = BTreeMap::<String, (String, String, usize)>::new();
     for record in records {
         let key = if record.author_email.is_empty() {
-            record.author_name.clone()
+            record.author_name.to_lowercase()
         } else {
-            record.author_email.clone()
+            record.author_email.to_lowercase()
         };
         let entry = counts
             .entry(key)
@@ -763,7 +939,7 @@ fn contributor_counts(records: Vec<&CommitRecord>) -> Vec<ContributorCount> {
         .into_values()
         .map(|(name, email, commits)| ContributorCount {
             name,
-            email,
+            email: include_emails.then_some(email).filter(|email| !email.is_empty()),
             commits,
             share_percent: (commits.saturating_mul(100).checked_div(total.max(1)).unwrap_or(0)) as u8,
         })
@@ -796,7 +972,13 @@ fn scoped_paths(paths: &[String], scope: &str) -> Vec<String> {
 fn path_counts(counts: BTreeMap<String, usize>) -> Vec<PathCount> {
     let mut paths: Vec<_> = counts
         .into_iter()
-        .map(|(path, commits)| PathCount { path, commits })
+        .map(|(path, commits)| PathCount {
+            path,
+            commits,
+            size_bytes: None,
+            commits_per_kib_milli: None,
+            size_status: None,
+        })
         .collect();
     paths.sort_by(|left, right| {
         right

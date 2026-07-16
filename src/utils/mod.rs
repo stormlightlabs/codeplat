@@ -22,12 +22,38 @@ pub fn sanitize_text(input: &str) -> String {
         .collect()
 }
 
-pub fn contains_keyword(subject: &str, keywords: &[String]) -> bool {
+pub fn matched_keywords(subject: &str, keywords: &[String], substring: bool) -> Vec<String> {
     let subject = subject.to_lowercase();
-    keywords.iter().any(|keyword| {
-        let keyword = keyword.trim().to_lowercase();
-        !keyword.is_empty() && subject.contains(&keyword)
-    })
+    let mut matched = keywords
+        .iter()
+        .filter_map(|keyword| {
+            let keyword = keyword.trim().to_lowercase();
+            if keyword.is_empty() {
+                return None;
+            }
+            let matches = if substring {
+                subject.contains(&keyword)
+            } else {
+                subject
+                    .match_indices(&keyword)
+                    .any(|(start, _)| is_word_match(&subject, start, keyword.len()))
+            };
+            matches.then_some(keyword)
+        })
+        .collect::<Vec<_>>();
+    matched.sort();
+    matched.dedup();
+    matched
+}
+
+fn is_word_match(subject: &str, start: usize, length: usize) -> bool {
+    let before = subject[..start].chars().next_back();
+    let after = subject[start + length..].chars().next();
+    !before.is_some_and(is_word_character) && !after.is_some_and(is_word_character)
+}
+
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 pub fn in_window(timestamp: i64, now: i64, days: u32) -> bool {
@@ -92,11 +118,12 @@ mod tests {
     }
 
     #[test]
-    fn keyword_matching_is_case_insensitive_and_ignores_empty_overrides() {
+    fn keyword_matching_is_case_insensitive_word_aware_and_supports_substrings() {
         let keywords = vec!["Fix".to_owned(), "bug".to_owned()];
-        assert!(contains_keyword("FIX parser", &keywords));
-        assert!(contains_keyword("a BUG report", &keywords));
-        assert!(!contains_keyword("feature", &keywords));
-        assert!(!contains_keyword("feature", &[String::new()]));
+        assert_eq!(matched_keywords("FIX parser", &keywords, false), ["fix"]);
+        assert_eq!(matched_keywords("a BUG report", &keywords, false), ["bug"]);
+        assert!(matched_keywords("fixture prefix debug", &keywords, false).is_empty());
+        assert_eq!(matched_keywords("fixture", &keywords, true), ["fix"]);
+        assert!(matched_keywords("feature", &[String::new()], false).is_empty());
     }
 }

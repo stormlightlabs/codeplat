@@ -440,6 +440,27 @@ pub struct HistorySettings {
     pub recent_window_days: u32,
     pub bug_keywords: Vec<String>,
     pub firefighting_keywords: Vec<String>,
+    #[serde(default)]
+    pub keyword_match: KeywordMatchMode,
+    #[serde(default)]
+    pub include_emails: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeywordMatchMode {
+    #[default]
+    Word,
+    Substring,
+}
+
+impl KeywordMatchMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Word => "word",
+            Self::Substring => "substring",
+        }
+    }
 }
 
 /// The complete set of inputs which can change an analysis result.
@@ -733,6 +754,8 @@ impl Default for HistorySettings {
                 .iter()
                 .map(|keyword| (*keyword).to_owned())
                 .collect(),
+            keyword_match: KeywordMatchMode::Word,
+            include_emails: false,
         }
     }
 }
@@ -1035,6 +1058,7 @@ fn report_quality(history: Option<&HistoryReport>, map: Option<&MapReport>) -> R
         [
             report.collections.commits.truncated,
             report.collections.churn_paths.truncated,
+            report.collections.contributor_identity_mappings.truncated,
             report.collections.contributors_overall.truncated,
             report.collections.contributors_recent.truncated,
             report.collections.bug_paths.truncated,
@@ -1129,6 +1153,7 @@ pub struct HistoryReport {
 pub struct HistoryCollections {
     pub commits: CollectionSummary,
     pub churn_paths: CollectionSummary,
+    pub contributor_identity_mappings: CollectionSummary,
     pub contributors_overall: CollectionSummary,
     pub contributors_recent: CollectionSummary,
     pub bug_paths: CollectionSummary,
@@ -1275,8 +1300,7 @@ pub struct MapCollections {
     pub snippets: CollectionSummary,
 }
 
-/// One file-level lexical dependency candidate. This is intentionally not a
-/// type-resolved call graph edge.
+/// One file-level lexical dependency candidate.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LexicalEdge {
     pub source: String,
@@ -1405,22 +1429,47 @@ pub struct MapFinding {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChurnReport {
     pub window_days: u32,
+    #[serde(default)]
+    pub size_basis: String,
+    #[serde(default)]
+    pub rename_continuity: RenameContinuity,
     pub paths: Vec<PathCount>,
     pub caveats: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RenameContinuity {
+    pub status: String,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ContributorReport {
     pub recent_window_days: u32,
+    #[serde(default)]
+    pub mailmap_applied: bool,
+    #[serde(default)]
+    pub identity_mappings: Vec<IdentityMapping>,
     pub overall: Vec<ContributorCount>,
     pub recent: Vec<ContributorCount>,
     pub caveats: Vec<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct IdentityMapping {
+    pub raw_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_email: Option<String>,
+    pub canonical_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_email: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ContributorCount {
     pub name: String,
-    pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     pub commits: usize,
     pub share_percent: u8,
 }
@@ -1429,6 +1478,8 @@ pub struct ContributorCount {
 pub struct BugReport {
     pub window_days: u32,
     pub keywords: Vec<String>,
+    #[serde(default)]
+    pub keyword_match: KeywordMatchMode,
     pub paths: Vec<PathCount>,
     pub overlap_paths: Vec<PathCount>,
     pub commits: Vec<CommitEvidence>,
@@ -1451,6 +1502,8 @@ pub struct MonthlyActivity {
 pub struct FirefightingReport {
     pub window_days: u32,
     pub keywords: Vec<String>,
+    #[serde(default)]
+    pub keyword_match: KeywordMatchMode,
     pub commits: Vec<CommitEvidence>,
     pub caveats: Vec<String>,
 }
@@ -1460,12 +1513,20 @@ pub struct CommitEvidence {
     pub id: String,
     pub subject: String,
     pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_terms: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PathCount {
     pub path: String,
     pub commits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits_per_kib_milli: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_status: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1823,10 +1884,18 @@ impl Render {
                     if commit.paths.is_empty() { "no in-scope paths".to_owned() } else { commit.paths.join(", ") };
                 writeln!(
                     output,
-                    "- `{}` — {} ({})",
+                    "- `{}` — {} ({}){}",
                     utils::escape_inline_code(&commit.id),
                     utils::sanitize_text(&commit.subject),
-                    utils::sanitize_text(&paths)
+                    utils::sanitize_text(&paths),
+                    if commit.matched_terms.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " — matched `{}`",
+                            utils::escape_inline_code(&commit.matched_terms.join("`, `"))
+                        )
+                    }
                 )
                 .expect("writing to a string cannot fail");
             }
@@ -1886,8 +1955,11 @@ impl Render {
             utils::escape_inline_code(&history.settings.firefighting_keywords.join("`, `"))
         )
         .expect("writing to a string cannot fail");
+        writeln!(output, "Keyword matching: {}", history.settings.keyword_match.label())
+            .expect("writing to a string cannot fail");
         if history.collections.commits.truncated
             || history.collections.churn_paths.truncated
+            || history.collections.contributor_identity_mappings.truncated
             || history.collections.contributors_overall.truncated
             || history.collections.contributors_recent.truncated
             || history.collections.bug_paths.truncated
@@ -2158,20 +2230,55 @@ impl Render {
                 .expect("writing to a string cannot fail");
         } else {
             for path in &churn.paths {
+                let normalized = path.commits_per_kib_milli.map_or_else(
+                    || {
+                        format!(
+                            "normalization unavailable ({})",
+                            path.size_status.as_deref().unwrap_or("unknown")
+                        )
+                    },
+                    |rate| {
+                        format!(
+                            "{:.3} commits/KiB ({})",
+                            rate as f64 / 1_000.0,
+                            path.size_status.as_deref().unwrap_or("text")
+                        )
+                    },
+                );
                 writeln!(
                     output,
-                    "- `{}` — {} commits",
+                    "- `{}` — {} commits; {}",
                     utils::escape_inline_code(&path.path),
-                    path.commits
+                    path.commits,
+                    normalized
                 )
                 .expect("writing to a string cannot fail");
             }
         }
+        writeln!(output, "Size basis: {}", utils::sanitize_text(&churn.size_basis))
+            .expect("writing to a string cannot fail");
+        writeln!(
+            output,
+            "Rename continuity: {} — {}",
+            utils::sanitize_text(&churn.rename_continuity.status),
+            utils::sanitize_text(&churn.rename_continuity.detail)
+        )
+        .expect("writing to a string cannot fail");
         Render::caveats(output, &churn.caveats);
     }
 
     fn contributors_markdown(output: &mut String, contributors: &ContributorReport) {
         Render::section_heading(output, "Contributor concentration");
+        writeln!(output, "Committed .mailmap applied: {}", contributors.mailmap_applied)
+            .expect("writing to a string cannot fail");
+        if !contributors.identity_mappings.is_empty() {
+            writeln!(
+                output,
+                "Canonicalized identities: {}",
+                contributors.identity_mappings.len()
+            )
+            .expect("writing to a string cannot fail");
+        }
         Render::contributors_group(output, "All non-merge commits", &contributors.overall);
         Render::contributors_group(output, "Recent non-merge commits", &contributors.recent);
         Render::caveats(output, &contributors.caveats);
@@ -2184,13 +2291,20 @@ impl Render {
             return;
         }
         for contributor in contributors {
+            let identity = contributor.email.as_ref().map_or_else(
+                || utils::sanitize_text(&contributor.name),
+                |email| {
+                    format!(
+                        "{} <{}>",
+                        utils::sanitize_text(&contributor.name),
+                        utils::sanitize_text(email)
+                    )
+                },
+            );
             writeln!(
                 output,
-                "- {} <{}> — {} commits ({}%)",
-                utils::sanitize_text(&contributor.name),
-                utils::sanitize_text(&contributor.email),
-                contributor.commits,
-                contributor.share_percent
+                "- {} — {} commits ({}%)",
+                identity, contributor.commits, contributor.share_percent
             )
             .expect("writing to a string cannot fail");
         }
@@ -2201,7 +2315,8 @@ impl Render {
         writeln!(output, "Window: {} days", bugs.window_days).expect("writing to a string cannot fail");
         writeln!(
             output,
-            "Keywords: `{}`",
+            "Keywords ({} matching): `{}`",
+            bugs.keyword_match.label(),
             utils::escape_inline_code(&bugs.keywords.join("`, `"))
         )
         .expect("writing to a string cannot fail");
@@ -2228,8 +2343,9 @@ impl Render {
         Render::section_heading(output, "Firefighting commits");
         writeln!(
             output,
-            "Window: {} days; keywords: `{}`",
+            "Window: {} days; keywords ({} matching): `{}`",
             firefighting.window_days,
+            firefighting.keyword_match.label(),
             utils::escape_inline_code(&firefighting.keywords.join("`, `"))
         )
         .expect("writing to a string cannot fail");

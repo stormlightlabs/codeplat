@@ -142,10 +142,36 @@ Override the windows or keyword sets explicitly, for example:
 
 ```sh
 codeplat history bugs --window-days 30 --bug-keyword parser --json
+codeplat history bugs --keyword-match substring --json
+codeplat history contributors --include-emails --json
 ```
 
 History output presents evidence and caveats. It does not treat churn, commit counts,
 or commit-message matches as objective quality scores.
+
+Bug and firefighting keywords use case-insensitive word-aware matching by default, and each
+evidence commit records the terms it matched.
+
+`--keyword-match substring` enables the former substring behavior explicitly.
+
+Contributor concentration applies the `.mailmap` stored at the analyzed HEAD and records
+raw-to-canonical identity mappings.
+
+Compact output omits email addresses unless `--include-emails` is supplied.
+
+Missing names are grouped as `Unknown`, and email matching is case-insensitive.
+
+Churn keeps absolute commit counts and adds a rate per KiB using each path's current HEAD blob
+size.
+
+Empty, binary, generated, deleted, oversized, and resource-limited paths are labelled
+explicitly.
+
+Generated text is retained in normalization; empty, binary, deleted, oversized, and
+resource-limited paths have no normalized rate.
+
+Rename continuity is currently reported as unavailable, so exact-path counts never imply that earlier
+history under another name was searched.
 
 ### `codeplat capabilities --json` and `codeplat doctor [PATH]`
 

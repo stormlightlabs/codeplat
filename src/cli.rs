@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::map::{CacheCommand, CacheControlReport, MapSettings};
 use crate::report::{
     AnalysisProfile, CacheMode, CapabilitiesReport, CommandDescriptor, DoctorReport, HistoryOperation, HistorySettings,
-    Report, StrictIssue,
+    KeywordMatchMode, Report, StrictIssue,
 };
 use crate::utils;
 
@@ -532,6 +532,29 @@ struct HistoryOptions {
     /// Replace the default firefighting keywords; repeat for multiple words (default: revert, hotfix, emergency, rollback).
     #[arg(long = "firefighting-keyword", value_name = "WORD", action = ArgAction::Append)]
     firefighting_keywords: Vec<String>,
+
+    /// Keyword matching policy: word (default) or substring compatibility mode.
+    #[arg(long = "keyword-match", value_name = "MODE", value_enum)]
+    keyword_match: Option<KeywordMatchModeOption>,
+
+    /// Include contributor email addresses in reports and mailmap provenance.
+    #[arg(long, action = ArgAction::SetTrue)]
+    include_emails: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum KeywordMatchModeOption {
+    Word,
+    Substring,
+}
+
+impl From<KeywordMatchModeOption> for KeywordMatchMode {
+    fn from(mode: KeywordMatchModeOption) -> Self {
+        match mode {
+            KeywordMatchModeOption::Word => Self::Word,
+            KeywordMatchModeOption::Substring => Self::Substring,
+        }
+    }
 }
 
 impl HistoryOptions {
@@ -553,6 +576,8 @@ impl HistoryOptions {
             } else {
                 self.firefighting_keywords.clone()
             },
+            keyword_match: self.keyword_match.map(Into::into).unwrap_or(fallback.keyword_match),
+            include_emails: self.include_emails || fallback.include_emails,
         }
     }
 }
