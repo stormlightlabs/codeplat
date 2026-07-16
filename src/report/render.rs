@@ -23,10 +23,7 @@ impl Render {
                     if commit.matched_terms.is_empty() {
                         String::new()
                     } else {
-                        format!(
-                            " — matched `{}`",
-                            utils::escape_inline_code(&commit.matched_terms.join("`, `"))
-                        )
+                        format!(" — matched {}", utils::inline_code_list(&commit.matched_terms))
                     }
                 )
                 .expect("writing to a string cannot fail");
@@ -77,14 +74,14 @@ impl Render {
         .expect("writing to a string cannot fail");
         writeln!(
             output,
-            "Bug keywords: `{}`",
-            utils::escape_inline_code(&history.settings.bug_keywords.join("`, `"))
+            "Bug keywords: {}",
+            utils::inline_code_list(&history.settings.bug_keywords)
         )
         .expect("writing to a string cannot fail");
         writeln!(
             output,
-            "Firefighting keywords: `{}`",
-            utils::escape_inline_code(&history.settings.firefighting_keywords.join("`, `"))
+            "Firefighting keywords: {}",
+            utils::inline_code_list(&history.settings.firefighting_keywords)
         )
         .expect("writing to a string cannot fail");
         writeln!(output, "Keyword matching: {}", history.settings.keyword_match.label())
@@ -179,12 +176,8 @@ impl Render {
             .expect("writing to a string cannot fail");
         }
         if !map.exclusions.is_empty() {
-            writeln!(
-                output,
-                "Exclusions: `{}`",
-                utils::escape_inline_code(&map.exclusions.join("`, `"))
-            )
-            .expect("writing to a string cannot fail");
+            writeln!(output, "Exclusions: {}", utils::inline_code_list(&map.exclusions))
+                .expect("writing to a string cannot fail");
         }
 
         if !map.landmarks.is_empty() || !map.project_roots.is_empty() {
@@ -210,8 +203,8 @@ impl Render {
                 if !root.recommended_paths.is_empty() {
                     writeln!(
                         output,
-                        "  - Recommended source paths: `{}`",
-                        utils::escape_inline_code(&root.recommended_paths.join("`, `"))
+                        "  - Recommended source paths: {}",
+                        utils::inline_code_list(&root.recommended_paths)
                     )
                     .expect("writing to a string cannot fail");
                 }
@@ -383,16 +376,16 @@ impl Render {
         if !explain.matched_paths.is_empty() {
             writeln!(
                 output,
-                "Matched paths: `{}`",
-                utils::escape_inline_code(&explain.matched_paths.join("`, `"))
+                "Matched paths: {}",
+                utils::inline_code_list(&explain.matched_paths)
             )
             .expect("writing to a string cannot fail");
         }
         if !explain.focus_matches.is_empty() {
             writeln!(
                 output,
-                "Focus evidence: `{}`",
-                utils::escape_inline_code(&explain.focus_matches.join("`, `"))
+                "Focus evidence: {}",
+                utils::inline_code_list(&explain.focus_matches)
             )
             .expect("writing to a string cannot fail");
         }
@@ -594,9 +587,9 @@ impl Render {
         writeln!(output, "Window: {} days", bugs.window_days).expect("writing to a string cannot fail");
         writeln!(
             output,
-            "Keywords ({} matching): `{}`",
+            "Keywords ({} matching): {}",
             bugs.keyword_match.label(),
-            utils::escape_inline_code(&bugs.keywords.join("`, `"))
+            utils::inline_code_list(&bugs.keywords)
         )
         .expect("writing to a string cannot fail");
         Render::paths(output, "Bug-related paths", &bugs.paths);
@@ -622,10 +615,10 @@ impl Render {
         Render::section_heading(output, "Firefighting commits");
         writeln!(
             output,
-            "Window: {} days; keywords ({} matching): `{}`",
+            "Window: {} days; keywords ({} matching): {}",
             firefighting.window_days,
             firefighting.keyword_match.label(),
-            utils::escape_inline_code(&firefighting.keywords.join("`, `"))
+            utils::inline_code_list(&firefighting.keywords)
         )
         .expect("writing to a string cannot fail");
         Render::commits(output, &firefighting.commits);

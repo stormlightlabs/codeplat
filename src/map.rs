@@ -15,6 +15,14 @@ use crate::cli::ExitCategory;
 use crate::{landmarks, security};
 use crate::{report::*, utils};
 
+mod cache;
+mod graph;
+pub use cache::{CacheCommand, CacheControlReport, cache_control};
+use cache::{CacheStats, CacheStore};
+#[cfg(test)]
+use cache::{collect_cache_files, prune_cache_directory};
+use graph::{build_lexical_edges, rank_files, select_snippets};
+
 const MAX_CONTEXT_CHARS: usize = 180;
 const DEFAULT_MAP_TOKENS: usize = 1_000;
 const CACHE_SCHEMA_VERSION: u16 = 2;
@@ -446,410 +454,6 @@ struct ParsedSource {
     limitations: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct CacheRecord {
-    schema_version: u16,
-    tool_version: String,
-    repository_root: String,
-    path: String,
-    language: SourceLanguage,
-    query_pack: String,
-    query_digest: String,
-    fingerprint: String,
-    created_at: u128,
-    parsed: ParsedSource,
-}
-
-#[derive(Debug)]
-struct CacheStore {
-    root: Option<PathBuf>,
-    repository_root: String,
-    repository_id: String,
-}
-
-#[derive(Debug, Default)]
-struct CacheStats {
-    matched: usize,
-    unmatched: usize,
-    unavailable: usize,
-    hits: usize,
-    misses: usize,
-    refreshed: Vec<String>,
-    stale: Vec<String>,
-}
-
-#[derive(Debug)]
-struct CacheLookup {
-    parsed: ParsedSource,
-    stale: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CacheCommand {
-    Path,
-    Status,
-    Prune,
-    Clear,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct CacheControlReport {
-    pub operation: String,
-    pub path: Option<String>,
-    pub exists: bool,
-    pub repositories: usize,
-    pub records: usize,
-    pub bytes: u64,
-    pub removed_records: usize,
-    pub removed_bytes: u64,
-    pub max_records_per_repository: usize,
-    pub max_bytes_per_repository: u64,
-    pub max_age_seconds: u64,
-}
-
-#[derive(Debug)]
-struct CacheFileInfo {
-    path: PathBuf,
-    bytes: u64,
-    timestamp: u128,
-    repository_id: Option<String>,
-}
-
-/// Inspect or mutate only Codeplat's configured cache root. This deliberately
-/// does not discover a Git repository or access a worktree.
-pub fn cache_control(command: CacheCommand) -> Result<CacheControlReport> {
-    let root =
-        security::configured_cache_root().map_err(|error| MapError::safety("resolving the cache root", error))?;
-    let operation = match command {
-        CacheCommand::Path => "path",
-        CacheCommand::Status => "status",
-        CacheCommand::Prune => "prune",
-        CacheCommand::Clear => "clear",
-    };
-    let Some(root) = root else {
-        return Ok(CacheControlReport {
-            operation: operation.to_owned(),
-            path: None,
-            exists: false,
-            repositories: 0,
-            records: 0,
-            bytes: 0,
-            removed_records: 0,
-            removed_bytes: 0,
-            max_records_per_repository: CACHE_MAX_RECORDS_PER_REPOSITORY,
-            max_bytes_per_repository: CACHE_MAX_BYTES_PER_REPOSITORY,
-            max_age_seconds: CACHE_MAX_AGE_SECONDS,
-        });
-    };
-
-    let exists = root.is_dir();
-    let mut removed_records = 0;
-    let mut removed_bytes = 0;
-    if exists && command == CacheCommand::Prune {
-        let repositories = root.join("repositories");
-        for repository in direct_directories(&repositories)? {
-            let (removed, bytes) = prune_cache_directory(&root, &repository)
-                .map_err(|error| MapError::analysis("pruning the cache", error))?;
-            removed_records += removed;
-            removed_bytes += bytes;
-        }
-    } else if exists && command == CacheCommand::Clear {
-        let repositories = root.join("repositories");
-        for repository in direct_directories(&repositories)? {
-            if security::cache_path_is_safe(&root, &repository).is_err() {
-                continue;
-            }
-            let info = collect_cache_files(&root, &repository)?;
-            removed_records += info.len();
-            removed_bytes += info.iter().map(|entry| entry.bytes).sum::<u64>();
-            fs::remove_dir_all(repository).map_err(|error| MapError::analysis("clearing the cache", error))?;
-        }
-    }
-
-    let files = if root.is_dir() { collect_cache_files(&root, &root.join("repositories"))? } else { Vec::new() };
-    let repositories = files
-        .iter()
-        .filter_map(|entry| entry.repository_id.as_deref())
-        .collect::<BTreeSet<_>>()
-        .len();
-    Ok(CacheControlReport {
-        operation: operation.to_owned(),
-        path: Some(root.to_string_lossy().into_owned()),
-        exists,
-        repositories,
-        records: files.len(),
-        bytes: files.iter().map(|entry| entry.bytes).sum(),
-        removed_records,
-        removed_bytes,
-        max_records_per_repository: CACHE_MAX_RECORDS_PER_REPOSITORY,
-        max_bytes_per_repository: CACHE_MAX_BYTES_PER_REPOSITORY,
-        max_age_seconds: CACHE_MAX_AGE_SECONDS,
-    })
-}
-
-fn direct_directories(path: &Path) -> Result<Vec<PathBuf>> {
-    let entries = match fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(MapError::analysis("reading the cache", error)),
-    };
-    let mut directories = entries
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            entry
-                .file_type()
-                .ok()
-                .filter(|file_type| file_type.is_dir() && !file_type.is_symlink())
-                .map(|_| entry.path())
-        })
-        .collect::<Vec<_>>();
-    directories.sort();
-    Ok(directories)
-}
-
-fn collect_cache_files(root: &Path, directory: &Path) -> Result<Vec<CacheFileInfo>> {
-    if !directory.is_dir() {
-        return Ok(Vec::new());
-    }
-    if security::cache_path_is_safe(root, directory).is_err() {
-        return Ok(Vec::new());
-    }
-    let repository_id = directory
-        .strip_prefix(root.join("repositories"))
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .and_then(|component| component.as_os_str().to_str())
-        .map(str::to_owned);
-    let mut files = Vec::new();
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(MapError::analysis("reading the cache", error)),
-    };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(MapError::analysis("reading the cache", error)),
-        };
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(MapError::analysis("reading the cache", error)),
-        };
-        let path = entry.path();
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            files.extend(collect_cache_files(root, &path)?);
-        } else if file_type.is_file() && path.extension().is_some_and(|extension| extension == "json") {
-            if security::cache_path_is_safe(root, &path).is_err() {
-                continue;
-            }
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(MapError::analysis("reading cache metadata", error)),
-            };
-            let timestamp = security::read_cache_file(root, &path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<CacheRecord>(&bytes).ok())
-                .map(|record| record.created_at)
-                .unwrap_or_else(|| {
-                    metadata
-                        .modified()
-                        .ok()
-                        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                        .map(|duration| duration.as_nanos())
-                        .unwrap_or_default()
-                });
-            files.push(CacheFileInfo { path, bytes: metadata.len(), timestamp, repository_id: repository_id.clone() });
-        }
-    }
-    Ok(files)
-}
-
-fn prune_cache_directory(root: &Path, repository: &Path) -> std::result::Result<(usize, u64), String> {
-    let mut files = collect_cache_files(root, repository).map_err(|error| error.to_string())?;
-    files.sort_by(|left, right| {
-        right
-            .timestamp
-            .cmp(&left.timestamp)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    let cutoff = unix_timestamp().saturating_sub(u128::from(CACHE_MAX_AGE_SECONDS) * 1_000_000_000);
-    let mut remove = files
-        .iter()
-        .filter(|entry| entry.timestamp < cutoff)
-        .map(|entry| entry.path.clone())
-        .collect::<BTreeSet<_>>();
-    let mut remaining = files
-        .iter()
-        .filter(|entry| !remove.contains(&entry.path))
-        .collect::<Vec<_>>();
-    let mut remaining_bytes = remaining.iter().map(|entry| entry.bytes).sum::<u64>();
-    while remaining.len() > CACHE_MAX_RECORDS_PER_REPOSITORY || remaining_bytes > CACHE_MAX_BYTES_PER_REPOSITORY {
-        let Some(entry) = remaining.pop() else {
-            break;
-        };
-        remaining_bytes = remaining_bytes.saturating_sub(entry.bytes);
-        remove.insert(entry.path.clone());
-    }
-    let mut removed_bytes = 0;
-    for path in &remove {
-        if security::cache_path_is_safe(root, path).is_err() {
-            continue;
-        }
-        if let Ok(metadata) = fs::symlink_metadata(path) {
-            removed_bytes += metadata.len();
-        }
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Ok((remove.len(), removed_bytes))
-}
-
-impl CacheStore {
-    fn new(repository_root: &Path) -> Result<Self> {
-        let root = security::cache_root(repository_root)
-            .map_err(|error| MapError::safety("resolving the cache root", error))?;
-        let repository_root = repository_root.to_string_lossy().into_owned();
-        Ok(Self { root, repository_id: digest_hex(repository_root.as_bytes()), repository_root })
-    }
-
-    fn repository_path(&self) -> Option<PathBuf> {
-        self.root
-            .as_ref()
-            .map(|root| root.join("repositories").join(&self.repository_id))
-    }
-
-    fn record_directory(&self, path: &str, support: &LanguageSupport) -> Option<PathBuf> {
-        let root = self.root.as_ref()?;
-        let identity = format!(
-            "{CACHE_TOOL_VERSION}\n{}\n{}\n{}\n{}",
-            self.repository_root,
-            path,
-            support.language.label(),
-            query_digest(support),
-        );
-        Some(
-            root.join("repositories")
-                .join(&self.repository_id)
-                .join("files")
-                .join(digest_hex(identity.as_bytes())),
-        )
-    }
-
-    fn record_path(&self, path: &str, support: &LanguageSupport, fingerprint: &str) -> Option<PathBuf> {
-        Some(
-            self.record_directory(path, support)?
-                .join(format!("{fingerprint}.json")),
-        )
-    }
-
-    fn load(&self, path: &str, support: &LanguageSupport, fingerprint: &str, mode: CacheMode) -> Option<CacheLookup> {
-        let directory = self.record_directory(path, support)?;
-        let root = self.root.as_ref()?;
-        if security::cache_path_is_safe(root, &directory).is_err() {
-            return None;
-        }
-
-        if mode != CacheMode::Manual {
-            let current = self.record_path(path, support, fingerprint)?;
-            let record = self.read_record(current, path, support)?;
-            return (record.fingerprint == fingerprint).then_some(CacheLookup { parsed: record.parsed, stale: false });
-        }
-
-        let entries = fs::read_dir(directory).ok()?;
-        let mut candidates = entries
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|candidate| candidate.extension().is_some_and(|extension| extension == "json"))
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            self.cache_record_created_at(right)
-                .cmp(&self.cache_record_created_at(left))
-                .then_with(|| cache_record_mtime(right).cmp(&cache_record_mtime(left)))
-                .then_with(|| left.cmp(right))
-        });
-        candidates
-            .into_iter()
-            .filter(|candidate| security::cache_path_is_safe(root, candidate).is_ok())
-            .find_map(|candidate| {
-                let record = self.read_record(candidate, path, support)?;
-                Some(CacheLookup { parsed: record.parsed, stale: record.fingerprint != fingerprint })
-            })
-    }
-
-    fn read_record(&self, path: PathBuf, expected_path: &str, support: &LanguageSupport) -> Option<CacheRecord> {
-        let bytes = self
-            .root
-            .as_ref()
-            .and_then(|root| security::read_cache_file(root, &path).ok())?;
-        let record: CacheRecord = serde_json::from_slice(&bytes).ok()?;
-        if record.schema_version != CACHE_SCHEMA_VERSION
-            || record.tool_version != CACHE_TOOL_VERSION
-            || record.repository_root != self.repository_root
-            || record.path != expected_path
-            || record.language != support.language
-            || record.query_pack != support.query_pack
-            || record.query_digest != query_digest(support)
-        {
-            return None;
-        }
-        Some(record)
-    }
-
-    fn cache_record_created_at(&self, path: &Path) -> u128 {
-        self.root
-            .as_ref()
-            .and_then(|root| security::read_cache_file(root, path).ok())
-            .and_then(|bytes| serde_json::from_slice::<CacheRecord>(&bytes).ok())
-            .map(|record| record.created_at)
-            .unwrap_or_default()
-    }
-
-    fn write(&self, path: &str, support: &LanguageSupport, fingerprint: &str, parsed: &ParsedSource) -> Option<String> {
-        let record_path = self.record_path(path, support, fingerprint)?;
-        let record = CacheRecord {
-            schema_version: CACHE_SCHEMA_VERSION,
-            tool_version: CACHE_TOOL_VERSION.to_owned(),
-            repository_root: self.repository_root.clone(),
-            path: path.to_owned(),
-            language: support.language,
-            query_pack: support.query_pack.to_owned(),
-            query_digest: query_digest(support),
-            fingerprint: fingerprint.to_owned(),
-            created_at: unix_timestamp(),
-            parsed: parsed.clone(),
-        };
-        let bytes = match serde_json::to_vec(&record) {
-            Ok(bytes) => bytes,
-            Err(error) => return Some(format!("could not serialize the source-map cache record: {error}")),
-        };
-        let root = self.root.as_ref()?;
-        if let Err(error) = security::write_cache_file(root, &record_path, &bytes) {
-            return Some(format!("could not write the source-map cache record: {error}"));
-        }
-        self.prune_repository()
-            .err()
-            .map(|error| format!("could not prune source-map cache records: {error}"))
-    }
-
-    fn prune_repository(&self) -> std::result::Result<(usize, u64), String> {
-        let Some(root) = self.root.as_ref() else {
-            return Ok((0, 0));
-        };
-        let Some(repository_path) = self.repository_path() else {
-            return Ok((0, 0));
-        };
-        prune_cache_directory(root, &repository_path)
-    }
-}
-
 #[derive(Clone)]
 struct SnippetCandidate {
     path: String,
@@ -1066,12 +670,20 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             continue;
         }
         let Some(support) = support_for_path(Path::new(&path)) else {
+            let source_like = is_source_like_path(Path::new(&path));
             omissions.push(SourceOmission {
                 path: path.clone(),
-                reason: OmissionReason::UnsupportedLanguage,
-                detail:
-                    "The file extension is not registered with a first-class language parser; the path was not parsed."
-                        .to_owned(),
+                reason: if source_like {
+                    OmissionReason::UnsupportedLanguage
+                } else {
+                    OmissionReason::NonSource
+                },
+                detail: if source_like {
+                    "The source-language extension is not registered with a first-class parser; the path was not parsed."
+                        .to_owned()
+                } else {
+                    "The path is not a registered source-language file; it was inventoried but not parsed.".to_owned()
+                },
             });
             continue;
         };
@@ -1342,6 +954,16 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             untracked: inventory.2,
             analyzed: files.len(),
             omitted: omissions.len(),
+        },
+        availability: MapAvailability {
+            unsupported_paths: omissions
+                .iter()
+                .filter(|omission| omission.reason == OmissionReason::UnsupportedLanguage)
+                .count(),
+            partial_files: files
+                .iter()
+                .filter(|file| file.status == FileAnalysisStatus::Partial)
+                .count(),
         },
         files,
         omissions,
@@ -1667,476 +1289,6 @@ fn cache_status(mode: CacheMode, stats: &CacheStats) -> CacheStatus {
     } else {
         CacheStatus::Miss
     }
-}
-
-fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edges: usize) -> Vec<LexicalEdge> {
-    let mut definitions = BTreeMap::<(SourceLanguage, String), Vec<(String, SymbolVisibility)>>::new();
-    for file in files {
-        for symbol in &file.symbols {
-            if is_graph_definition(symbol) {
-                definitions
-                    .entry((file.language, symbol.name.clone()))
-                    .or_default()
-                    .push((file.path.clone(), symbol.visibility));
-            }
-        }
-    }
-    for candidates in definitions.values_mut() {
-        candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.label().cmp(right.1.label())));
-        candidates.dedup_by(|right, left| right.0 == left.0);
-    }
-
-    let imports = files
-        .iter()
-        .map(|file| {
-            (
-                file.path.clone(),
-                file.symbols
-                    .iter()
-                    .filter(|symbol| symbol.role == SymbolRole::Definition && symbol.evidence == SymbolEvidence::Import)
-                    .map(|symbol| (symbol.name.clone(), import_module_hints(&symbol.context)))
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    let mut edges = Vec::new();
-    'files: for file in files {
-        for symbol in &file.symbols {
-            if edges.len() >= max_edges {
-                break 'files;
-            }
-            if !is_graph_reference(symbol) {
-                continue;
-            }
-            let Some(all_candidates) = definitions.get(&(file.language, symbol.name.clone())) else {
-                continue;
-            };
-            let same_file = all_candidates
-                .iter()
-                .filter(|(path, _)| path == &file.path)
-                .cloned()
-                .collect::<Vec<_>>();
-            let imported = imports
-                .get(&file.path)
-                .into_iter()
-                .flatten()
-                .find(|(name, _)| name == &symbol.name);
-            let (candidates, reason, confidence) = if !same_file.is_empty() {
-                if symbol.evidence != SymbolEvidence::BareReference {
-                    (
-                        same_file,
-                        LexicalResolutionReason::SameFileExplicit,
-                        ConfidenceTier::High,
-                    )
-                } else {
-                    continue;
-                }
-            } else {
-                let Some((_, hints)) = imported else {
-                    // A cross-file bare name is not evidence of a dependency.
-                    continue;
-                };
-                let module_candidates = all_candidates
-                    .iter()
-                    .filter(|(path, _)| module_path_matches(path, hints))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if module_candidates.is_empty() {
-                    (
-                        all_candidates.clone(),
-                        LexicalResolutionReason::ImportedName,
-                        ConfidenceTier::Medium,
-                    )
-                } else {
-                    (
-                        module_candidates,
-                        LexicalResolutionReason::ImportedModule,
-                        ConfidenceTier::High,
-                    )
-                }
-            };
-            let candidates = candidates.into_iter().take(max_candidates).collect::<Vec<_>>();
-            if candidates.is_empty() {
-                continue;
-            }
-            let candidate_paths = candidates.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
-            let candidate_group = format!(
-                "{}:{}:{}:{}",
-                file.path,
-                symbol.name,
-                reason.label(),
-                digest_hex(candidate_paths.join("\0").as_bytes())
-            );
-            let ambiguous = candidates.len() > 1;
-            for (target, target_visibility) in &candidates {
-                if edges.len() >= max_edges {
-                    break 'files;
-                }
-                edges.push(LexicalEdge {
-                    source: file.path.clone(),
-                    target: target.clone(),
-                    symbol: symbol.name.clone(),
-                    ambiguous,
-                    candidates: candidate_paths.clone(),
-                    candidate_group: candidate_group.clone(),
-                    resolution_reason: reason,
-                    confidence,
-                    target_visibility: *target_visibility,
-                });
-            }
-        }
-    }
-    edges.sort_by(|left, right| {
-        left.source
-            .cmp(&right.source)
-            .then_with(|| left.target.cmp(&right.target))
-            .then_with(|| left.symbol.cmp(&right.symbol))
-            .then_with(|| left.ambiguous.cmp(&right.ambiguous))
-            .then_with(|| left.candidate_group.cmp(&right.candidate_group))
-    });
-    edges.dedup();
-    edges
-}
-
-fn is_graph_definition(symbol: &SourceSymbol) -> bool {
-    symbol.role == SymbolRole::Definition
-        && matches!(
-            symbol.kind,
-            SymbolKind::Function
-                | SymbolKind::Struct
-                | SymbolKind::Enum
-                | SymbolKind::Trait
-                | SymbolKind::Type
-                | SymbolKind::Const
-                | SymbolKind::Static
-                | SymbolKind::Module
-                | SymbolKind::Macro
-                | SymbolKind::Class
-                | SymbolKind::Method
-                | SymbolKind::Interface
-        )
-}
-
-fn is_graph_reference(symbol: &SourceSymbol) -> bool {
-    symbol.role == SymbolRole::Reference
-        && !matches!(
-            symbol.evidence,
-            SymbolEvidence::BareReference | SymbolEvidence::MemberReference
-        )
-        && symbol.kind != SymbolKind::Field
-        && !is_generic_name(&symbol.name)
-}
-
-fn import_module_hints(context: &str) -> Vec<String> {
-    let mut hints = Vec::new();
-    let mut quoted = None;
-    for quote in ['"', '\''] {
-        if let Some(start) = context.find(quote)
-            && let Some(end) = context[start + 1..].find(quote)
-        {
-            quoted = Some(context[start + 1..start + 1 + end].to_owned());
-            break;
-        }
-    }
-    if let Some(value) = quoted {
-        hints.push(normalize_module_hint(&value));
-    }
-    let words = context.split_whitespace().collect::<Vec<_>>();
-    if let Some(index) = words.iter().position(|word| *word == "from")
-        && let Some(module) = words.get(index + 1)
-    {
-        hints.push(normalize_module_hint(module));
-    }
-    hints.extend(
-        context
-            .split(|character: char| character.is_whitespace() || matches!(character, ';' | ',' | '(' | ')'))
-            .filter(|part| part.contains("::") || part.contains('/'))
-            .map(normalize_module_hint),
-    );
-    hints.retain(|hint| !hint.is_empty());
-    hints.sort();
-    hints.dedup();
-    hints
-}
-
-fn normalize_module_hint(value: &str) -> String {
-    let value = value.trim_matches(['"', '\'', '`', ';', ',']);
-    let value = value.trim_start_matches("./").trim_start_matches("../");
-    value
-        .replace('\\', "/")
-        .trim_end_matches("/__init__")
-        .trim_end_matches("/mod")
-        .trim_end_matches(".js")
-        .trim_end_matches(".ts")
-        .trim_end_matches(".tsx")
-        .trim_end_matches(".py")
-        .trim_end_matches(".rb")
-        .trim_end_matches(".rs")
-        .trim_end_matches(".java")
-        .trim_end_matches(".cs")
-        .replace("::", "/")
-        .trim_matches('/')
-        .to_ascii_lowercase()
-}
-
-fn module_path_matches(path: &str, hints: &[String]) -> bool {
-    if hints.is_empty() {
-        return false;
-    }
-    let normalized = normalize_module_hint(path);
-    hints.iter().any(|hint| {
-        let direct_match = normalized == *hint || normalized.ends_with(&format!("/{hint}"));
-        let module = hint
-            .rsplit_once('/')
-            .map(|(module, _)| module)
-            .unwrap_or(hint)
-            .trim_start_matches("crate/")
-            .trim_start_matches("self/")
-            .trim_start_matches("super/");
-        direct_match || normalized == module || normalized.ends_with(&format!("/{module}"))
-    })
-}
-
-fn rank_files(files: &[SourceFile], edges: &[LexicalEdge], settings: &MapSettings) -> Vec<FileRank> {
-    if files.is_empty() {
-        return Vec::new();
-    }
-    let paths = files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
-    let path_set = paths.iter().cloned().collect::<BTreeSet<_>>();
-    let mut outgoing = BTreeMap::<String, Vec<&LexicalEdge>>::new();
-    for edge in edges {
-        outgoing.entry(edge.source.clone()).or_default().push(edge);
-    }
-
-    let initial = 1.0 / paths.len() as f64;
-    let mut scores = paths
-        .iter()
-        .map(|path| (path.clone(), initial))
-        .collect::<BTreeMap<_, _>>();
-    for _ in 0..PAGE_RANK_ITERATIONS {
-        let mut next = paths
-            .iter()
-            .map(|path| (path.clone(), (1.0 - PAGE_RANK_DAMPING) * initial))
-            .collect::<BTreeMap<_, _>>();
-        let dangling = paths
-            .iter()
-            .filter(|path| outgoing.get(*path).is_none_or(Vec::is_empty))
-            .map(|path| scores[path])
-            .sum::<f64>();
-        let dangling_share = PAGE_RANK_DAMPING * dangling * initial;
-        for score in next.values_mut() {
-            *score += dangling_share;
-        }
-        for source in &paths {
-            let Some(source_edges) = outgoing.get(source) else {
-                continue;
-            };
-            let total_weight = source_edges.iter().map(|edge| edge_weight(edge)).sum::<f64>();
-            if total_weight == 0.0 {
-                continue;
-            }
-            for edge in source_edges {
-                if path_set.contains(&edge.target) {
-                    let contribution = PAGE_RANK_DAMPING * scores[source] * edge_weight(edge) / total_weight;
-                    *next.entry(edge.target.clone()).or_default() += contribution;
-                }
-            }
-        }
-        scores = next;
-    }
-
-    let mut ranking = files
-        .iter()
-        .map(|file| {
-            let text_matches = settings
-                .focuses
-                .iter()
-                .filter(|focus| file_matches_focus(file, focus))
-                .count();
-            let path_matches = settings
-                .focus_paths
-                .iter()
-                .filter(|focus_path| path_matches_focus(&file.path, focus_path))
-                .count();
-            let focus_matches = text_matches + path_matches;
-            let focus_boost = text_matches as f64 * 0.35 + path_matches as f64 * 0.7;
-            let score = scores[&file.path] + focus_boost;
-            FileRank { path: file.path.clone(), score: scaled_score(score), focus_matches }
-        })
-        .collect::<Vec<_>>();
-    ranking.sort_by(|left, right| right.score.cmp(&left.score).then_with(|| left.path.cmp(&right.path)));
-    ranking
-}
-
-fn lexical_weight(symbol: &str) -> f64 {
-    if is_generic_name(symbol) || symbol.starts_with('_') { 0.25 } else { 1.0 }
-}
-
-fn edge_weight(edge: &LexicalEdge) -> f64 {
-    let confidence = match edge.confidence {
-        ConfidenceTier::High => 1.0,
-        ConfidenceTier::Medium => 0.5,
-        ConfidenceTier::Low => 0.25,
-    };
-    let visibility = match edge.target_visibility {
-        SymbolVisibility::Public => 1.0,
-        SymbolVisibility::Internal => 0.8,
-        SymbolVisibility::Private => 0.35,
-        SymbolVisibility::Unknown => 0.7,
-    };
-    lexical_weight(&edge.symbol) * confidence * visibility
-}
-
-fn is_generic_name(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "data" | "default" | "error" | "item" | "key" | "main" | "new" | "result" | "self" | "value"
-    )
-}
-
-fn file_matches_focus(file: &SourceFile, focus: &str) -> bool {
-    let focus = focus.trim().to_ascii_lowercase();
-    !focus.is_empty()
-        && (file.path.to_ascii_lowercase().contains(&focus)
-            || file.symbols.iter().any(|symbol| {
-                symbol.name.to_ascii_lowercase().contains(&focus)
-                    || symbol.context.to_ascii_lowercase().contains(&focus)
-            }))
-}
-
-fn path_matches_focus(path: &str, focus_path: &str) -> bool {
-    let focus_path = focus_path.trim().replace('\\', "/");
-    let focus_path = focus_path.trim_start_matches("./");
-    !focus_path.is_empty() && (path == focus_path || path.starts_with(&format!("{focus_path}/")))
-}
-
-fn scaled_score(score: f64) -> u64 {
-    (score.max(0.0) * RANK_SCALE).round() as u64
-}
-
-fn select_snippets(
-    files: &[SourceFile], edges: &[LexicalEdge], ranking: &[FileRank], token_budget: usize, settings: &MapSettings,
-) -> MapSelection {
-    let mut reference_counts = BTreeMap::<(String, String), u64>::new();
-    for edge in edges {
-        *reference_counts
-            .entry((edge.target.clone(), edge.symbol.clone()))
-            .or_default() += 1;
-    }
-    let file_scores = ranking
-        .iter()
-        .map(|rank| (rank.path.as_str(), rank.score))
-        .collect::<BTreeMap<_, _>>();
-    let mut candidates = Vec::new();
-    for file in files {
-        let file_score = *file_scores.get(file.path.as_str()).unwrap_or(&0);
-        for symbol in file
-            .symbols
-            .iter()
-            .filter(|symbol| symbol.role == SymbolRole::Definition)
-        {
-            let reference_count = reference_counts
-                .get(&(file.path.clone(), symbol.name.clone()))
-                .copied()
-                .unwrap_or_default();
-            let focus_boost = settings
-                .focuses
-                .iter()
-                .filter(|focus| symbol_matches_focus(symbol, focus))
-                .count() as u64
-                * 250_000;
-            let symbol_score = file_score
-                .saturating_add(reference_count.saturating_mul(1_000))
-                .saturating_add(focus_boost);
-            candidates.push(SnippetCandidate {
-                path: file.path.clone(),
-                language: file.language,
-                symbol: symbol.clone(),
-                score: symbol_score,
-            });
-        }
-    }
-    candidates.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.path.cmp(&right.path))
-            .then_with(|| location_key(Some(&left.symbol.location)).cmp(&location_key(Some(&right.symbol.location))))
-            .then_with(|| left.symbol.name.cmp(&right.symbol.name))
-    });
-
-    let mut snippets = Vec::new();
-    let mut estimated_tokens = 0;
-    for candidate in candidates {
-        let remaining = token_budget.saturating_sub(estimated_tokens);
-        let Some((symbol, cost, truncated)) = fit_snippet(&candidate, remaining) else {
-            continue;
-        };
-        estimated_tokens += cost;
-        snippets.push(MapSnippet {
-            path: candidate.path,
-            language: candidate.language,
-            symbol,
-            score: candidate.score,
-            estimated_tokens: cost,
-            truncated,
-        });
-        if estimated_tokens >= token_budget {
-            break;
-        }
-    }
-
-    MapSelection { token_budget, estimated_tokens, snippets }
-}
-
-fn symbol_matches_focus(symbol: &SourceSymbol, focus: &str) -> bool {
-    let focus = focus.trim().to_ascii_lowercase();
-    !focus.is_empty()
-        && (symbol.name.to_ascii_lowercase().contains(&focus) || symbol.context.to_ascii_lowercase().contains(&focus))
-}
-
-fn fit_snippet(candidate: &SnippetCandidate, budget: usize) -> Option<(SourceSymbol, usize, bool)> {
-    let scope = if candidate.symbol.scope.is_empty() {
-        "root".to_owned()
-    } else {
-        candidate.symbol.scope.join("::")
-    };
-    let prefix = format!(
-        "{} {} {} {}:{}-{}:{} {}",
-        candidate.path,
-        candidate.symbol.kind.label(),
-        candidate.symbol.name,
-        candidate.symbol.location.start.line,
-        candidate.symbol.location.start.column,
-        candidate.symbol.location.end.line,
-        candidate.symbol.location.end.column,
-        scope
-    );
-    let full = format!("{prefix} {}", candidate.symbol.context);
-    let full_cost = utils::token_count(&full);
-    if full_cost <= budget {
-        return Some((candidate.symbol.clone(), full_cost, false));
-    }
-    let marker = "…";
-    if utils::token_count(&format!("{prefix} {marker}")) > budget {
-        return None;
-    }
-    let max_chars = candidate.symbol.context.chars().count();
-    let mut best = 0;
-    for chars in 0..=max_chars {
-        let context = candidate.symbol.context.chars().take(chars).collect::<String>();
-        if utils::token_count(&format!("{prefix} {context}{marker}")) <= budget {
-            best = chars;
-        } else {
-            break;
-        }
-    }
-    let context = candidate.symbol.context.chars().take(best).collect::<String>();
-    let mut symbol = candidate.symbol.clone();
-    symbol.context = format!("{context}{marker}");
-    let cost = utils::token_count(&format!("{prefix} {}", symbol.context));
-    Some((symbol, cost, true))
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
@@ -2979,6 +2131,59 @@ fn support_for_path(path: &Path) -> Option<&'static LanguageSupport> {
     LANGUAGE_SUPPORT
         .iter()
         .find(|support| support.extensions.contains(&extension.as_str()))
+}
+
+fn is_source_like_path(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        extension.as_str(),
+        "c" | "cc"
+            | "cpp"
+            | "cxx"
+            | "h"
+            | "hh"
+            | "hpp"
+            | "hxx"
+            | "go"
+            | "fs"
+            | "fsi"
+            | "fsx"
+            | "ex"
+            | "exs"
+            | "erl"
+            | "hrl"
+            | "lua"
+            | "php"
+            | "swift"
+            | "kt"
+            | "kts"
+            | "scala"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "nu"
+            | "zig"
+            | "vue"
+            | "svelte"
+            | "dart"
+            | "html"
+            | "htm"
+            | "css"
+            | "scss"
+            | "sass"
+            | "less"
+            | "sql"
+    ) {
+        return true;
+    }
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("Dockerfile" | "Justfile" | "Makefile" | "Rakefile")
+    )
 }
 
 fn extension_for_path(path: &Path) -> String {

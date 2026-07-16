@@ -1,349 +1,291 @@
-# Tickets: Codeplat v1 repository navigation CLI
+# Tickets: Codeplat V1
 
-Implementation tickets derived from [ROADMAP.md](ROADMAP.md).
+Implementation tickets derived from [ROADMAP.md](ROADMAP.md). Work the frontier: any ticket whose blockers are
+complete. Use one fresh implementation context per ticket.
 
-**Last reviewed:** 2026-07-15
+**Last reviewed:** 2026-07-16
 
-## 1. Establish the CLI contract and verification foundation
+## Release blockers
 
-Created the typed command and report foundation that every Codeplat feature uses: the Clap command hierarchy,
-versioned report model, Markdown and JSON renderers, stdout/stderr policy, and black-box fixture-test harness.
+- The default briefing does not yet deliver the V1 reading-plan and concise-history experience.
+- Generated, vendored, and minified source can still consume analysis limits and degrade recommendations.
+- Go, Lua, and Zig do not yet have first-class structural-map support.
+- Compact quality and `--strict` still conflate expected bounded projection with actionable degradation.
+- Scale benchmarks do not yet enforce latency/output ceilings for ignored trees, high ambiguity, and deep history.
+- The configured Linux, macOS, Windows, Rust 1.85, and dependency-policy jobs need a green release-candidate run.
 
-## 2. Deliver the complete Git-history briefing
+## Completed foundation
 
-Lets a user or agent inspect the five history signals through `codeplat history`
-and focused history commands, using gix only and returning structured evidence with limitations.
+Earlier completed tickets established the CLI/report contract, five history signals, seven language families,
+cache modes, bounded lexical maps, the integrated briefing, hostile-repository containment, report
+provenance/schema fixtures, history correctness, explainable lexical evidence, and repository landmarks/topology.
+The packaging work added metadata/licensing, minimal `gix` features, dependency policy, cross-platform/MSRV CI,
+checksummed artifacts, generated completions/man pages, and release documentation.
 
-## 3. Deliver worktree inventory and a Rust source map
+The completed work remains covered by the existing unit and compiled-CLI suite. Historical implementation detail
+is available in Git history and `.sandbox` handoffs; this file now tracks only unfinished V1 work.
 
-Lets callers run `codeplat map` on a current worktree and obtain a Rust structural map with
-symbol locations, declaration snippets, references, worktree-state labels, and honest language/parse limitations.
+## 18. Build the default repository reading plan
 
-## 4. Add JavaScript and TypeScript map support
+**What to build:** Make `codeplat [PATH]` lead with a practical, evidence-backed sequence of files to read rather
+than a flat ranked winner and long diagnostic sections. The same typed reading plan must be available in JSON.
 
-Extended the source-map registry so JavaScript and TypeScript receive the same first-class
-structural-map contract as Rust.
-
-## 5. Add Python and Ruby map support
-
-Extended the source-map registry so Python and Ruby receive the same
-first-class structural-map contract as Rust.
-
-## 6. Add Java and C# map support
-
-**What to build:** Extend the source-map registry so Java and C# receive the same first-class
-structural-map contract as Rust.
-
-**Blocked by:** Ticket 3
-
-**Audit status:** Parser/query coverage exists and Java field extraction is now covered by the query pack and
-regression tests. Visibility-aware ranking remains reopened by Ticket 14 because visibility is not represented
-in the report model.
+**Blocked by:** None - can start immediately
 
 **Acceptance criteria:**
 
-- [x] Java and C# parsers and versioned query packs are registered through the established
-      language-support interface.
-- [x] Fixtures prove extraction for representative package/namespace, class, method, type, and
-      field, and reference structures appropriate to each grammar.
-- [ ] Symbol visibility and duplicate names affect ranking data only; they never cause undisclosed omissions.
-      Reopened by Ticket 14 because visibility is not represented in the report model.
-- [x] Per-file parse/query limitations and unsupported extensions are carried through the shared report model.
-- [x] Mixed-language output remains deterministic and preserves source locations/snippets accurately.
+- [ ] The shared report model represents ordered recommendations with purpose, path, project root, reason,
+      evidence kinds, confidence, and relevant limitations.
+- [ ] A useful repository receives 5–10 unique recommendations when sufficient evidence exists, using applicable
+      `start_here`, `architecture`, `runtime`, `tests`, and `supporting_context` groups.
+- [ ] Selection combines landmarks, project topology, qualified lexical ranking, explicit focus, and bounded
+      history overlap without adding framework guesses or opaque score-only explanations.
+- [ ] Monorepo plans cover relevant project roots without overriding explicit focus; omitted roots and short plans
+      are explained instead of padded.
+- [ ] Markdown leads with repository overview and the reading plan. JSON ordering is deterministic and extends the
+      schema compatibility corpus without changing existing field meanings.
+- [ ] `map` and `explain` remain focused evidence tools and existing callers do not need to parse Markdown.
 
 **Verification:**
 
-- [x] Run `codeplat map --json` against Java, C#, and mixed-language fixtures;
-      assert definitions, references, and limitations.
-- [x] Review Markdown output for location and declaration-context readability.
-- [x] `cargo fmt --check`
-- [x] `cargo test`
-- [x] `cargo clippy --all-targets --all-features -- -D warnings`
-
-## 7. Make repository maps relevant, bounded, and cache-aware
-
-**What to build:** Turn the structural map into a task-sensitive compact map with deterministic lexical
-graph ranking, explicit focus boosts, token-budget selection, and all approved cache modes.
-
-**Blocked by:** Ticket 3
-
-**Implementation status (2026-07-15):** Ranking, explicit focus boosts, bounded structural selection, and
-deterministic JSON ordering are implemented and covered by tests. Ticket 10 completes cache identity, mode,
-retention, privacy, atomic-write, and observability behavior. Generic/private ranking and complete-report
-budget work remains with Tickets 11 and 14.
-
-**Acceptance criteria:**
-
-- [x] File-level lexical dependency edges are built from typed definitions and references,
-      preserve ambiguous candidates, and are never described as a type-resolved call graph.
-- [x] Deterministic PageRank-style ranking prioritizes central files/symbols, then applies
-      only explicit `--focus` and `--focus-path` boosts.
-- [x] Generic and private-looking names may be downweighted as transparent ranking heuristics,
-      but remain available in output when selected or requested.
-- [x] `--map-tokens` defaults to 1,000 and selects structural snippets with location-preserving
-      elision instead of full source bodies.
-- [x] Cache data lives only under a safe XDG Codeplat cache path and is isolated by canonical repository,
-      exact path, query-pack content, tool/schema, and source-content fingerprint. Cache roots resolving
-      inside the repository are rejected and retention is bounded by Ticket 10.
-- [x] `auto`, `always`, `files`, `manual`, and `--no-cache` work as specified; manual mode labels
-      possible staleness and never refreshes silently.
-
-**Verification:**
-
-- [ ] Exercise focus text/path, duplicate symbols, generic/private names, and complete-report token limits
-      against the Rust and mixed-language fixtures. Focus/path, duplicate-symbol, and selection-budget coverage
-      exists; generic/private ranking and complete-report limits remain reopened by Tickets 11 and 14.
-- [x] Use a temporary XDG cache directory to prove cache hits, automatic invalidation, exact explicit-file
-      refresh, manual stale labels, no-cache behavior, retention, unavailable/unmatched-file accounting,
-      permissions, corruption recovery, and concurrency.
-- [x] Confirm deterministic JSON ordering across repeated runs with unchanged inputs.
-- `cargo fmt --check`
-- `cargo test`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-
-## 8. Integrate the default briefing
-
-**What to build:** Replace the successful foundation placeholder with one integrated `codeplat [PATH]`
-briefing that joins history and source-map findings through the shared report model. This ticket completes
-the product flow.
-
-**Implementation status (2026-07-15):** The default command now renders one analyzed report containing all
-five history signals and the ranked source map in Markdown or JSON. Existing language provenance and
-partial/unsupported analysis diagnostics remain attached to the map evidence. Trust-boundary and resource
-hardening follow-up remains tracked by Tickets 9 through 14.
-
-**Blocked by:** Tickets 2, 4, 5, 6, and 7
-
-**Acceptance criteria:**
-
-- [x] The default command combines the five history diagnostics and the ranked source map in one
-      shared Markdown/JSON report without duplicating or re-parsing data.
-- [x] All first-class languages have query-pack provenance, support-status documentation, fixture
-      coverage, and actionable unsupported/partial-analysis messages.
-- [x] Top-level and subcommand help lead with examples, document output/cache/color/scope/focus semantics,
-      and give users an issue or support path.
-- [ ] JSON schema compatibility tests, Markdown readability snapshots, exit-code checks, and no-ANSI-stdout
-      checks cover the final command surface.
-- [ ] Read-only, no-network, no-hook/filter, no-editor/chat-context, no-project-cache, and symlink-scope
-      safeguards are covered by regression tests and documentation.
-
-**Verification:**
-
-- Run the full compiled CLI suite against every fixture repository in both formats and each cache/color mode.
-- Manually inspect the default Markdown briefing for a supported mixed-language repository and a
-  repository with partial/unsupported analysis.
-- `cargo fmt --check`
-- `cargo test`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-
-## 9. Enforce the hostile-repository trust boundary
-
-**Priority:** P0 release blocker
-
-**What to build:** Make every repository-derived path and Git configuration untrusted input. Codeplat
-must prove that analysis cannot escape the selected scope or execute repository-controlled programs,
-even for a malformed same-owner repository.
-
-**Blocked by:** Ticket 3
-
-**Implementation status (2026-07-15):** Repository discovery, tree/index/status/walk path validation,
-scope containment, no-follow worktree reads, restrictive gix opening, and cache-root/write containment
-are implemented in `src/security.rs`. Unix reads and cache writes use descriptor-relative no-follow
-traversal; Windows and other non-Unix targets use component reparse checks plus the documented weaker
-standard-library fallback. Hostile CLI fixtures cover malformed tree paths, worktree symlinks, cache-root
-symlinks, non-UTF-8 names where the host filesystem permits them, and filter sentinels. Cross-platform
-execution of the full fixture matrix remains a release verification task.
-
-**Acceptance criteria:**
-
-- [x] Tree, index, status, and walked paths remain byte-native until validated. Only non-empty relative
-      normal components may reach a filesystem join; absolute, parent, platform-separator, NUL, and
-      lossy-collision cases become typed safety diagnostics.
-- [x] Worktree reads reject symlinks or reparse points in every component and use a race-resistant
-      beneath/no-follow strategy where the platform supports one. The resolved read remains under both
-      repository root and selected scope.
-- [x] Repository opening and status collection use an explicit restrictive gix policy. Hooks,
-      clean/smudge/process filters, credential helpers, editors, pagers, shell commands, and network
-      transports cannot execute.
-- [x] An XDG cache root that resolves within the analyzed repository is rejected; a symlink cannot
-      redirect cache writes into the repository.
-- [x] Malformed-tree, intermediate-symlink, swap-race, non-UTF-8, Windows-separator, and external-filter
-      sentinel fixtures prove that outside content is neither read, emitted, nor cached and no sentinel runs.
-      The compiled suite covers the malformed-tree, intermediate-symlink, swap-race, and filter cases;
-      path-validation tests cover non-UTF-8 and Windows-separator inputs. Full Windows/macOS fixture
-      execution remains platform CI work.
-
-**Verification:**
-
-- [x] Run the compiled CLI against the available hostile fixtures and assert the typed safety result and unchanged sentinel.
-- [ ] Run platform-specific path tests on Linux, macOS, and Windows; document any weaker fallback explicitly.
-      Unix uses descriptor-relative `openat`/`O_NOFOLLOW`; non-Unix targets use component reparse checks
-      and standard-library reads/writes, which are weaker against a concurrent rename/symlink race.
-- [x] `cargo fmt --check`
-- [x] `cargo test --all-features`
-- [x] `cargo clippy --all-targets --all-features -- -D warnings`
-
-## 10. Make cache modes correct, private, and maintainable
-
-Replace the current fallback lookup with an explicit cache-mode state machine and
-give users safe control over retained source-derived metadata.
-
-## 11. Bound analysis work and the complete emitted report
-
-**Priority:** P0 release blocker
-
-**What to build:** Make the default report genuinely compact and make hostile or very large repositories
-produce deterministic partial evidence instead of unbounded traversal, allocation, recursion, or output.
-
-**Blocked by:** Tickets 2 and 7
-
-**Implementation status (2026-07-15):** Compact and evidence profiles now project
-bounded collections with deterministic totals, returned counts, truncation reasons,
-published resource ceilings, bounded source/cache reads, iterative tree and syntax
-traversal, operation-aware history collection, and quiet broken-pipe handling. The
-default self-map is approximately 13 KB in JSON versus the 7.33 MB audit baseline.
-The explicit evidence profile remains capped by the same work and output ceilings.
-
-**Acceptance criteria:**
-
-- [x] The default compact profile emits selected snippets and bounded summaries only. Exhaustive symbols,
-      edges, findings, omissions, and commit evidence require an explicit evidence profile or pagination.
-- [x] `--map-tokens` counts every data-dependent compact-map field and never reports an estimate above the
-      requested budget. The fixed envelope is documented and bounded; property tests cover tiny budgets.
-- [x] Every collection exposes `total`, `returned`, and `truncated` plus a reason. Repeated ambiguity is grouped
-      and sampled rather than emitted once per reference occurrence.
-- [x] Inventory prunes `.git`, ignored build/dependency/vendor directories, and nested repositories before
-      descent. Hidden, non-ignored source remains eligible, and ignored omissions use bounded counts/samples.
-- [x] Reviewed limits cover file count/bytes, total bytes, syntax depth, symbols, candidate fan-out, edges,
-      findings, commits, history evidence, elapsed work, and output. Oversize/binary/deep inputs become typed
-      omissions; syntax traversal cannot overflow the call stack.
-- [x] Focused history uses an operation-aware streaming pass and computes tree diffs only when the requested
-      evidence and path scope require them.
-- [x] Long scans expose concise TTY-only stderr progress, stay quiet when non-interactive, honor interruption
-      promptly, and cannot leave a partial cache entry or JSON document described as successful.
-- [ ] Benchmarks on Codeplat itself, a large ignored tree, high-ambiguity sources, and 10k/100k-commit fixtures
-      enforce documented latency and output ceilings. The eight-file self-map is orders of magnitude smaller
-      than the 7.33 MB audit baseline.
-
-**Verification:**
-
-- [x] Assert byte size, estimated tokens, returned counts, and truncation metadata for compact and evidence profiles.
-- [x] Run resource fixtures under CI-friendly time and memory ceilings and confirm useful partial output;
-      the integration suite covers oversized and binary source inputs with typed omissions.
-- [x] Test early pipe closure; a broken pipe terminates quietly rather than becoming exit 70.
-- `cargo fmt --check`
-- `cargo test --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-
-## 12. Make machine reports reproducible and enforceable
-
-**Priority:** P0 release blocker
-
-Give agents enough typed provenance to decide whether a report is comparable and usable,
-and turn schema version 1 into a real compatibility contract.
-
-## 13. Correct and strengthen Git-history evidence
-
-Makes every history result obey its advertised scope and improve the article-derived
-signals without hiding their original evidence or caveats.
-
-## 14. Make lexical maps high-signal and explainable
-
-Replaces global bare-name fan-out with bounded, confidence-aware lexical evidence and
-measure each first-class language against a conformance corpus.
-
-## 15. Add repository landmarks and project topology
-
-**Priority:** P1 post-v1 navigation feature
-
-**What to build:** Help users choose the first non-source files and project roots to read before symbol-level
-navigation, using bounded presence-based evidence rather than speculative framework semantics.
-
-**Blocked by:** Tickets 8, 11, and 12
-
-**Acceptance criteria:**
-
-- [x] The integrated briefing identifies README/contributor/agent instructions, manifests and lockfiles,
-      workspace/package roots, build/task entry points, test roots, CI, ownership files, licenses, submodules,
-      and nested repositories within scope.
-- [x] Every landmark includes a stable kind, path, detection reason, project-root association, and worktree
-      state. Unknown or conflicting files remain `unknown`; contents are read only within shared size/safety limits.
-- [x] Monorepo output groups landmarks and source recommendations by detected project root without inventing
-      dependencies between packages.
-- [x] Compact output returns a bounded, prioritized landmark set plus totals; the evidence profile can expose
-      the complete inventory through pagination.
-- [x] Focus paths and explicit exclusions apply consistently, and submodules/nested repositories are boundaries
-      unless the caller explicitly requests recursive analysis.
-
-**Verification:**
-
-- [x] Exercise Rust, Node/TypeScript, Python, Ruby, Java, .NET, and mixed-monorepo landmark fixtures.
-- [x] Assert AGENTS/README/build/test/CI/ownership priority and safe nested-repository/submodule behavior.
-- [x] `cargo fmt --check`
-- [x] `cargo test --all-features`
-- [x] `cargo clippy --all-targets --all-features -- -D warnings`
-
-## 16. Compare repository orientation across revisions
-
-**Priority:** P1 post-v1 navigation feature
-
-**What to build:** Let a user or agent compare two explicit repository states and see bounded changes to the
-evidence that should alter what they read next.
-
-**Blocked by:** Tickets 12, 14, 15, and 17
-
-**Acceptance criteria:**
-
-- [ ] `codeplat compare --base <REV> [--head <REV|worktree>] [PATH]` resolves and records both states without
-      checkout, hooks, filters, network, or target-repository mutation.
-- [ ] Markdown and JSON report added/removed/changed landmarks, public definitions, qualified lexical evidence,
-      history hotspots, ownership concentration, and recommended next reads with before/after provenance.
-- [ ] Rename and ambiguity handling is explicit. A ranking change includes its evidence delta rather than only
-      two opaque scores.
-- [ ] All collections obey compact/evidence profiles and limits; partial availability on either side is visible
-      and compatible with strict policy.
-- [ ] Comparison extends the normative schema and compatibility corpus without accepting Markdown as input.
-
-**Verification:**
-
-- Compare fixture revisions covering rename, public API change, manifest/test/CI change, and a dirty worktree.
-- Assert no checkout/worktree mutation and deterministic output for fixed object IDs.
-- `cargo fmt --check`
-- `cargo test --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-
-## 17. Ship a trustworthy distributable v1
-
-**Priority:** P0 final release gate
-
-**What to build:** Turn the integrated CLI into a supportable package with a minimal
-dependency/trust surface and reproducible cross-platform verification.
-
-**Blocked by:** Tickets 8 through 14
-
-**Acceptance criteria:**
-
-- [ ] `gix` disables default features and enables only the reviewed discovery/object/revision/index/status
-      capabilities Codeplat needs. `cargo tree -e features` is recorded, and executable/network/credential/
-      mutation surface is absent or unreachable with a regression proof.
-- [ ] Cargo metadata includes description, license, repository, README, Rust version, keywords, and categories;
-      the repository contains the selected license and documented install/uninstall/cache-cleanup instructions.
-- [ ] CI covers formatting, all-feature tests, Clippy with warnings denied, docs, package verification, JSON Schema
-      compatibility, dependency license/advisory policy, Linux, macOS, Windows, and the declared MSRV.
-- [ ] Dependency advisory, license/source, duplicate-version, and unused-capability policy is documented and
-      automated. Release artifacts have checksums and reproducible build instructions.
-- [ ] Help, README, roadmap, and support links match implemented Java/C# and deferred-language status; shell
-      completions and man pages are generated from Clap; broken pipes are quiet and exit behavior follows CLI conventions.
-- [ ] The current large map/report modules are separated along existing inventory, query, graph, budget, cache,
-      schema, and rendering responsibilities without changing the black-box contract or adding abstraction for its own sake.
-- [ ] The default Markdown and JSON briefings pass a manual usefulness review on a small project, Codeplat,
-      and a mixed-language monorepo. No known P0 finding is waived without a recorded rationale and expiry.
-
-**Verification:**
-
-- `cargo fmt --check`
+- Add compiled-CLI fixtures for a small project, focused task, Codeplat-like repository, and mixed monorepo.
+- Assert recommendation count, uniqueness, ordering, purpose, reasons, project-root coverage, and repeated-run
+  determinism in JSON.
+- Review Markdown manually for whether a new contributor can follow the proposed reading sequence.
+- `cargo fmt --all -- --check`
 - `cargo test --workspace --all-features`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo doc --workspace --all-features --no-deps`
-- `cargo package`
-- Inspect `cargo tree -e features -i gix`, packaged contents, release artifact checksums, completions, and man pages.
+
+## 19. Make the default history briefing concise and useful
+
+**What to build:** Replace exhaustive history tables in the default Markdown briefing with 3–5 distinct,
+evidence-backed observations, while preserving detailed history commands and machine evidence.
+
+**Blocked by:** None - can start immediately
+
+**Acceptance criteria:**
+
+- [ ] The default briefing selects at most five distinct observations across churn, contributors, bug overlap,
+      activity, and firefighting evidence; empty/noisy signals do not fill a quota.
+- [ ] Every observation states the supporting paths/counts/window and the existing caveat needed to avoid a
+      quality judgment.
+- [ ] Exhaustive churn paths, contributor tables, activity months, and commit lists are absent from default
+      Markdown and remain available through `history`, its focused subcommands, JSON, or `--profile evidence`.
+- [ ] The default Markdown briefing is materially shorter and places the reading plan before history detail.
+- [ ] Focused history Markdown/JSON behavior and schema compatibility remain intact.
+
+**Verification:**
+
+- Add semantic Markdown snapshots for no-history, sparse-history, concentrated-contributor, bug-overlap, and
+  firefighting fixtures.
+- Assert that the default emits 0–5 observations while focused commands retain their complete bounded evidence.
+- Manually compare small-project, Codeplat, and mixed-monorepo briefings before and after the change.
+- Run the standard workspace format, test, and Clippy commands.
+
+## 20. Keep generated, vendored, and minified source out of the default plan
+
+**What to build:** Classify low-value generated/vendor/minified source before parsing so it cannot consume default
+analysis limits, recommendations, or actionable quality status.
+
+**Blocked by:** None - can start immediately
+
+**Acceptance criteria:**
+
+- [ ] Deterministic rules cover conventional dependency/vendor/build directories, generated filenames/markers,
+      source maps, `.min.*` files, and a documented bounded minification heuristic.
+- [ ] Compact mode records typed totals and bounded samples but does not parse or recommend classified files,
+      including tracked files.
+- [ ] Exact focus paths and the evidence profile can include classified text files within existing safety and
+      resource limits; unsafe, binary, and oversize protections are never overridden.
+- [ ] Classification reason and override state are visible in Markdown/JSON and deterministic across runs.
+- [ ] A vendor/minified file cannot make an otherwise complete reading plan partial or consume the per-file symbol
+      budget.
+- [ ] Maintained source that resembles generated output has negative fixtures and an explicit recovery path.
+
+**Verification:**
+
+- Exercise tracked/untracked vendor directories, generated markers, minified JS, large generated Rust, false
+  positives, focus overrides, and evidence mode through the compiled CLI.
+- Assert lower analyzed-byte/symbol counts and unchanged maintained-source recommendations.
+- Run hostile-path/cache regressions to prove classification does not bypass safe reads.
+- Run the standard workspace format, test, and Clippy commands.
+
+## 21. Add first-class Go maps
+
+**What to build:** Give Go repositories the same bounded structural-map and reading-plan support as existing
+first-class languages.
+
+**Blocked by:** None - can start immediately
+
+**Acceptance criteria:**
+
+- [ ] A reviewed upstream Go Tree-sitter grammar and versioned query pack are registered with minimal features.
+- [ ] Definitions cover packages, functions, methods, types, structs, interfaces, fields, constants, variables,
+      and common test declarations with accurate locations and declaration context.
+- [ ] References/import evidence covers imports and aliases, calls, type uses, selectors, and same-package evidence
+      without claiming type resolution.
+- [ ] Exported capitalization, receiver scope, package context, `_test.go`, malformed input, generics, duplicate
+      names, and ambiguous candidates have positive and negative conformance fixtures.
+- [ ] Go participates in mixed-language ranking, capabilities, provenance, cache identity, limitations, Markdown,
+      and JSON; the generic reading-plan contract can consume its ranked evidence without language-specific logic.
+- [ ] README/help/roadmap language lists match implemented support.
+
+**Verification:**
+
+- Run `codeplat`, `codeplat map --json`, focused maps, and `capabilities --json` against Go and mixed fixtures.
+- Assert definitions, references, visibility, evidence reasons, ambiguity, ranked evidence, and partial behavior.
+- Run the standard workspace checks plus `cargo package --locked`.
+
+## 22. Add first-class Lua maps
+
+**What to build:** Give Lua repositories bounded structural maps that handle common module patterns without
+pretending dynamic name resolution is semantic.
+
+**Blocked by:** None - can start immediately
+
+**Acceptance criteria:**
+
+- [ ] A reviewed upstream Lua Tree-sitter grammar and versioned query pack are registered with minimal features.
+- [ ] Definitions cover local/global functions, method syntax, local variables, table fields, assignments, and
+      returned module tables where syntax provides reliable evidence.
+- [ ] References/import evidence covers calls, identifiers, field access, and literal `require` module paths;
+      dynamic `require` and metatable behavior are explicit limitations.
+- [ ] Dot/colon methods, nested scopes, module-return patterns, malformed input, duplicate names, and common
+      extensionless Lua entry files have positive and negative conformance fixtures.
+- [ ] Lua participates in mixed-language ranking, capabilities, provenance, cache identity, Markdown, and JSON
+      without cross-language bare-name fan-out; the generic reading-plan contract can consume its ranked evidence.
+- [ ] README/help/roadmap language lists match implemented support.
+
+**Verification:**
+
+- Run default, JSON map, focused, and capabilities commands against Lua and mixed fixtures.
+- Assert module evidence, scopes, declaration context, ambiguity, limitations, and ranked evidence.
+- Run the standard workspace checks plus `cargo package --locked`.
+
+## 23. Add first-class Zig maps
+
+**What to build:** Give Zig repositories bounded structural maps for declarations, imports, tests, and public API
+orientation.
+
+**Blocked by:** None - can start immediately
+
+**Acceptance criteria:**
+
+- [ ] A reviewed upstream Zig Tree-sitter grammar and versioned query pack are registered with minimal features.
+- [ ] Definitions cover functions, variables/constants, container types, fields, tests, and public declarations
+      with accurate locations, scopes, and declaration snippets.
+- [ ] References/import evidence covers calls, identifiers, field access, type uses, and literal `@import`
+      paths; compile-time and inferred semantics remain explicit limitations.
+- [ ] `pub`, nested containers, anonymous containers, error unions, generics/comptime syntax, malformed input,
+      duplicate names, and test blocks have positive and negative conformance fixtures.
+- [ ] Zig participates in mixed-language ranking, capabilities, provenance, cache identity, Markdown, and JSON;
+      the generic reading-plan contract can consume its ranked evidence without language-specific logic.
+- [ ] README/help/roadmap language lists match implemented support.
+
+**Verification:**
+
+- Run default, JSON map, focused, and capabilities commands against Zig and mixed fixtures.
+- Assert definitions, references, visibility, import evidence, limitations, and ranked evidence.
+- Run the standard workspace checks plus `cargo package --locked`.
+
+## 24. Make compact quality and strict policy actionable
+
+**What to build:** Separate expected compact projection from conditions that make a briefing materially unsafe or
+misleading, so normal bounded output does not look like a failed analysis.
+
+**Blocked by:** Tickets 18 and 20
+
+**Acceptance criteria:**
+
+- [ ] Collection summaries continue to expose totals, returned counts, truncation, and reasons for every bounded
+      collection.
+- [ ] Top-level quality distinguishes expected profile projection from resource exhaustion, stale evidence,
+      missing history, unsafe paths, unsupported relevant source, and partial recommended/focused files.
+- [ ] Unsupported or partial files outside the reading plan remain discoverable but do not automatically poison a
+      useful compact briefing.
+- [ ] `--strict` emits the typed report and exits 5 only for documented actionable degradation; evidence mode and
+      focused commands apply the same policy consistently.
+- [ ] The schema and golden corpus preserve existing meanings or deliberately advance the schema version if that
+      cannot be done additively.
+- [ ] Markdown limitations are concise, prioritized, and include the next useful command.
+
+**Verification:**
+
+- Add a quality-policy matrix covering compact projection, hard work limits, stale manual cache, missing objects,
+  irrelevant partial vendor files, partial recommended files, unsupported relevant source, and unsafe paths.
+- Assert report fields, strict exit status, stdout/stderr policy, and compatibility documents.
+- Run the full compiled CLI suite in compact/evidence and strict/non-strict modes.
+- Run the standard workspace format, test, Clippy, and docs commands.
+
+## 25. Enforce V1 scale and usefulness gates
+
+**What to build:** Turn the current resource ceilings and subjective release review into repeatable evidence that
+the default briefing stays fast, bounded, and useful on realistic repositories.
+
+**Blocked by:** Tickets 19, 20, 21, 22, 23, and 24
+
+**Acceptance criteria:**
+
+- [ ] CI-friendly benchmarks cover Codeplat, a large ignored/vendor tree, high-ambiguity sources, and synthetic
+      10k/100k-commit histories with documented latency and output ceilings.
+- [ ] Benchmark failures identify the exceeded work/output dimension and do not depend on network access or
+      private repositories.
+- [ ] A reusable release-review rubric checks reading-plan count/coverage/reasons, concise history, actionable
+      quality, stdout/stderr, and manual usefulness without reducing the result to one opaque score.
+- [ ] The release binary is rerun across the available first-party project corpus; only aggregate outcomes and
+      reproducible public/synthetic regressions are retained.
+- [ ] Small-project, Codeplat, and mixed-monorepo Markdown briefings pass recorded human review with no known P0
+      usability or correctness finding waived without rationale and expiry.
+
+**Verification:**
+
+- Run the benchmark harness under documented CI time and output ceilings.
+- Run every fixture in Markdown/JSON, compact/evidence, strict/non-strict, and relevant cache modes.
+- Run the release-binary project sweep and inspect aggregate failures, recommendation coverage, partial/unsupported
+  causes, maximum output, and unexpected stderr.
+- Run all standard workspace and package checks.
+
+## 26. Ship V1
+
+**What to build:** Produce the supportable V1 release only after every product, safety, performance, packaging,
+and platform gate is green.
+
+**Blocked by:** Ticket 25
+
+**Acceptance criteria:**
+
+- [ ] The default reading plan, concise history, generated/vendor handling, quality policy, and all ten language
+      families match README/help/schema/capabilities documentation.
+- [ ] Formatting, all-feature workspace tests, Clippy with warnings denied, docs, schema compatibility, package
+      verification, dependency policy, minimal `gix` features, generated assets, and benchmark gates pass.
+- [ ] Linux, macOS, Windows, and Rust 1.85 CI jobs pass on the release candidate.
+- [ ] Checksummed release archives are reproducible from the committed lockfile and install/uninstall/cache cleanup
+      instructions are verified.
+- [ ] No release blocker remains in this file. Any waived P0 finding has an owner, rationale, and expiry recorded
+      before release.
+
+**Verification:**
+
+- `cargo fmt --all -- --check`
+- `cargo check --workspace --all-targets --all-features`
+- `cargo test --workspace --all-features`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps`
+- `cargo package --locked`
+- `cargo release-assets` followed by generated completion/man-page existence checks
+- Inspect CI, benchmark results, package contents, feature tree, dependency policy, and artifact checksums.
+
+## Deferred after V1
+
+- Revision comparison between repository states.
+- F#, Elixir, C, and C++ language support.
+- Semantic-provider and framework-specific recommendations.
+
+## Frontier
+
+- Ticket 18: Build the default repository reading plan.
+- Ticket 19: Make the default history briefing concise and useful.
+- Ticket 20: Keep generated, vendored, and minified source out of the default plan.
+- Ticket 21: Add first-class Go maps.
+- Ticket 22: Add first-class Lua maps.
+- Ticket 23: Add first-class Zig maps.

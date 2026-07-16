@@ -1,0 +1,2 @@
+[alias]
+release-assets = "run --package xtask -- release-assets"

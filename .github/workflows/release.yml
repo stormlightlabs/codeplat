@@ -1,0 +1,67 @@
+name: Release artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo release-assets
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package Unix artifact
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          archive="codeplat-${{ matrix.target }}.tar.gz"
+          package="codeplat-${{ matrix.target }}"
+          mkdir -p "$package/assets"
+          cp "target/${{ matrix.target }}/release/codeplat" "$package/"
+          cp -R assets/completions assets/man "$package/assets/"
+          tar -czf "$archive" "$package"
+          shasum -a 256 "$archive" > "$archive.sha256"
+      - name: Package Windows artifact
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $archive = "codeplat-${{ matrix.target }}.zip"
+          $package = "codeplat-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "$package/assets" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/codeplat.exe" $package
+          Copy-Item -Recurse assets/completions, assets/man "$package/assets"
+          Compress-Archive -Path $package -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()
+          "$hash  $archive" | Set-Content -NoNewline "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codeplat-${{ matrix.target }}
+          path: |
+            codeplat-${{ matrix.target }}.${{ matrix.archive }}
+            codeplat-${{ matrix.target }}.${{ matrix.archive }}.sha256
+          if-no-files-found: error

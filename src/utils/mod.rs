@@ -1,7 +1,15 @@
 const SECONDS_PER_DAY: i64 = 86_400;
 
 pub fn escape_inline_code(input: &str) -> String {
-    sanitize_text(input).replace('`', "\\`")
+    sanitize_text(input).replace('`', "′")
+}
+
+pub fn inline_code_list(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| format!("`{}`", escape_inline_code(value)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn escape_markdown(input: &str) -> String {

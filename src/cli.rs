@@ -4,7 +4,9 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{ArgAction, ColorChoice, Parser, Subcommand, ValueEnum, builder::Styles, error::ErrorKind};
+use clap::{
+    ArgAction, ColorChoice, Command, CommandFactory, Parser, Subcommand, ValueEnum, builder::Styles, error::ErrorKind,
+};
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 
@@ -274,6 +276,11 @@ struct Cli {
         help = "Repository or subdirectory to analyze (default: current directory)."
     )]
     path: PathBuf,
+}
+
+/// Build the authoritative Clap command used by help, completions, and man pages.
+pub fn command() -> Command {
+    Cli::command()
 }
 
 impl From<Cli> for CommandRequest {

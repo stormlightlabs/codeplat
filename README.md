@@ -17,10 +17,16 @@ evidence family:
 
 ## Quick start
 
-Build the binary with Cargo:
+Install the published crate with Cargo:
 
 ```sh
-cargo build --release
+cargo install --locked codeplat
+```
+
+To build an exact source checkout instead, use the committed lockfile:
+
+```sh
+cargo build --locked --release
 ```
 
 Then run it from a Git worktree:
@@ -91,6 +97,8 @@ The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, J
 - a bounded ranked selection controlled by `--map-tokens` (default: 1,000)
 - parse errors, query-pack failures, grouped ambiguous lexical references, and
   unsupported/partial evidence per affected file
+- non-source landmarks, configuration, documentation, and assets as `non_source`
+  inventory omissions rather than unsupported programming-language evidence
 - analyzed and omitted counts, repository root, scope, query-pack provenance, and
   supplied exclusions.
 

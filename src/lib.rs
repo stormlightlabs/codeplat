@@ -6,4 +6,4 @@ mod report;
 mod security;
 mod utils;
 
-pub use cli::run;
+pub use cli::{command, run};

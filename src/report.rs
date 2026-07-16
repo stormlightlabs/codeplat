@@ -453,6 +453,7 @@ impl SymbolKind {
 pub enum OmissionReason {
     IgnoredUntracked,
     UnsupportedLanguage,
+    NonSource,
     ExplicitExclusion,
     CacheUnavailable,
     Symlink,
@@ -468,6 +469,7 @@ impl OmissionReason {
         match self {
             Self::IgnoredUntracked => "ignored_untracked",
             Self::UnsupportedLanguage => "unsupported_language",
+            Self::NonSource => "non_source",
             Self::ExplicitExclusion => "explicit_exclusion",
             Self::CacheUnavailable => "cache_unavailable",
             Self::Symlink => "symlink",
@@ -1229,6 +1231,15 @@ pub struct MapReport {
     pub project_roots: Vec<ProjectRoot>,
     #[serde(default)]
     pub collections: MapCollections,
+    /// Complete quality counts retained even when compact evidence samples are truncated.
+    #[serde(default)]
+    pub availability: MapAvailability,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapAvailability {
+    pub unsupported_paths: usize,
+    pub partial_files: usize,
 }
 
 impl MapReport {
@@ -2181,18 +2192,8 @@ fn report_quality(history: Option<&HistoryReport>, map: Option<&MapReport>) -> R
     });
     let incomplete =
         history.is_some_and(|report| report.provenance.completeness.status != HistoryCompletenessStatus::Complete);
-    let unsupported = map.is_some_and(|report| {
-        report
-            .omissions
-            .iter()
-            .any(|omission| omission.reason == OmissionReason::UnsupportedLanguage)
-    });
-    let partial = map.is_some_and(|report| {
-        report
-            .files
-            .iter()
-            .any(|file| file.status == FileAnalysisStatus::Partial)
-    });
+    let unsupported = map.is_some_and(|report| report.availability.unsupported_paths > 0);
+    let partial = map.is_some_and(|report| report.availability.partial_files > 0);
     let mut strict_issues = Vec::new();
     if stale {
         strict_issues.push(StrictIssue::Stale);

@@ -670,6 +670,8 @@ fn default_markdown_briefing_keeps_history_and_map_sections_readable() {
     }
     assert!(markdown.contains("Query packs:"));
     assert!(markdown.contains("Tree-sitter"));
+    assert!(markdown.contains("Bug keywords: `fix`, `bug`, `broken`"));
+    assert!(!markdown.contains("\\`, \\`"));
 }
 
 #[test]
@@ -1002,6 +1004,29 @@ fn strict_policy_renders_typed_partial_report_then_returns_analysis_failure() {
             .any(|issue| issue == "partial")
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("strict report policy rejected"));
+}
+
+#[test]
+fn strict_quality_uses_complete_counts_when_compact_samples_are_truncated() {
+    let fixture = FixtureRepository::new();
+    for index in 0..8 {
+        write_file(fixture.root.join(format!("a{index}.rs")), b"\0binary");
+    }
+    write_file(fixture.root.join("z.go"), b"package unsupported\n");
+
+    let output = fixture.run(&["map", "--strict", "--no-cache", "--json"]);
+    let value: Value = serde_json::from_slice(&output.stdout).expect("strict compact report is valid JSON");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(value["map"]["availability"]["unsupported_paths"], 1);
+    assert_eq!(value["quality"]["unsupported"], true);
+    assert!(
+        !value["map"]["omissions"]
+            .as_array()
+            .expect("bounded omission sample")
+            .iter()
+            .any(|omission| omission["reason"] == "unsupported_language")
+    );
 }
 
 #[test]
@@ -1423,7 +1448,7 @@ fn map_inventory_and_rust_findings_are_reported_semantically() {
     assert!(
         omissions
             .iter()
-            .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "unsupported_language" })
+            .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "non_source" })
     );
 
     let findings = value["map"]["findings"].as_array().expect("map findings");
@@ -2306,7 +2331,7 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     assert!(
         omissions
             .iter()
-            .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "unsupported_language" })
+            .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "non_source" })
     );
     assert!(
         json["map"]["findings"]
@@ -2473,7 +2498,7 @@ fn java_and_c_sharp_map_is_first_class_and_preserves_visibility_duplicates_and_l
     assert!(
         omissions
             .iter()
-            .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "unsupported_language" })
+            .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "non_source" })
     );
     assert!(
         !json["map"]["findings"]
