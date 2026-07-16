@@ -52,15 +52,17 @@ The Rust 2024 implementation already provides:
 - an integrated Markdown/JSON briefing plus focused `map`, `history`, `explain`, `cache`, `capabilities`, and
   `doctor` commands;
 - all five history evidence families, bounded compact/evidence profiles, typed provenance, schema-version-1
-  compatibility fixtures, repository landmarks, project roots, cache controls, and explainable lexical edges;
+  compatibility fixtures, concise typed history observations, repository landmarks, project roots, cache controls,
+  and explainable lexical edges;
 - first-class Rust, JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, and C# query packs;
 - hostile-path and external-filter defenses, no-follow worktree reads, restrictive `gix` features, bounded work
   and output, package metadata, generated completions/man pages, and cross-platform release CI configuration.
 
 A release-binary sweep across 53 first-party repositories completed without process failures or stderr output,
-but showed that technical robustness is ahead of product usability:
+and identified product-usability work that is being addressed incrementally:
 
-- the default Markdown spends too much space enumerating history before answering what to read;
+- the default Markdown now places the reading plan before up to five concise history observations; detailed history
+  remains available through focused commands, JSON, and the evidence profile;
 - only 41 ranked entries were returned across 53 reports, so many repositories received one recommendation or
   none;
 - compact truncation, unsupported source, and partial-file flags were common enough to obscure which reports

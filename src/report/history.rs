@@ -15,6 +15,8 @@ pub struct HistoryReport {
     pub collections: HistoryCollections,
     #[serde(default)]
     pub limitations: Vec<String>,
+    #[serde(default)]
+    pub observations: Vec<HistoryObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub churn: Option<ChurnReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25,6 +27,46 @@ pub struct HistoryReport {
     pub activity: Option<ActivityReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub firefighting: Option<FirefightingReport>,
+}
+
+/// A concise, evidence-backed signal selected for the integrated briefing.
+///
+/// The detailed history reports remain the source of truth. These variants
+/// carry only the bounded evidence needed to explain why an observation was
+/// selected, so Markdown and JSON can present the same typed projection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum HistoryObservation {
+    Churn {
+        paths: Vec<PathCount>,
+        window_days: u32,
+        caveat: String,
+    },
+    Contributors {
+        contributor: ContributorCount,
+        total_commits: usize,
+        window_days: Option<u32>,
+        caveat: String,
+    },
+    BugOverlap {
+        paths: Vec<PathCount>,
+        bug_commits: usize,
+        window_days: u32,
+        caveat: String,
+    },
+    Activity {
+        month: String,
+        commits: usize,
+        observed_months: usize,
+        observed_commits: usize,
+        caveat: String,
+    },
+    Firefighting {
+        commits: usize,
+        paths: Vec<PathCount>,
+        window_days: u32,
+        caveat: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

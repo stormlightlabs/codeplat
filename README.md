@@ -52,8 +52,8 @@ Git repository and keeps the selected scope inside that repository.
 ## Default briefing
 
 `codeplat [PATH]` starts with a repository overview and an ordered reading plan,
-then includes all five history diagnostics and the ranked source map in one
-versioned Markdown or JSON report.
+then includes up to five concise, evidence-backed history observations and the
+ranked source map in one versioned Markdown or JSON report.
 
 The source map accepts the same focus, token-budget, exclusion, cache, and color controls described below:
 

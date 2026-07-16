@@ -189,6 +189,49 @@ impl Render {
     }
 
     pub fn history_markdown(output: &mut String, history: &super::HistoryReport) {
+        Render::history_header(output, history);
+
+        if let Some(churn) = &history.churn {
+            Render::churn_markdown(output, churn);
+        }
+        if let Some(contributors) = &history.contributors {
+            Render::contributors_markdown(output, contributors);
+        }
+        if let Some(bugs) = &history.bugs {
+            Render::bugs_markdown(output, bugs);
+        }
+        if let Some(activity) = &history.activity {
+            Render::activity_markdown(output, activity);
+        }
+        if let Some(firefighting) = &history.firefighting {
+            Render::firefighting_markdown(output, firefighting);
+        }
+        Render::history_limitations(output, history);
+    }
+
+    pub fn history_briefing_markdown(output: &mut String, history: &super::HistoryReport) {
+        Render::history_header(output, history);
+        Render::section_heading(output, "History observations");
+        if history.observations.is_empty() {
+            writeln!(
+                output,
+                "No distinct observations were supported by the available history evidence."
+            )
+            .expect("writing to a string cannot fail");
+        } else {
+            for observation in &history.observations {
+                Render::history_observation(output, observation);
+            }
+        }
+        writeln!(
+            output,
+            "Detailed history evidence: use `codeplat history`, a focused history subcommand, `--profile evidence`, or `--json`."
+        )
+        .expect("writing to a string cannot fail");
+        Render::history_limitations(output, history);
+    }
+
+    fn history_header(output: &mut String, history: &super::HistoryReport) {
         writeln!(output).expect("writing to a string cannot fail");
         writeln!(output, "## History analysis").expect("writing to a string cannot fail");
         writeln!(output).expect("writing to a string cannot fail");
@@ -244,26 +287,87 @@ impl Render {
             )
             .expect("writing to a string cannot fail");
         }
+    }
 
-        if let Some(churn) = &history.churn {
-            Render::churn_markdown(output, churn);
-        }
-        if let Some(contributors) = &history.contributors {
-            Render::contributors_markdown(output, contributors);
-        }
-        if let Some(bugs) = &history.bugs {
-            Render::bugs_markdown(output, bugs);
-        }
-        if let Some(activity) = &history.activity {
-            Render::activity_markdown(output, activity);
-        }
-        if let Some(firefighting) = &history.firefighting {
-            Render::firefighting_markdown(output, firefighting);
-        }
+    fn history_limitations(output: &mut String, history: &super::HistoryReport) {
         for limitation in &history.limitations {
             writeln!(output, "- Limitation: {}", utils::sanitize_text(limitation))
                 .expect("writing to a string cannot fail");
         }
+    }
+
+    fn history_observation(output: &mut String, observation: &super::HistoryObservation) {
+        match observation {
+            super::HistoryObservation::Churn { paths, window_days, caveat } => {
+                writeln!(
+                    output,
+                    "- **Churn:** {} changed over the last {} days. Caveat: {}",
+                    Render::path_counts_inline(paths),
+                    window_days,
+                    utils::sanitize_text(caveat)
+                )
+                .expect("writing to a string cannot fail");
+            }
+            super::HistoryObservation::Contributors { contributor, total_commits, window_days, caveat } => {
+                let window = window_days.map_or_else(
+                    || "across observed history".to_owned(),
+                    |days| format!("in the recent {days}-day window"),
+                );
+                writeln!(
+                    output,
+                    "- **Contributor concentration:** {} authored {} of {} non-merge commits ({}%) {}. Caveat: {}",
+                    utils::sanitize_text(&contributor.name),
+                    contributor.commits,
+                    total_commits,
+                    contributor.share_percent,
+                    window,
+                    utils::sanitize_text(caveat)
+                )
+                .expect("writing to a string cannot fail");
+            }
+            super::HistoryObservation::BugOverlap { paths, bug_commits, window_days, caveat } => {
+                writeln!(
+                    output,
+                    "- **Bug/churn overlap:** {} overlapped across {} matching bug commits in the last {} days. Caveat: {}",
+                    Render::path_counts_inline(paths),
+                    bug_commits,
+                    window_days,
+                    utils::sanitize_text(caveat)
+                )
+                .expect("writing to a string cannot fail");
+            }
+            super::HistoryObservation::Activity { month, commits, observed_months, observed_commits, caveat } => {
+                writeln!(
+                    output,
+                    "- **Activity:** `{}` was the busiest observed month with {} commits across {} observed commits and {} months. Caveat: {}",
+                    utils::escape_inline_code(month),
+                    commits,
+                    observed_commits,
+                    observed_months,
+                    utils::sanitize_text(caveat)
+                )
+                .expect("writing to a string cannot fail");
+            }
+            super::HistoryObservation::Firefighting { commits, paths, window_days, caveat } => {
+                writeln!(
+                    output,
+                    "- **Firefighting language:** {} matching commits touched {} over the last {} days. Caveat: {}",
+                    commits,
+                    Render::path_counts_inline(paths),
+                    window_days,
+                    utils::sanitize_text(caveat)
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
+    }
+
+    fn path_counts_inline(paths: &[super::PathCount]) -> String {
+        paths
+            .iter()
+            .map(|path| format!("`{}` ({} commits)", utils::escape_inline_code(&path.path), path.commits))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     pub fn map_markdown(output: &mut String, map: &super::MapReport) {

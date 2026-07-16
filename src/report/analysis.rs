@@ -12,6 +12,17 @@ struct ReadingCandidate {
     confidence: ConfidenceTier,
 }
 
+struct ReadingCandidateInput {
+    purpose: ReadingPurpose,
+    path: String,
+    project_root: Option<String>,
+    evidence_kinds: BTreeSet<ReadingEvidenceKind>,
+    score: u64,
+    confidence: ConfidenceTier,
+    reason: String,
+    limitations: Vec<String>,
+}
+
 pub fn language_provenance(map: Option<&MapReport>) -> BTreeMap<String, LanguageProvenance> {
     let encountered = map.map(|report| &report.query_packs);
     map::language_capabilities()
@@ -148,20 +159,22 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
         }
         add_reading_candidate(
             &mut candidates,
-            ReadingPurpose::Architecture,
-            file.path.clone(),
-            root.clone(),
-            evidence,
-            rank_score,
-            if links > 0 { ConfidenceTier::High } else { ConfidenceTier::Medium },
-            if links > 0 {
-                format!(
-                    "qualified lexical edges connect this ranked source to {links} other file-level relationship(s)"
-                )
-            } else {
-                "the bounded source-map ranking retained this path as structural context".to_owned()
+            ReadingCandidateInput {
+                purpose: ReadingPurpose::Architecture,
+                path: file.path.clone(),
+                project_root: root.clone(),
+                evidence_kinds: evidence,
+                score: rank_score,
+                confidence: if links > 0 { ConfidenceTier::High } else { ConfidenceTier::Medium },
+                reason: if links > 0 {
+                    format!(
+                        "qualified lexical edges connect this ranked source to {links} other file-level relationship(s)"
+                    )
+                } else {
+                    "the bounded source-map ranking retained this path as structural context".to_owned()
+                },
+                limitations: file.limitations.clone(),
             },
-            file.limitations.clone(),
         );
 
         if let Some(rank) = rank
@@ -169,14 +182,16 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
         {
             add_reading_candidate(
                 &mut candidates,
-                ReadingPurpose::Architecture,
-                file.path.clone(),
-                root.clone(),
-                [ReadingEvidenceKind::Focus].into_iter().collect(),
-                2_000_000_000u64.saturating_add(rank.focus_matches as u64 * 1_000_000),
-                ConfidenceTier::High,
-                format!("an explicit focus matched this path {} time(s)", rank.focus_matches),
-                Vec::new(),
+                ReadingCandidateInput {
+                    purpose: ReadingPurpose::Architecture,
+                    path: file.path.clone(),
+                    project_root: root.clone(),
+                    evidence_kinds: [ReadingEvidenceKind::Focus].into_iter().collect(),
+                    score: 2_000_000_000u64.saturating_add(rank.focus_matches as u64 * 1_000_000),
+                    confidence: ConfidenceTier::High,
+                    reason: format!("an explicit focus matched this path {} time(s)", rank.focus_matches),
+                    limitations: Vec::new(),
+                },
             );
         }
     }
@@ -219,29 +234,33 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
         }
         add_reading_candidate(
             &mut candidates,
-            purpose,
-            landmark.path.clone(),
-            landmark.project_root.clone(),
-            evidence,
-            score.saturating_add(landmark.focus_matches as u64 * 1_000_000),
-            confidence,
-            format!("recognized {}: {}", landmark.kind.label(), landmark.reason),
-            Vec::new(),
+            ReadingCandidateInput {
+                purpose,
+                path: landmark.path.clone(),
+                project_root: landmark.project_root.clone(),
+                evidence_kinds: evidence,
+                score: score.saturating_add(landmark.focus_matches as u64 * 1_000_000),
+                confidence,
+                reason: format!("recognized {}: {}", landmark.kind.label(), landmark.reason),
+                limitations: Vec::new(),
+            },
         );
         if landmark.focus_matches > 0 {
             add_reading_candidate(
                 &mut candidates,
-                purpose,
-                landmark.path.clone(),
-                landmark.project_root.clone(),
-                [ReadingEvidenceKind::Focus].into_iter().collect(),
-                2_000_000_000u64.saturating_add(landmark.focus_matches as u64 * 1_000_000),
-                ConfidenceTier::High,
-                format!(
-                    "an explicit focus matched this landmark {} time(s)",
-                    landmark.focus_matches
-                ),
-                Vec::new(),
+                ReadingCandidateInput {
+                    purpose,
+                    path: landmark.path.clone(),
+                    project_root: landmark.project_root.clone(),
+                    evidence_kinds: [ReadingEvidenceKind::Focus].into_iter().collect(),
+                    score: 2_000_000_000u64.saturating_add(landmark.focus_matches as u64 * 1_000_000),
+                    confidence: ConfidenceTier::High,
+                    reason: format!(
+                        "an explicit focus matched this landmark {} time(s)",
+                        landmark.focus_matches
+                    ),
+                    limitations: Vec::new(),
+                },
             );
         }
     }
@@ -266,14 +285,16 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
                 }
                 add_reading_candidate(
                     &mut candidates,
-                    ReadingPurpose::Tests,
-                    file.path.clone(),
-                    landmark.project_root.clone(),
-                    evidence,
-                    1_500_000_000u64.saturating_add(rank_score),
-                    ConfidenceTier::High,
-                    format!("the path is inside the recognized test root {}", landmark.path),
-                    file.limitations.clone(),
+                    ReadingCandidateInput {
+                        purpose: ReadingPurpose::Tests,
+                        path: file.path.clone(),
+                        project_root: landmark.project_root.clone(),
+                        evidence_kinds: evidence,
+                        score: 1_500_000_000u64.saturating_add(rank_score),
+                        confidence: ConfidenceTier::High,
+                        reason: format!("the path is inside the recognized test root {}", landmark.path),
+                        limitations: file.limitations.clone(),
+                    },
                 );
             }
         }
@@ -286,16 +307,18 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
             }
             add_reading_candidate(
                 &mut candidates,
-                ReadingPurpose::StartHere,
-                manifest.clone(),
-                Some(root.path.clone()),
-                [ReadingEvidenceKind::Landmark, ReadingEvidenceKind::ProjectTopology]
-                    .into_iter()
-                    .collect(),
-                3_000_000_000,
-                ConfidenceTier::High,
-                format!("project root manifest for the {} root", root.kind.label()),
-                Vec::new(),
+                ReadingCandidateInput {
+                    purpose: ReadingPurpose::StartHere,
+                    path: manifest.clone(),
+                    project_root: Some(root.path.clone()),
+                    evidence_kinds: [ReadingEvidenceKind::Landmark, ReadingEvidenceKind::ProjectTopology]
+                        .into_iter()
+                        .collect(),
+                    score: 3_000_000_000,
+                    confidence: ConfidenceTier::High,
+                    reason: format!("project root manifest for the {} root", root.kind.label()),
+                    limitations: Vec::new(),
+                },
             );
         }
     }
@@ -344,14 +367,16 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
             let root = crate::landmarks::project_root_for_path(&file.path, &evidence.project_roots);
             add_reading_candidate(
                 &mut candidates,
-                ReadingPurpose::SupportingContext,
-                path,
-                root,
-                [ReadingEvidenceKind::HistoryOverlap].into_iter().collect(),
-                400_000_000u64.saturating_add(commits as u64 * 100_000),
-                ConfidenceTier::Medium,
-                format!("firefighting-language commits touched this path {} time(s)", commits),
-                file.limitations.clone(),
+                ReadingCandidateInput {
+                    purpose: ReadingPurpose::SupportingContext,
+                    path,
+                    project_root: root,
+                    evidence_kinds: [ReadingEvidenceKind::HistoryOverlap].into_iter().collect(),
+                    score: 400_000_000u64.saturating_add(commits as u64 * 100_000),
+                    confidence: ConfidenceTier::Medium,
+                    reason: format!("firefighting-language commits touched this path {} time(s)", commits),
+                    limitations: file.limitations.clone(),
+                },
             );
         }
     }
@@ -620,12 +645,11 @@ pub fn explain_report(target: &str, map: &MapReport, history: &HistoryReport) ->
     }
 }
 
-/// FIXME
 fn add_reading_candidate(
-    candidates: &mut BTreeMap<(ReadingPurpose, String), ReadingCandidate>, purpose: ReadingPurpose, path: String,
-    project_root: Option<String>, evidence_kinds: BTreeSet<ReadingEvidenceKind>, score: u64,
-    confidence: ConfidenceTier, reason: String, limitations: Vec<String>,
+    candidates: &mut BTreeMap<(ReadingPurpose, String), ReadingCandidate>, input: ReadingCandidateInput,
 ) {
+    let ReadingCandidateInput { purpose, path, project_root, evidence_kinds, score, confidence, reason, limitations } =
+        input;
     if path.is_empty() {
         return;
     }
@@ -665,14 +689,16 @@ fn add_history_candidate(
     let root = crate::landmarks::project_root_for_path(&file.path, project_roots);
     add_reading_candidate(
         candidates,
-        ReadingPurpose::SupportingContext,
-        file.path.clone(),
-        root,
-        [ReadingEvidenceKind::HistoryOverlap].into_iter().collect(),
-        600_000_000u64.saturating_add(commits as u64 * 100_000),
-        ConfidenceTier::Medium,
-        reason,
-        file.limitations.clone(),
+        ReadingCandidateInput {
+            purpose: ReadingPurpose::SupportingContext,
+            path: file.path.clone(),
+            project_root: root,
+            evidence_kinds: [ReadingEvidenceKind::HistoryOverlap].into_iter().collect(),
+            score: 600_000_000u64.saturating_add(commits as u64 * 100_000),
+            confidence: ConfidenceTier::Medium,
+            reason,
+            limitations: file.limitations.clone(),
+        },
     );
 }
 

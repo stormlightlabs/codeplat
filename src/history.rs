@@ -216,6 +216,7 @@ pub fn analyze(
             firefighting_commits: CollectionSummary::complete(0),
         },
         limitations,
+        observations: Vec::new(),
         churn,
         contributors,
         bugs,
@@ -223,7 +224,109 @@ pub fn analyze(
         firefighting,
     };
     bound_history(&mut report, ReportLimits::for_profile(profile));
+    if operation.is_none() {
+        report.observations = briefing_observations(&report);
+    }
     Ok(report)
+}
+
+fn briefing_observations(report: &HistoryReport) -> Vec<HistoryObservation> {
+    let mut observations = Vec::new();
+
+    if let Some(churn) = &report.churn {
+        let useful = churn.paths.first().is_some_and(|path| path.commits >= 2) || churn.paths.len() >= 2;
+        if useful {
+            observations.push(HistoryObservation::Churn {
+                paths: churn.paths.iter().take(3).cloned().collect(),
+                window_days: churn.window_days,
+                caveat: first_caveat(&churn.caveats),
+            });
+        }
+    }
+
+    if let Some(contributors) = &report.contributors {
+        let use_recent = contributors
+            .recent
+            .first()
+            .is_some_and(|contributor| contributor.commits >= 2);
+        let selected = if use_recent { &contributors.recent } else { &contributors.overall };
+        let total_commits = selected.iter().map(|contributor| contributor.commits).sum();
+        let selected_truncated = if use_recent {
+            report.collections.contributors_recent.truncated
+        } else {
+            report.collections.contributors_overall.truncated
+        };
+        if !selected_truncated
+            && selected.first().is_some_and(|contributor| contributor.commits >= 2)
+            && total_commits >= 2
+        {
+            observations.push(HistoryObservation::Contributors {
+                contributor: selected[0].clone(),
+                total_commits,
+                window_days: use_recent.then_some(contributors.recent_window_days),
+                caveat: first_caveat(&contributors.caveats),
+            });
+        }
+    }
+
+    if let Some(bugs) = &report.bugs {
+        let bug_commits = report.collections.bug_commits.total;
+        if !bugs.overlap_paths.is_empty() && bug_commits > 0 {
+            observations.push(HistoryObservation::BugOverlap {
+                paths: bugs.overlap_paths.iter().take(3).cloned().collect(),
+                bug_commits,
+                window_days: bugs.window_days,
+                caveat: first_caveat(&bugs.caveats),
+            });
+        }
+    }
+
+    if let Some(activity) = &report.activity {
+        let observed_commits = activity.months.iter().map(|month| month.commits).sum();
+        if !report.collections.activity_months.truncated
+            && activity.months.len() >= 2
+            && observed_commits >= 3
+            && let Some(busiest) = activity.months.iter().max_by(|left, right| {
+                left.commits
+                    .cmp(&right.commits)
+                    .then_with(|| left.month.cmp(&right.month))
+            })
+        {
+            observations.push(HistoryObservation::Activity {
+                month: busiest.month.clone(),
+                commits: busiest.commits,
+                observed_months: activity.months.len(),
+                observed_commits,
+                caveat: first_caveat(&activity.caveats),
+            });
+        }
+    }
+
+    if let Some(firefighting) = &report.firefighting {
+        if !firefighting.commits.is_empty() {
+            let mut counts = BTreeMap::new();
+            for commit in &firefighting.commits {
+                for path in &commit.paths {
+                    *counts.entry(path.clone()).or_insert(0) += 1;
+                }
+            }
+            observations.push(HistoryObservation::Firefighting {
+                commits: report.collections.firefighting_commits.total,
+                paths: path_counts(counts).into_iter().take(3).collect(),
+                window_days: firefighting.window_days,
+                caveat: first_caveat(&firefighting.caveats),
+            });
+        }
+    }
+
+    observations
+}
+
+fn first_caveat(caveats: &[String]) -> String {
+    caveats
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "Evidence is descriptive, not a quality judgment.".to_owned())
 }
 
 fn bound_history(report: &mut HistoryReport, limits: ReportLimits) {

@@ -1234,7 +1234,11 @@ impl Report {
                 Render::reading_plan_markdown(&mut output, reading_plan);
             }
             if let Some(history) = &self.history {
-                Render::history_markdown(&mut output, history);
+                if self.profile == AnalysisProfile::Compact {
+                    Render::history_briefing_markdown(&mut output, history);
+                } else {
+                    Render::history_markdown(&mut output, history);
+                }
             }
             if let Some(map) = &self.map {
                 Render::map_markdown(&mut output, map);

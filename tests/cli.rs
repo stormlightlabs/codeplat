@@ -684,11 +684,7 @@ fn default_markdown_briefing_keeps_history_and_map_sections_readable() {
     assert!(markdown.contains("Status: Analyzed"));
     for section in [
         "## History analysis",
-        "### Churn hotspots",
-        "### Contributor concentration",
-        "### Bug-related clusters",
-        "### Monthly activity",
-        "### Firefighting commits",
+        "### History observations",
         "## Source map",
         "### Ranked map selection",
         "### Map limitations",
@@ -713,6 +709,46 @@ fn default_markdown_briefing_keeps_history_and_map_sections_readable() {
         "default recommendations: {default_recommendations:?}"
     );
     assert!(!markdown.contains("\\`, \\`"));
+}
+
+#[test]
+fn default_briefing_history_is_concise_while_detailed_modes_remain_available() {
+    let fixture = HistoryFixtureRepository::new();
+    let concise = fixture.run(&["--no-cache"]);
+    let concise_markdown = stdout(&concise);
+
+    assert!(concise.status.success());
+    assert!(concise.stderr.is_empty());
+    assert!(concise_markdown.contains("### History observations"));
+    assert!(!concise_markdown.contains("### Churn hotspots"));
+    assert!(!concise_markdown.contains("### Contributor concentration"));
+    assert!(!concise_markdown.contains("### Monthly activity"));
+    assert!(!concise_markdown.contains("#### Evidence commits"));
+    let observation_count = concise_markdown.lines().filter(|line| line.starts_with("- **")).count();
+    assert!(observation_count <= 5, "observations: {observation_count}");
+    assert!(concise_markdown.find("## Reading plan").unwrap() < concise_markdown.find("## History analysis").unwrap());
+
+    let json = fixture.run(&["--no-cache", "--json"]);
+    let value: Value = serde_json::from_slice(&json.stdout).expect("valid concise briefing JSON");
+    let observations = value["history"]["observations"]
+        .as_array()
+        .expect("history observations");
+    assert!(observations.len() <= 5);
+    assert!(observations.iter().all(|observation| observation["kind"].is_string()));
+
+    let focused = fixture.run(&["--no-cache", "history"]);
+    let focused_markdown = stdout(&focused);
+    assert!(focused.status.success());
+    assert!(focused_markdown.contains("### Churn hotspots"));
+    assert!(focused_markdown.contains("### Contributor concentration"));
+    assert!(focused_markdown.contains("### Monthly activity"));
+    assert!(focused_markdown.contains("#### Evidence commits"));
+
+    let evidence = fixture.run(&["--profile", "evidence", "--no-cache"]);
+    let evidence_markdown = stdout(&evidence);
+    assert!(evidence.status.success());
+    assert!(evidence_markdown.contains("### Churn hotspots"));
+    assert!(evidence_markdown.contains("### Monthly activity"));
 }
 
 #[test]

@@ -13,7 +13,7 @@
 Earlier completed tickets established the CLI/report contract, five history signals, seven language families,
 cache modes, bounded lexical maps, the integrated briefing, the evidence-backed default reading plan,
 hostile-repository containment, report provenance/schema fixtures, history correctness, explainable lexical
-evidence, and repository landmarks/topology.
+evidence, repository landmarks/topology, and the concise default history briefing.
 
 The packaging work added metadata/licensing, minimal `gix` features, dependency policy, cross-platform/MSRV CI,
 checksummed artifacts, generated completions/man pages, and release documentation.
@@ -39,16 +39,6 @@ than a flat ranked winner and long diagnostic sections. The same typed reading p
       schema compatibility corpus without changing existing field meanings.
 - [x] `map` and `explain` remain focused evidence tools and existing callers do not need to parse Markdown.
 
-**Verification:**
-
-- [x] Add compiled-CLI fixtures for a small project, focused task, Codeplat-like repository, and mixed monorepo.
-- [x] Assert recommendation count, uniqueness, ordering, purpose, reasons, project-root coverage, and repeated-run
-      determinism in JSON.
-- [x] Review Markdown manually for whether a new contributor can follow the proposed reading sequence.
-- [x] `cargo fmt --all -- --check`
-- [x] `cargo test --workspace --all-targets`
-- [x] `cargo clippy --workspace --all-targets -- -D warnings`
-
 ## 19. Make the default history briefing concise and useful
 
 **What to build:** Replace exhaustive history tables in the default Markdown briefing with 3–5 distinct,
@@ -58,22 +48,14 @@ evidence-backed observations, while preserving detailed history commands and mac
 
 **Acceptance criteria:**
 
-- [ ] The default briefing selects at most five distinct observations across churn, contributors, bug overlap,
+- [x] The default briefing selects at most five distinct observations across churn, contributors, bug overlap,
       activity, and firefighting evidence; empty/noisy signals do not fill a quota.
-- [ ] Every observation states the supporting paths/counts/window and the existing caveat needed to avoid a
+- [x] Every observation states the supporting paths/counts/window and the existing caveat needed to avoid a
       quality judgment.
-- [ ] Exhaustive churn paths, contributor tables, activity months, and commit lists are absent from default
+- [x] Exhaustive churn paths, contributor tables, activity months, and commit lists are absent from default
       Markdown and remain available through `history`, its focused subcommands, JSON, or `--profile evidence`.
-- [ ] The default Markdown briefing is materially shorter and places the reading plan before history detail.
-- [ ] Focused history Markdown/JSON behavior and schema compatibility remain intact.
-
-**Verification:**
-
-- Add semantic Markdown snapshots for no-history, sparse-history, concentrated-contributor, bug-overlap, and
-  firefighting fixtures.
-- Assert that the default emits 0–5 observations while focused commands retain their complete bounded evidence.
-- Manually compare small-project, Codeplat, and mixed-monorepo briefings before and after the change.
-- Run the standard workspace format, test, and Clippy commands.
+- [x] The default Markdown briefing is materially shorter and places the reading plan before history detail.
+- [x] Focused history Markdown/JSON behavior and schema compatibility remain intact.
 
 ## 20. Keep generated, vendored, and minified source out of the default plan
 
@@ -276,7 +258,6 @@ and platform gate is green.
 
 ## Frontier
 
-- Ticket 19: Make the default history briefing concise and useful.
 - Ticket 20: Keep generated, vendored, and minified source out of the default plan.
 - Ticket 21: Add first-class Go maps.
 - Ticket 22: Add first-class Lua maps.
