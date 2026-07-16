@@ -3,7 +3,7 @@
 ## Release blockers
 
 - Generated, vendored, and minified source can still consume analysis limits and degrade recommendations.
-- Lua and Zig do not yet have first-class structural-map support.
+- Zig does not yet have first-class structural-map support.
 - Scale benchmarks do not yet enforce latency/output ceilings for ignored trees, high ambiguity, and deep history.
 - The configured Linux, macOS, Windows, Rust 1.85, and dependency-policy jobs need a green release-candidate run.
 
@@ -119,16 +119,16 @@ pretending dynamic name resolution is semantic.
 
 **Acceptance criteria:**
 
-- [ ] A reviewed upstream Lua Tree-sitter grammar and versioned query pack are registered with minimal features.
-- [ ] Definitions cover local/global functions, method syntax, local variables, table fields, assignments, and
+- [x] A reviewed upstream Lua Tree-sitter grammar and versioned query pack are registered with minimal features.
+- [x] Definitions cover local/global functions, method syntax, local variables, table fields, assignments, and
       returned module tables where syntax provides reliable evidence.
-- [ ] References/import evidence covers calls, identifiers, field access, and literal `require` module paths;
+- [x] References/import evidence covers calls, identifiers, field access, and literal `require` module paths;
       dynamic `require` and metatable behavior are explicit limitations.
-- [ ] Dot/colon methods, nested scopes, module-return patterns, malformed input, duplicate names, and common
+- [x] Dot/colon methods, nested scopes, module-return patterns, malformed input, duplicate names, and common
       extensionless Lua entry files have positive and negative conformance fixtures.
-- [ ] Lua participates in mixed-language ranking, capabilities, provenance, cache identity, Markdown, and JSON
+- [x] Lua participates in mixed-language ranking, capabilities, provenance, cache identity, Markdown, and JSON
       without cross-language bare-name fan-out; the generic reading-plan contract can consume its ranked evidence.
-- [ ] README/help/roadmap language lists match implemented support.
+- [x] README/help/roadmap language lists match implemented support.
 
 **Verification:**
 
@@ -257,5 +257,4 @@ and platform gate is green.
 
 ## Frontier
 
-- Ticket 22: Add first-class Lua maps.
 - Ticket 23: Add first-class Zig maps.

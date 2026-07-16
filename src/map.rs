@@ -32,9 +32,9 @@ use cache::{collect_cache_files, prune_cache_directory};
 use cache::{CacheStats, CacheStore};
 use graph::{build_lexical_edges, rank_files, select_snippets};
 use languages::{
-    c_sharp_language, extension_for_path, go_language, is_source_like_path, java_language, javascript_language,
-    python_language, ruby_language, rust_language, support_for_path, supported_query_packs, tsx_language,
-    typescript_language,
+    c_sharp_language, extension_for_path, go_language, is_extensionless_lua_entry_candidate, is_source_like_path,
+    java_language, javascript_language, lua_language, lua_support_for_entry_source, python_language, ruby_language,
+    rust_language, support_for_path, supported_query_packs, tsx_language, typescript_language,
 };
 use parser::*;
 use repository::*;
@@ -214,6 +214,15 @@ const GO_DECLARATION_KINDS: &[&str] = &[
 
 const GO_SCOPE_KINDS: &[&str] = &["function_declaration", "method_declaration", "type_spec", "type_alias"];
 
+const LUA_DECLARATION_KINDS: &[&str] = &[
+    "function_declaration",
+    "variable_declaration",
+    "assignment_statement",
+    "field",
+];
+
+const LUA_SCOPE_KINDS: &[&str] = &["function_declaration", "function_definition"];
+
 const RUST_SUPPORT: LanguageSupport = LanguageSupport {
     language: SourceLanguage::Rust,
     extensions: &["rs"],
@@ -324,6 +333,17 @@ const GO_SUPPORT: LanguageSupport = LanguageSupport {
     scope_kinds: GO_SCOPE_KINDS,
 };
 
+const LUA_SUPPORT: LanguageSupport = LanguageSupport {
+    language: SourceLanguage::Lua,
+    extensions: &["lua", "rockspec"],
+    query_pack: "lua-v1",
+    grammar: lua_language,
+    definitions: include_str!("queries/lua/definitions.scm"),
+    references: include_str!("queries/lua/references.scm"),
+    declaration_kinds: LUA_DECLARATION_KINDS,
+    scope_kinds: LUA_SCOPE_KINDS,
+};
+
 const LANGUAGE_SUPPORT: &[LanguageSupport] = &[
     RUST_SUPPORT,
     JAVASCRIPT_SUPPORT,
@@ -335,6 +355,7 @@ const LANGUAGE_SUPPORT: &[LanguageSupport] = &[
     JAVA_SUPPORT,
     C_SHARP_SUPPORT,
     GO_SUPPORT,
+    LUA_SUPPORT,
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -752,6 +773,7 @@ fn grammar_name(language: SourceLanguage) -> &'static str {
         SourceLanguage::Java => "tree-sitter-java",
         SourceLanguage::CSharp => "tree-sitter-c-sharp",
         SourceLanguage::Go => "tree-sitter-go",
+        SourceLanguage::Lua => "tree-sitter-lua",
     }
 }
 
@@ -765,6 +787,7 @@ fn grammar_version(language: SourceLanguage) -> &'static str {
         SourceLanguage::Java => "0.23.5",
         SourceLanguage::CSharp => "0.23.5",
         SourceLanguage::Go => "0.25.0",
+        SourceLanguage::Lua => "0.5.0",
     }
 }
 

@@ -54,7 +54,7 @@ The Rust 2024 implementation already provides:
 - all five history evidence families, bounded compact/evidence profiles, typed provenance, schema-version-1
   compatibility fixtures, concise typed history observations, repository landmarks, project roots, cache controls,
   and explainable lexical edges;
-- first-class Rust, JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, C#, and Go query packs;
+- first-class Rust, JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, C#, Go, and Lua query packs;
 - hostile-path and external-filter defenses, no-follow worktree reads, restrictive `gix` features, bounded work
   and output, package metadata, generated completions/man pages, and cross-platform release CI configuration.
 

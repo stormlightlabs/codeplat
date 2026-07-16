@@ -7,7 +7,7 @@ It produces an integrated briefing, or a focused report when you need only one
 evidence family:
 
 - `codeplat map` inventories the current worktree and extracts structural maps for
-  Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, C#, and Go files.
+  Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, C#, Go, and Lua files.
 - `codeplat history` summarizes five Git-history signals
   1. churn
   2. contributors
@@ -85,13 +85,17 @@ highest-ranked snippet or summaries.
 
 ### `codeplat map [OPTIONS] [PATH]`
 
-The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, C#, and Go source files. It reports:
+The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, C#, Go, and Lua source files.
+
+An exact focus path can also include a classified `bin/` entry within the normal safety limits. It reports:
 
 - tracked, modified, and untracked worktree state
 - the selected language variant and file extension (`javascript_jsx` and `typescript_tsx` are explicit)
 - definitions and lexical references with symbol kind, visibility, syntactic
   evidence, enclosing scope, 1-based source locations, and compact declaration context
 - Go package and receiver scopes, import aliases, exported visibility, and `_test.go` declarations
+- Lua local and global functions, dot and colon methods, variables, assignments, table fields, calls, and literal
+  `require` module paths
 - language- and import-aware lexical file edges with a resolution reason,
   confidence tier, candidate-group identity, and deterministic centrality ranking
 - optional explicit `--focus` and `--focus-path` boosts
@@ -106,6 +110,9 @@ The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, J
   inventory omissions rather than unsupported programming-language evidence
 - analyzed and omitted counts, repository root, scope, query-pack provenance, and
   supplied exclusions.
+
+Lua module evidence is lexical. Literal `require("module.path")` calls can support file edges, but dynamic
+`require` arguments, metatable behavior, and runtime table mutation are reported as limitations rather than resolved.
 
 Exclusions can be repeated:
 

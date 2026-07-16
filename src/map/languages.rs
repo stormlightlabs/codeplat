@@ -36,11 +36,46 @@ pub fn go_language() -> tree_sitter::Language {
     tree_sitter_go::LANGUAGE.into()
 }
 
+pub fn lua_language() -> tree_sitter::Language {
+    tree_sitter_lua::LANGUAGE.into()
+}
+
 pub fn support_for_path(path: &Path) -> Option<&'static LanguageSupport> {
+    let filename = path.file_name()?.to_str()?;
+    if matches!(filename, ".busted" | ".luacheckrc") {
+        return Some(&LUA_SUPPORT);
+    }
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     LANGUAGE_SUPPORT
         .iter()
         .find(|support| support.extensions.contains(&extension.as_str()))
+}
+
+pub fn is_extensionless_lua_entry_candidate(path: &Path) -> bool {
+    path.extension().is_none()
+        && path
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+            .any(|component| matches!(component.as_os_str().to_str(), Some("bin" | "scripts")))
+}
+
+pub fn lua_support_for_entry_source(path: &Path, source: &str) -> Option<&'static LanguageSupport> {
+    if !is_extensionless_lua_entry_candidate(path) {
+        return None;
+    }
+    let shebang = source.lines().next()?.strip_prefix("#!")?;
+    shebang
+        .split_whitespace()
+        .map(|part| part.rsplit('/').next().unwrap_or(part))
+        .any(|interpreter| {
+            interpreter == "lua"
+                || interpreter == "luajit"
+                || interpreter
+                    .strip_prefix("lua")
+                    .is_some_and(|version| version.starts_with(|character: char| character.is_ascii_digit()))
+        })
+        .then_some(&LUA_SUPPORT)
 }
 
 pub fn is_source_like_path(path: &Path) -> bool {

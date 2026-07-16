@@ -25,7 +25,7 @@ pub fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edge
                 file.symbols
                     .iter()
                     .filter(|symbol| symbol.role == SymbolRole::Definition && symbol.evidence == SymbolEvidence::Import)
-                    .map(|symbol| (symbol.name.clone(), import_module_hints(&symbol.context)))
+                    .map(|symbol| (symbol.name.clone(), import_module_hints(&symbol.context, file.language)))
                     .collect::<Vec<_>>(),
             )
         })
@@ -321,7 +321,7 @@ fn is_graph_reference(symbol: &SourceSymbol) -> bool {
         && !is_generic_name(&symbol.name)
 }
 
-fn import_module_hints(context: &str) -> Vec<String> {
+fn import_module_hints(context: &str, language: SourceLanguage) -> Vec<String> {
     let mut hints = Vec::new();
     let mut quoted = None;
     for quote in ['"', '\''] {
@@ -333,7 +333,11 @@ fn import_module_hints(context: &str) -> Vec<String> {
         }
     }
     if let Some(value) = quoted {
-        hints.push(normalize_module_hint(&value));
+        let normalized = normalize_module_hint(&value);
+        hints.push(normalized.clone());
+        if language == SourceLanguage::Lua && normalized.contains('.') {
+            hints.push(normalized.replace('.', "/"));
+        }
     }
     let words = context.split_whitespace().collect::<Vec<_>>();
     if let Some(index) = words.iter().position(|word| *word == "from")
@@ -369,6 +373,8 @@ fn normalize_module_hint(value: &str) -> String {
         .trim_end_matches(".java")
         .trim_end_matches(".cs")
         .trim_end_matches(".go")
+        .trim_end_matches(".lua")
+        .trim_end_matches(".rockspec")
         .replace("::", "/")
         .trim_matches('/')
         .to_ascii_lowercase()

@@ -281,7 +281,8 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 continue;
             }
         }
-        let Some(support) = support_for_path(Path::new(&path)) else {
+        let path_support = support_for_path(Path::new(&path));
+        if path_support.is_none() && !is_extensionless_lua_entry_candidate(Path::new(&path)) {
             let source_like = is_source_like_path(Path::new(&path));
             let mut path_omission = omission(
                 path,
@@ -296,7 +297,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             path_omission.classification_overridden = overridden;
             omissions.push(path_omission);
             continue;
-        };
+        }
         let source = match security::read_worktree_file_limited(
             repository_root,
             &scope.selected_path,
@@ -352,6 +353,17 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 omissions.push(path_omission);
                 continue;
             }
+        };
+        let Some(support) = path_support.or_else(|| lua_support_for_entry_source(Path::new(&path), source_text)) else {
+            let mut path_omission = omission(
+                path,
+                OmissionReason::NonSource,
+                "The extensionless entry file does not use a recognized Lua or LuaJIT shebang; it was inventoried but not parsed.",
+            );
+            path_omission.classifications = classifications;
+            path_omission.classification_overridden = overridden;
+            omissions.push(path_omission);
+            continue;
         };
         classifications.extend(source_classifications(&path, source_text));
         classifications.sort_by(|left, right| left.kind.cmp(&right.kind).then_with(|| left.reason.cmp(&right.reason)));
@@ -504,7 +516,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 .to_owned(),
             "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
                 .to_owned(),
-            "JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, C#, and Go use explicit grammar variants; query-pack provenance is reported per language."
+            "JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, C#, Go, and Lua use explicit grammar variants; query-pack provenance is reported per language."
                 .to_owned(),
             "Tracked files are eligible even when ignore rules match them, except deterministic generated/vendor/minified classifications; exact focus paths can opt in within the safety limits."
                 .to_owned(),

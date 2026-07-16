@@ -453,6 +453,124 @@ fn malformed_go_is_partial_and_test_declarations_remain_available() {
 }
 
 #[test]
+fn lua_query_pack_extracts_modules_declarations_references_and_scopes() {
+    let source = br#"
+local helper = require("app.helper")
+local M = { version = 1 }
+local local_value = 2
+local declared_only
+global_value = 3
+
+local function build(value)
+    local nested = value
+    return helper.transform(nested)
+end
+
+function M.run(value)
+    return build(value)
+end
+
+function M:render()
+    return self:run(global_value)
+end
+
+M.assigned = function(value)
+    return value
+end
+
+return {
+    create = build,
+    start = function() return M:render() end,
+}
+"#;
+    let parsed = parse_source(source, &LUA_SUPPORT);
+
+    assert_eq!(parsed.status, FileAnalysisStatus::Complete, "{parsed:?}");
+    assert!(parsed.findings.is_empty(), "{parsed:?}");
+    for (name, kind) in [
+        ("app.helper", SymbolKind::Import),
+        ("helper", SymbolKind::Variable),
+        ("local_value", SymbolKind::Variable),
+        ("declared_only", SymbolKind::Variable),
+        ("global_value", SymbolKind::Variable),
+        ("build", SymbolKind::Function),
+        ("run", SymbolKind::Function),
+        ("render", SymbolKind::Method),
+        ("assigned", SymbolKind::Function),
+        ("version", SymbolKind::Field),
+        ("create", SymbolKind::Field),
+        ("start", SymbolKind::Function),
+    ] {
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.name == name && symbol.kind == kind && symbol.role == SymbolRole::Definition }),
+            "missing {kind:?} definition {name}: {parsed:?}"
+        );
+    }
+
+    let build = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "build" && symbol.kind == SymbolKind::Function)
+        .expect("local Lua function");
+    assert_eq!(build.visibility, SymbolVisibility::Internal);
+    let nested = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "nested" && symbol.role == SymbolRole::Definition)
+        .expect("nested local variable");
+    assert_eq!(nested.scope, vec!["build"]);
+    let run = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "run" && symbol.role == SymbolRole::Definition)
+        .expect("dot method definition");
+    assert_eq!(run.scope, vec!["M"]);
+    let render = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "render" && symbol.role == SymbolRole::Definition)
+        .expect("colon method definition");
+    assert_eq!(render.scope, vec!["M"]);
+    for name in ["transform", "build", "run", "render"] {
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == name && symbol.role == SymbolRole::Reference),
+            "missing reference {name}: {parsed:?}"
+        );
+    }
+    assert!(
+        parsed
+            .limitations
+            .iter()
+            .any(|limitation| { limitation.contains("dynamic `require`") && limitation.contains("metatable") })
+    );
+}
+
+#[test]
+fn malformed_lua_is_partial_and_dynamic_require_is_not_import_evidence() {
+    let dynamic = parse_source(
+        b"local name = 'app.helper'\nlocal helper = require(name)\n",
+        &LUA_SUPPORT,
+    );
+    assert_eq!(dynamic.status, FileAnalysisStatus::Complete, "{dynamic:?}");
+    assert!(dynamic.symbols.iter().all(|symbol| symbol.kind != SymbolKind::Import));
+
+    let malformed = parse_source(b"local function broken(\n  return { value = 1\n", &LUA_SUPPORT);
+    assert_eq!(malformed.status, FileAnalysisStatus::Partial);
+    assert!(
+        malformed
+            .findings
+            .iter()
+            .any(|finding| finding.kind == MapFindingKind::ParseError)
+    );
+}
+
+#[test]
 fn javascript_typescript_and_jsx_extensions_select_explicit_language_variants() {
     assert_eq!(
         support_for_path(Path::new("module.js")).unwrap().language,
@@ -498,6 +616,36 @@ fn javascript_typescript_and_jsx_extensions_select_explicit_language_variants() 
         support_for_path(Path::new("service_test.go")).unwrap().language,
         SourceLanguage::Go
     );
+    assert_eq!(
+        support_for_path(Path::new("module.lua")).unwrap().language,
+        SourceLanguage::Lua
+    );
+    assert_eq!(
+        support_for_path(Path::new("package.rockspec")).unwrap().language,
+        SourceLanguage::Lua
+    );
+    assert_eq!(
+        support_for_path(Path::new(".luacheckrc")).unwrap().language,
+        SourceLanguage::Lua
+    );
+    assert_eq!(
+        support_for_path(Path::new(".busted")).unwrap().language,
+        SourceLanguage::Lua
+    );
+    assert_eq!(
+        lua_support_for_entry_source(Path::new("bin/tool"), "#!/usr/bin/env lua\nprint('ok')")
+            .unwrap()
+            .language,
+        SourceLanguage::Lua
+    );
+    assert_eq!(
+        lua_support_for_entry_source(Path::new("scripts/tool"), "#!/usr/bin/luajit\nprint('ok')")
+            .unwrap()
+            .language,
+        SourceLanguage::Lua
+    );
+    assert!(lua_support_for_entry_source(Path::new("bin/tool"), "#!/bin/sh\necho ok").is_none());
+    assert!(lua_support_for_entry_source(Path::new("tool"), "#!/usr/bin/env lua\nprint('ok')").is_none());
     assert!(support_for_path(Path::new("module.vue")).is_none());
 }
 
@@ -617,6 +765,37 @@ fn lexical_edges_require_explicit_same_file_or_import_evidence_and_group_ambigui
         LexicalResolutionReason::ImportedModule
     );
 
+    let lua_imported = build_lexical_edges(
+        &[
+            file(
+                "app/main.lua",
+                SourceLanguage::Lua,
+                parse_source(
+                    b"local helper = require('app.helper')\nreturn helper.build()",
+                    &LUA_SUPPORT,
+                ),
+            ),
+            file(
+                "app/helper.lua",
+                SourceLanguage::Lua,
+                parse_source(b"local M = {}\nfunction M.build() end\nreturn M", &LUA_SUPPORT),
+            ),
+            file(
+                "app/helper.js",
+                SourceLanguage::JavaScript,
+                parse_source(b"export function build() {}", &JAVASCRIPT_SUPPORT),
+            ),
+        ],
+        32,
+        32,
+    );
+    let lua_edge = lua_imported.first().expect("Lua literal-require edge");
+    assert_eq!(lua_edge.source, "app/main.lua");
+    assert_eq!(lua_edge.target, "app/helper.lua");
+    assert_eq!(lua_edge.symbol, "build");
+    assert_eq!(lua_edge.resolution_reason, LexicalResolutionReason::ImportedModule);
+    assert!(lua_imported.iter().all(|edge| edge.target != "app/helper.js"));
+
     let javascript_caller = file(
         "src/caller.js",
         SourceLanguage::JavaScript,
@@ -637,6 +816,34 @@ target();"#,
     assert_eq!(edge.confidence, ConfidenceTier::High);
     assert_eq!(edge.target_visibility, SymbolVisibility::Public);
     assert!(!edge.candidate_group.is_empty());
+
+    let dotted_javascript_import = build_lexical_edges(
+        &[
+            file(
+                "src/caller.js",
+                SourceLanguage::JavaScript,
+                parse_source(
+                    br#"import { target } from "./foo.bar.js";
+target();"#,
+                    &JAVASCRIPT_SUPPORT,
+                ),
+            ),
+            file(
+                "src/foo.bar.js",
+                SourceLanguage::JavaScript,
+                parse_source(b"export function target() {}", &JAVASCRIPT_SUPPORT),
+            ),
+            file(
+                "src/foo/bar.js",
+                SourceLanguage::JavaScript,
+                parse_source(b"export function target() {}", &JAVASCRIPT_SUPPORT),
+            ),
+        ],
+        32,
+        32,
+    );
+    assert_eq!(dotted_javascript_import.len(), 1);
+    assert_eq!(dotted_javascript_import[0].target, "src/foo.bar.js");
 
     let ambiguous_caller = file(
         "src/ambiguous.js",

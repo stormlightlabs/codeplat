@@ -104,6 +104,10 @@ pub fn parse_source_with_analyzer(
         let mut matches = cursor.matches(definition_query, tree.root_node(), source);
         'definitions: while let Some(query_match) = matches.next() {
             for capture in query_match.captures {
+                let capture_name = capture_name(definition_query, capture.index);
+                if capture_name.starts_with('_') {
+                    continue;
+                }
                 if symbols.len() >= limits.max_symbols_per_file {
                     symbols_truncated = true;
                     break 'definitions;
@@ -112,7 +116,7 @@ pub fn parse_source_with_analyzer(
                 definition_nodes.insert(node.id());
                 symbols.push(symbol_from_capture(
                     node,
-                    capture_name(definition_query, capture.index),
+                    capture_name,
                     SymbolRole::Definition,
                     source,
                     support,
@@ -138,6 +142,10 @@ pub fn parse_source_with_analyzer(
         let mut matches = cursor.matches(reference_query, tree.root_node(), source);
         'references: while let Some(query_match) = matches.next() {
             for capture in query_match.captures {
+                let capture_name = capture_name(reference_query, capture.index);
+                if capture_name.starts_with('_') {
+                    continue;
+                }
                 if symbols.len() >= limits.max_symbols_per_file {
                     symbols_truncated = true;
                     break 'references;
@@ -148,7 +156,7 @@ pub fn parse_source_with_analyzer(
                 }
                 symbols.push(symbol_from_capture(
                     node,
-                    capture_name(reference_query, capture.index),
+                    capture_name,
                     SymbolRole::Reference,
                     source,
                     support,
@@ -205,6 +213,12 @@ pub fn parse_source_with_analyzer(
             "Syntax traversal reached the depth limit ({}); deeper nodes were omitted.",
             limits.max_syntax_depth
         ));
+    }
+    if support.language == SourceLanguage::Lua {
+        limitations.push(
+            "Lua references are lexical: only literal `require` paths provide module evidence; dynamic `require`, metatable behavior, and runtime table mutation are not resolved."
+                .to_owned(),
+        );
     }
     if findings.len() > limits.max_findings {
         findings.truncate(limits.max_findings);
@@ -263,7 +277,21 @@ fn language_scope(
     node: Node<'_>, declaration: Node<'_>, scope_start: Option<Node<'_>>, source: &[u8], support: &LanguageSupport,
 ) -> Vec<String> {
     let mut scopes = scope_for_node(scope_start, source, support.scope_kinds);
-    if support.language != SourceLanguage::Go {
+    if !matches!(support.language, SourceLanguage::Go | SourceLanguage::Lua) {
+        return scopes;
+    }
+
+    if support.language == SourceLanguage::Lua {
+        if declaration.kind() == "function_declaration"
+            && let Some(name) = declaration.child_by_field_name("name")
+            && matches!(name.kind(), "dot_index_expression" | "method_index_expression")
+            && let Some(table) = name.child_by_field_name("table")
+        {
+            let table = text_for_node(table, source);
+            if !scopes.contains(&table) {
+                scopes.push(table);
+            }
+        }
         return scopes;
     }
 
@@ -369,6 +397,16 @@ pub fn visibility_for_node(
         } else {
             SymbolVisibility::Internal
         };
+    }
+    if language == SourceLanguage::Lua {
+        let declaration = context_snippet(node, source, &[]);
+        if declaration.trim_start().starts_with("local ") {
+            return SymbolVisibility::Internal;
+        }
+        if !ancestor_has_kind(node, &["function_declaration", "function_definition"]) {
+            return SymbolVisibility::Public;
+        }
+        return SymbolVisibility::Unknown;
     }
     let declaration = context_snippet(node, source, &[]).to_ascii_lowercase();
     let starts_with = declaration.trim_start();

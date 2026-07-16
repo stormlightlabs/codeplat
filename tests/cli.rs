@@ -409,6 +409,7 @@ impl MixedMapFixtureRepository {
         let root = temporary_root.join("repository");
         let cache = temporary_root.join("xdg-cache");
         fs::create_dir_all(root.join("src")).expect("create mixed map fixture source scope");
+        fs::create_dir_all(root.join("scripts")).expect("create mixed map fixture entry-point scope");
         fs::create_dir_all(&cache).expect("create mixed map fixture cache");
 
         let tracked_files = [
@@ -454,6 +455,23 @@ impl MixedMapFixtureRepository {
                 "package fixture\nfunc useDuplicate() { Duplicate() }\n",
             ),
             ("src/broken.go", "package fixture\nfunc Broken( {\n"),
+            (
+                "src/service.lua",
+                "local helper = require('src.lua_helper')\nlocal M = {}\nfunction M.build(value) return helper.transform(value) end\nfunction M:render() return self:build(1) end\nreturn M\n",
+            ),
+            (
+                "src/lua_helper.lua",
+                "local M = {}\nfunction M.transform(value) return value end\nreturn M\n",
+            ),
+            ("src/duplicate_one.lua", "function duplicate() end\n"),
+            ("src/duplicate_two.lua", "function duplicate() end\n"),
+            ("src/duplicate_use.lua", "return duplicate()\n"),
+            ("src/broken.lua", "local function broken(\nreturn { value = 1\n"),
+            (".luacheckrc", "return { globals = { 'vim' } }\n"),
+            (
+                "scripts/lua-tool",
+                "#!/usr/bin/env lua\nlocal service = require('src.service')\nreturn service.build(1)\n",
+            ),
         ];
         let repository = gix::init(&root).expect("initialize mixed map fixture repository");
         let tree = write_tree(&repository, &tracked_files);
@@ -930,7 +948,7 @@ fn compact_recovery_command_succeeds_without_including_classified_trees() {
     let compact = fixture.run(&["--no-cache"]);
     let markdown = stdout(&compact);
     assert!(compact.status.success());
-    assert!(markdown.contains("Next useful command: `codeplat map --profile evidence`."));
+    assert!(markdown.contains("Expected bounded projection only"));
 
     let evidence = fixture.run(&["map", "--profile", "evidence", "--no-cache", "--json"]);
     let value: Value = serde_json::from_str(&stdout(&evidence)).expect("valid evidence recovery JSON");
@@ -1249,6 +1267,18 @@ fn capabilities_are_available_without_repository_analysis() {
     assert_eq!(go["query_pack"], "go-v1");
     assert_eq!(go["definitions"], true);
     assert_eq!(go["references"], true);
+    let lua = value["languages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|language| language["language"] == "lua")
+        .expect("Lua capability");
+    assert_eq!(lua["extensions"], serde_json::json!(["lua", "rockspec"]));
+    assert_eq!(lua["grammar"], "tree-sitter-lua");
+    assert_eq!(lua["grammar_version"], "0.5.0");
+    assert_eq!(lua["query_pack"], "lua-v1");
+    assert_eq!(lua["definitions"], true);
+    assert_eq!(lua["references"], true);
 }
 
 #[test]
@@ -1312,7 +1342,7 @@ fn strict_quality_uses_complete_counts_when_compact_samples_are_truncated() {
     for index in 0..8 {
         write_file(fixture.root.join(format!("a{index}.rs")), b"\0binary");
     }
-    write_file(fixture.root.join("z.lua"), b"return unsupported\n");
+    write_file(fixture.root.join("z.zig"), b"pub fn unsupported() void {}\n");
 
     let output = fixture.run(&["map", "--strict", "--no-cache", "--json"]);
     let value: Value = serde_json::from_slice(&output.stdout).expect("strict compact report is valid JSON");
@@ -1359,7 +1389,10 @@ fn compact_projection_is_reported_without_becoming_actionable_quality() {
 #[test]
 fn irrelevant_unsupported_source_does_not_poison_a_briefing_but_focus_does() {
     let fixture = ClassificationFixtureRepository::new();
-    write_file(fixture.root.join("src/unsupported.lua"), b"return unsupported\n");
+    write_file(
+        fixture.root.join("src/unsupported.zig"),
+        b"pub fn unsupported() void {}\n",
+    );
 
     let briefing = fixture.run(&["--strict", "--no-cache", "--json"]);
     let briefing_value: Value = serde_json::from_slice(&briefing.stdout).expect("briefing JSON");
@@ -1375,14 +1408,14 @@ fn irrelevant_unsupported_source_does_not_poison_a_briefing_but_focus_does() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|path| path == "src/unsupported.lua")
+            .any(|path| path == "src/unsupported.zig")
     );
 
     let focused = fixture.run(&[
         "map",
         "--strict",
         "--focus-path",
-        "src/unsupported.lua",
+        "src/unsupported.zig",
         "--no-cache",
         "--json",
     ]);
@@ -2682,8 +2715,8 @@ fn non_utf8_worktree_paths_are_typed_omissions_and_never_become_lossy_output() {
 #[test]
 fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     let fixture = MixedMapFixtureRepository::new();
-    let first = fixture.run(&["map", "--no-cache", "--json"]);
-    let second = fixture.run(&["map", "--no-cache", "--json"]);
+    let first = fixture.run(&["map", "--profile", "evidence", "--no-cache", "--json"]);
+    let second = fixture.run(&["map", "--profile", "evidence", "--no-cache", "--json"]);
     let first_stdout = stdout(&first);
     let second_stdout = stdout(&second);
     let json: Value = serde_json::from_str(&first_stdout).expect("valid mixed-language map JSON");
@@ -2713,6 +2746,7 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     assert_eq!(json["map"]["query_packs"]["python"], "python-v1");
     assert_eq!(json["map"]["query_packs"]["ruby"], "ruby-v1");
     assert_eq!(json["map"]["query_packs"]["go"], "go-v1");
+    assert_eq!(json["map"]["query_packs"]["lua"], "lua-v1");
 
     let files = json["map"]["files"].as_array().expect("mixed map files");
     for (path, language, extension) in [
@@ -2725,11 +2759,14 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
         ("src/service.rb", "ruby", "rb"),
         ("src/service.go", "go", "go"),
         ("src/service_test.go", "go", "go"),
+        ("src/service.lua", "lua", "lua"),
+        (".luacheckrc", "lua", ""),
+        ("scripts/lua-tool", "lua", ""),
     ] {
         let file = files
             .iter()
             .find(|file| file["path"] == path)
-            .expect("language fixture file");
+            .unwrap_or_else(|| panic!("missing language fixture file {path}; files: {files:?}"));
         assert_eq!(file["language"], language);
         assert_eq!(file["extension"], extension);
         assert_eq!(file["status"], "complete");
@@ -2842,8 +2879,26 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
                 symbol["name"] == "TestNewService" && symbol["kind"] == "function" && symbol["role"] == "definition"
             })
     );
+    let lua = files
+        .iter()
+        .find(|file| file["path"] == "src/service.lua")
+        .expect("Lua file");
+    assert!(
+        lua["symbols"].as_array().expect("Lua symbols").iter().any(|symbol| {
+            symbol["name"] == "build" && symbol["kind"] == "function" && symbol["role"] == "definition"
+        })
+    );
+    assert!(lua["symbols"].as_array().expect("Lua symbols").iter().any(|symbol| {
+        symbol["name"] == "render"
+            && symbol["kind"] == "method"
+            && symbol["role"] == "definition"
+            && symbol["scope"] == serde_json::json!(["M"])
+    }));
+    assert!(lua["symbols"].as_array().expect("Lua symbols").iter().any(|symbol| {
+        symbol["name"] == "src.lua_helper" && symbol["kind"] == "import" && symbol["evidence"] == "import"
+    }));
 
-    for path in ["src/broken.py", "src/broken.rb", "src/broken.go"] {
+    for path in ["src/broken.py", "src/broken.rb", "src/broken.go", "src/broken.lua"] {
         let file = files
             .iter()
             .find(|file| file["path"] == path)
@@ -2878,7 +2933,7 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
             .any(|finding| finding["kind"] == "parse_error" && finding["path"] == "src/broken.js")
     );
 
-    let markdown = fixture.run(&["map"]);
+    let markdown = fixture.run(&["map", "--profile", "evidence"]);
     let markdown_stdout = stdout(&markdown);
     assert!(markdown.status.success());
     assert!(markdown.stderr.is_empty());
@@ -2889,12 +2944,16 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     assert!(markdown_stdout.contains("Python files"));
     assert!(markdown_stdout.contains("Ruby files"));
     assert!(markdown_stdout.contains("Go files"));
+    assert!(markdown_stdout.contains("Lua files"));
     assert!(markdown_stdout.contains("src/broken.py"));
     assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Python file"));
     assert!(markdown_stdout.contains("src/broken.rb"));
     assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Ruby file"));
     assert!(markdown_stdout.contains("src/broken.go"));
     assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Go file"));
+    assert!(markdown_stdout.contains("src/broken.lua"));
+    assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Lua file"));
+    assert!(markdown_stdout.contains("dynamic `require`"));
     assert!(markdown_stdout.contains("query-pack provenance"));
     assert_plain_report(&markdown_stdout);
 }
@@ -2967,6 +3026,69 @@ fn go_map_supports_focus_package_edges_ambiguity_provenance_and_reading_plans() 
             .iter()
             .any(|recommendation| {
                 recommendation["path"] == "src/service.go"
+                    && recommendation["evidence_kinds"]
+                        .as_array()
+                        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "source_map"))
+            })
+    );
+
+    let first_cached = fixture.run(&["map", "--focus-path", "scripts/lua-tool", "--json"]);
+    let second_cached = fixture.run(&["map", "--focus-path", "scripts/lua-tool", "--json"]);
+    let cached_value: Value = serde_json::from_slice(&second_cached.stdout).expect("valid cached Lua map JSON");
+    assert!(first_cached.status.success());
+    assert!(second_cached.status.success());
+    assert_eq!(cached_value["provenance"]["languages"]["lua"]["query_pack"], "lua-v1");
+    assert!(cached_value["map"]["cache"]["hits"].as_u64().unwrap_or_default() > 0);
+}
+
+#[test]
+fn lua_map_supports_literal_require_edges_provenance_focus_and_reading_plans() {
+    let fixture = MixedMapFixtureRepository::new();
+    let map = fixture.run(&[
+        "map",
+        "--profile",
+        "evidence",
+        "--no-cache",
+        "--focus-path",
+        "src/service.lua",
+        "--json",
+    ]);
+    let value: Value = serde_json::from_slice(&map.stdout).expect("valid focused Lua map JSON");
+    assert!(
+        map.status.success(),
+        "focused Lua map failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+    assert!(map.stderr.is_empty());
+    assert_eq!(value["map"]["query_packs"]["lua"], "lua-v1");
+    assert_eq!(value["provenance"]["languages"]["lua"]["grammar"], "tree-sitter-lua");
+    assert_eq!(value["provenance"]["languages"]["lua"]["grammar_version"], "0.5.0");
+    assert_eq!(value["provenance"]["languages"]["lua"]["query_pack"], "lua-v1");
+    assert_eq!(value["map"]["ranking"][0]["path"], "src/service.lua");
+    assert!(value["map"]["edges"].as_array().expect("Lua edges").iter().any(|edge| {
+        edge["source"] == "src/service.lua"
+            && edge["target"] == "src/lua_helper.lua"
+            && edge["symbol"] == "transform"
+            && edge["resolution_reason"] == "imported_module"
+    }));
+    assert!(
+        value["map"]["edges"]
+            .as_array()
+            .expect("Lua edges")
+            .iter()
+            .all(|edge| { !(edge["source"] == "src/duplicate_use.lua" && edge["symbol"] == "duplicate") })
+    );
+
+    let briefing = fixture.run(&["--no-cache", "--focus-path", "src/service.lua", "--json"]);
+    let briefing_value: Value = serde_json::from_slice(&briefing.stdout).expect("valid focused Lua briefing JSON");
+    assert!(briefing.status.success());
+    assert!(
+        briefing_value["reading_plan"]["recommendations"]
+            .as_array()
+            .expect("Lua reading plan")
+            .iter()
+            .any(|recommendation| {
+                recommendation["path"] == "src/service.lua"
                     && recommendation["evidence_kinds"]
                         .as_array()
                         .is_some_and(|kinds| kinds.iter().any(|kind| kind == "source_map"))
