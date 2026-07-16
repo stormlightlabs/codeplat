@@ -45,7 +45,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     }
     let mut tracked_paths = BTreeSet::new();
     let mut submodule_paths = BTreeSet::new();
-    collect_tree_files(
+    let tracked_tree_truncated = collect_tree_files(
         &repository,
         &repository
             .head_tree_id_or_empty()
@@ -56,7 +56,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         limits.max_files,
         limits.max_syntax_depth,
     )?;
-    collect_index_files(&repository, &mut tracked_paths, limits.max_files)?;
+    let tracked_index_truncated = collect_index_files(&repository, &mut tracked_paths, limits.max_files)?;
     let modified_paths = collect_modified_paths(&repository, repository_root, limits.max_file_bytes)?;
 
     let mut candidates = BTreeMap::new();
@@ -99,6 +99,16 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     let visible_path_set: BTreeSet<_> = visible_paths.keys().cloned().collect();
     let mut omissions = Vec::new();
     let mut classification_records = Vec::new();
+    if tracked_tree_truncated || tracked_index_truncated {
+        omissions.push(omission(
+            scope.relative_path.clone(),
+            OmissionReason::TraversalError,
+            format!(
+                "The tracked-file inventory reached the {}-path resource limit before every tracked path could be inspected.",
+                limits.max_files
+            ),
+        ));
+    }
     for error in visible_errors.into_iter().chain(all_errors) {
         let (reason, detail) = match error {
             WalkIssue::Traversal(detail) => (OmissionReason::TraversalError, detail),
@@ -548,6 +558,31 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         landmarks: topology.landmarks.clone(),
         project_roots: project_roots.clone(),
     };
+    let resource_limited = omissions.iter().any(|omission| {
+        matches!(
+            omission.reason,
+            OmissionReason::TraversalError | OmissionReason::Oversized
+        )
+    }) || files.iter().any(|file| {
+        file.limitations
+            .iter()
+            .any(|limitation| limitation.contains("resource limit"))
+    });
+    let unsupported_path_names = omissions
+        .iter()
+        .filter(|omission| omission.reason == OmissionReason::UnsupportedLanguage)
+        .map(|omission| omission.path.clone())
+        .collect::<Vec<_>>();
+    let partial_path_names = files
+        .iter()
+        .filter(|file| file.status == FileAnalysisStatus::Partial)
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let cache_unavailable_path_names = omissions
+        .iter()
+        .filter(|omission| omission.reason == OmissionReason::CacheUnavailable)
+        .map(|omission| omission.path.clone())
+        .collect::<Vec<_>>();
     let mut report = MapReport {
         profile: settings.profile,
         repository_root: repository_root.to_string_lossy().into_owned(),
@@ -566,14 +601,17 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         },
         classifications: classification_summary(&mut classification_records),
         availability: MapAvailability {
-            unsupported_paths: omissions
+            unsupported_paths: unsupported_path_names.len(),
+            partial_files: partial_path_names.len(),
+            cache_unavailable_paths: cache_unavailable_path_names.len(),
+            resource_limited,
+            unsafe_paths: omissions
                 .iter()
-                .filter(|omission| omission.reason == OmissionReason::UnsupportedLanguage)
+                .filter(|omission| matches!(omission.reason, OmissionReason::UnsafePath | OmissionReason::Symlink))
                 .count(),
-            partial_files: files
-                .iter()
-                .filter(|file| file.status == FileAnalysisStatus::Partial)
-                .count(),
+            unsupported_path_names,
+            partial_path_names,
+            cache_unavailable_path_names,
         },
         files,
         omissions,
@@ -805,13 +843,13 @@ pub fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits
 }
 
 pub fn collection_summary(
-    total: usize, returned: usize, profile: AnalysisProfile, reason: TruncationReason,
+    total: usize, returned: usize, _profile: AnalysisProfile, reason: TruncationReason,
 ) -> CollectionSummary {
     if returned >= total {
         CollectionSummary::complete(total)
     } else {
-        let reason = if profile == AnalysisProfile::Compact && reason == TruncationReason::CollectionLimit {
-            TruncationReason::CollectionLimit
+        let reason = if reason == TruncationReason::CollectionLimit {
+            TruncationReason::ProfileProjection
         } else {
             reason
         };

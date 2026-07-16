@@ -65,8 +65,8 @@ and identified product-usability work that is being addressed incrementally:
   remains available through focused commands, JSON, and the evidence profile;
 - only 41 ranked entries were returned across 53 reports, so many repositories received one recommendation or
   none;
-- compact truncation, unsupported source, and partial-file flags were common enough to obscure which reports
-  were genuinely unusable;
+- compact projection is now separated from actionable quality: hard limits, incomplete history, unsafe paths, and
+  relevant unsupported/partial source drive strict policy, while unrelated omissions remain discoverable;
 - Go, Lua, and Zig recur in the real project corpus but currently receive no structural map;
 - minified or generated files are now classified before compact parsing, with bounded evidence samples and safe
   explicit overrides for focused inspection.

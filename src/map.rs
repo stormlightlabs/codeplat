@@ -472,6 +472,7 @@ fn classification_summary(records: &mut Vec<SourceClassificationSample>) -> MapC
         total,
         returned: samples.len(),
         truncated: samples.len() < total,
+        reason: (samples.len() < total).then_some(TruncationReason::ProfileProjection),
         generated: count(SourceClassificationKind::Generated),
         vendor: count(SourceClassificationKind::Vendor),
         minified: count(SourceClassificationKind::Minified),

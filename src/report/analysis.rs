@@ -42,52 +42,92 @@ pub fn language_provenance(map: Option<&MapReport>) -> BTreeMap<String, Language
         .collect()
 }
 
-pub fn report_quality(history: Option<&HistoryReport>, map: Option<&MapReport>) -> ReportQuality {
+pub fn report_quality(
+    history: Option<&HistoryReport>, map: Option<&MapReport>, reading_plan: Option<&ReadingPlan>,
+    explain: Option<&ExplainReport>, command: CommandName, options: &map::MapSettings,
+) -> ReportQuality {
     let stale = map.is_some_and(|report| report.cache.status == CacheStatus::Stale || !report.cache.stale.is_empty());
-    let map_truncated = map.is_some_and(|report| {
+    let map_collections = map.map(|report| {
         [
-            report.collections.files.truncated,
-            report.collections.symbols.truncated,
-            report.collections.omissions.truncated,
-            report.collections.findings.truncated,
-            report.collections.edges.truncated,
-            report.collections.ranking.truncated,
-            report.collections.snippets.truncated,
-            report.collections.landmarks.truncated,
-            report.collections.project_roots.truncated,
+            &report.collections.files,
+            &report.collections.symbols,
+            &report.collections.omissions,
+            &report.collections.findings,
+            &report.collections.edges,
+            &report.collections.ranking,
+            &report.collections.snippets,
+            &report.collections.landmarks,
+            &report.collections.project_roots,
         ]
-        .into_iter()
-        .any(|value| value)
     });
-    let history_truncated = history.is_some_and(|report| {
+    let history_collections = history.map(|report| {
         [
-            report.collections.commits.truncated,
-            report.collections.churn_paths.truncated,
-            report.collections.contributor_identity_mappings.truncated,
-            report.collections.contributors_overall.truncated,
-            report.collections.contributors_recent.truncated,
-            report.collections.bug_paths.truncated,
-            report.collections.bug_overlap_paths.truncated,
-            report.collections.bug_commits.truncated,
-            report.collections.activity_months.truncated,
-            report.collections.firefighting_commits.truncated,
+            &report.collections.commits,
+            &report.collections.churn_paths,
+            &report.collections.contributor_identity_mappings,
+            &report.collections.contributors_overall,
+            &report.collections.contributors_recent,
+            &report.collections.bug_paths,
+            &report.collections.bug_overlap_paths,
+            &report.collections.bug_commits,
+            &report.collections.activity_months,
+            &report.collections.firefighting_commits,
         ]
-        .into_iter()
-        .any(|value| value)
     });
+    let map_truncated =
+        map_collections.is_some_and(|collections| collections.into_iter().any(|summary| summary.truncated));
+    let history_truncated =
+        history_collections.is_some_and(|collections| collections.into_iter().any(|summary| summary.truncated));
+    let projection = map_collections.is_some_and(|collections| collections.into_iter().any(expected_projection))
+        || history_collections.is_some_and(|collections| collections.into_iter().any(expected_projection))
+        || map.is_some_and(|report| report.classifications.reason == Some(TruncationReason::ProfileProjection));
     let incomplete =
         history.is_some_and(|report| report.provenance.completeness.status != HistoryCompletenessStatus::Complete);
-    let unsupported = map.is_some_and(|report| report.availability.unsupported_paths > 0);
-    let partial = map.is_some_and(|report| report.availability.partial_files > 0);
+    let resource_limited = map.is_some_and(|report| report.availability.resource_limited)
+        || history_collections.is_some_and(|collections| {
+            collections
+                .into_iter()
+                .any(|summary| summary.reason == Some(TruncationReason::ResourceLimit))
+        })
+        || history.is_some_and(|report| {
+            report
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("resource limit") || limitation.contains("elapsed-work limit"))
+        });
+    let unsafe_paths = map.is_some_and(|report| report.availability.unsafe_paths > 0);
+    let relevant_paths = relevant_map_paths(map, reading_plan, explain, command, options);
+    let unsupported = map.is_some_and(|report| {
+        report
+            .availability
+            .unsupported_path_names
+            .iter()
+            .any(|path| relevant_paths.contains(path))
+    });
+    let partial = map.is_some_and(|report| {
+        report
+            .availability
+            .partial_path_names
+            .iter()
+            .any(|path| relevant_paths.contains(path))
+            || report
+                .availability
+                .cache_unavailable_path_names
+                .iter()
+                .any(|path| relevant_paths.contains(path))
+    });
     let mut strict_issues = Vec::new();
     if stale {
         strict_issues.push(StrictIssue::Stale);
     }
-    if map_truncated || history_truncated {
-        strict_issues.push(StrictIssue::Truncated);
+    if resource_limited {
+        strict_issues.push(StrictIssue::ResourceLimit);
     }
     if incomplete {
         strict_issues.push(StrictIssue::Incomplete);
+    }
+    if unsafe_paths {
+        strict_issues.push(StrictIssue::UnsafePath);
     }
     if unsupported {
         strict_issues.push(StrictIssue::Unsupported);
@@ -96,13 +136,96 @@ pub fn report_quality(history: Option<&HistoryReport>, map: Option<&MapReport>) 
         strict_issues.push(StrictIssue::Partial);
     }
     ReportQuality {
+        projection,
         stale,
         truncated: map_truncated || history_truncated,
+        resource_limited,
         incomplete,
+        unsafe_paths,
         unsupported,
         partial,
         strict_issues,
     }
+}
+
+fn expected_projection(summary: &CollectionSummary) -> bool {
+    summary.truncated
+        && matches!(
+            summary.reason,
+            Some(TruncationReason::ProfileProjection | TruncationReason::OutputBudget)
+        )
+}
+
+fn relevant_map_paths(
+    map: Option<&MapReport>, reading_plan: Option<&ReadingPlan>, explain: Option<&ExplainReport>, command: CommandName,
+    options: &map::MapSettings,
+) -> BTreeSet<String> {
+    let Some(map) = map else {
+        return BTreeSet::new();
+    };
+    let mut paths = BTreeSet::new();
+    if let Some(plan) = reading_plan {
+        paths.extend(
+            plan.recommendations
+                .iter()
+                .map(|recommendation| recommendation.path.clone()),
+        );
+    }
+    if let Some(explain) = explain {
+        paths.extend(explain.matched_paths.iter().cloned());
+    }
+    for path in &map.files {
+        let path_focus = options
+            .focus_paths
+            .iter()
+            .any(|focus| path_matches_focus(&path.path, focus));
+        let text_focus = options.focuses.iter().any(|focus| {
+            map.ranking
+                .iter()
+                .find(|rank| rank.path == path.path)
+                .is_some_and(|rank| rank.focus_matches > 0 && !focus.trim().is_empty())
+        });
+        if path_focus || text_focus {
+            paths.insert(path.path.clone());
+        }
+    }
+    for path in map
+        .availability
+        .unsupported_path_names
+        .iter()
+        .chain(map.availability.partial_path_names.iter())
+        .chain(map.availability.cache_unavailable_path_names.iter())
+    {
+        if options.focus_paths.iter().any(|focus| path_matches_focus(path, focus)) {
+            paths.insert(path.clone());
+        }
+    }
+
+    let has_explicit_focus = !options.focuses.is_empty() || !options.focus_paths.is_empty();
+    let has_selection_context = reading_plan.is_some() || explain.is_some();
+    if !has_selection_context && !has_explicit_focus {
+        paths.extend(map.files.iter().map(|file| file.path.clone()));
+        paths.extend(map.availability.unsupported_path_names.iter().cloned());
+        paths.extend(map.availability.partial_path_names.iter().cloned());
+        paths.extend(map.availability.cache_unavailable_path_names.iter().cloned());
+    } else if reading_plan.is_some() && paths.is_empty() {
+        // A briefing with no usable recommendation is already short on orientation
+        // evidence, so relevant source omissions must remain actionable.
+        paths.extend(map.files.iter().map(|file| file.path.clone()));
+        paths.extend(map.availability.unsupported_path_names.iter().cloned());
+        paths.extend(map.availability.partial_path_names.iter().cloned());
+        paths.extend(map.availability.cache_unavailable_path_names.iter().cloned());
+    }
+    if command == CommandName::Explain && paths.is_empty() {
+        paths.extend(map.files.iter().map(|file| file.path.clone()));
+    }
+    paths
+}
+
+fn path_matches_focus(path: &str, focus: &str) -> bool {
+    let focus = focus.trim().replace('\\', "/");
+    let focus = focus.trim_start_matches("./");
+    !focus.is_empty() && (path == focus || path.starts_with(&format!("{focus}/")))
 }
 
 pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPlan {

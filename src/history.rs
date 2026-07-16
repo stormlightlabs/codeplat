@@ -371,7 +371,7 @@ fn bound_history(report: &mut HistoryReport, limits: ReportLimits) {
 fn truncate<T>(values: &mut Vec<T>, limit: usize) -> CollectionSummary {
     let total = values.len();
     values.truncate(limit);
-    CollectionSummary::bounded(total, values.len(), TruncationReason::CollectionLimit)
+    CollectionSummary::bounded(total, values.len(), TruncationReason::ProfileProjection)
 }
 
 fn history_completeness(repository: &gix::Repository, scan: &CommitScan) -> HistoryCompleteness {

@@ -134,10 +134,12 @@ pub fn explicitly_excluded(exclusions: Option<&Gitignore>, path: &Path) -> bool 
 pub fn collect_tree_files(
     repository: &gix::Repository, tree_id: &gix::Id<'_>, prefix: &[u8], files: &mut BTreeSet<String>,
     submodule_paths: &mut BTreeSet<String>, max_files: usize, max_depth: usize,
-) -> Result<()> {
+) -> Result<bool> {
     let mut stack = vec![(tree_id.detach(), prefix.to_vec(), 0usize)];
+    let mut truncated = false;
     while let Some((tree_id, prefix, depth)) = stack.pop() {
         if files.len() >= max_files || depth > max_depth {
+            truncated = files.len() >= max_files || depth > max_depth;
             break;
         }
         let tree = repository
@@ -147,6 +149,7 @@ pub fn collect_tree_files(
         let mut entries = Vec::new();
         for entry in tree.iter() {
             if entries.len() >= max_files {
+                truncated = true;
                 break;
             }
             let entry = entry.map_err(|error| MapError::analysis("decoding a tracked tree entry", error))?;
@@ -187,22 +190,26 @@ pub fn collect_tree_files(
             }
         }
     }
-    Ok(())
+    Ok(truncated)
 }
 
-pub fn collect_index_files(repository: &gix::Repository, files: &mut BTreeSet<String>, max_files: usize) -> Result<()> {
+pub fn collect_index_files(
+    repository: &gix::Repository, files: &mut BTreeSet<String>, max_files: usize,
+) -> Result<bool> {
     let index = repository
         .index_or_empty()
         .map_err(|error| MapError::analysis("reading the worktree index", error))?;
+    let mut truncated = false;
     for (path, _) in index.entries_with_paths_by_filter_map(|_, entry| Some(entry.id)) {
         if files.len() >= max_files {
+            truncated = true;
             break;
         }
         let path = security::validate_repository_path(path.as_bytes())
             .map_err(|error| MapError::safety("decoding a worktree index path", error))?;
         files.insert(path);
     }
-    Ok(())
+    Ok(truncated)
 }
 
 pub fn collect_modified_paths(

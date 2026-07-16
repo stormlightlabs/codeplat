@@ -188,6 +188,40 @@ impl Render {
         }
     }
 
+    pub fn quality_markdown(output: &mut String, quality: &super::ReportQuality, command: super::CommandName) {
+        if !quality.projection && quality.strict_issues.is_empty() {
+            return;
+        }
+        writeln!(output).expect("writing to a string cannot fail");
+        writeln!(output, "## Quality").expect("writing to a string cannot fail");
+        writeln!(output).expect("writing to a string cannot fail");
+        if quality.strict_issues.is_empty() {
+            writeln!(
+                output,
+                "Expected bounded projection only; collection totals and reasons remain available in JSON."
+            )
+            .expect("writing to a string cannot fail");
+        } else {
+            let issues = quality
+                .strict_issues
+                .iter()
+                .map(|issue| issue.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(output, "Actionable degradation: {issues}.").expect("writing to a string cannot fail");
+            let next = if quality.unsafe_paths {
+                "codeplat doctor"
+            } else if quality.stale {
+                "codeplat map --cache always"
+            } else if command == super::CommandName::History {
+                "codeplat history --profile evidence"
+            } else {
+                "codeplat map --profile evidence"
+            };
+            writeln!(output, "Next useful command: `{next}`.").expect("writing to a string cannot fail");
+        }
+    }
+
     pub fn history_markdown(output: &mut String, history: &super::HistoryReport) {
         Render::history_header(output, history);
 

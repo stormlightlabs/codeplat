@@ -4,7 +4,6 @@
 
 - Generated, vendored, and minified source can still consume analysis limits and degrade recommendations.
 - Go, Lua, and Zig do not yet have first-class structural-map support.
-- Compact quality and `--strict` still conflate expected bounded projection with actionable degradation.
 - Scale benchmarks do not yet enforce latency/output ceilings for ignored trees, high ambiguity, and deep history.
 - The configured Linux, macOS, Windows, Rust 1.85, and dependency-policy jobs need a green release-candidate run.
 
@@ -172,17 +171,17 @@ misleading, so normal bounded output does not look like a failed analysis.
 
 **Acceptance criteria:**
 
-- [ ] Collection summaries continue to expose totals, returned counts, truncation, and reasons for every bounded
+- [x] Collection summaries continue to expose totals, returned counts, truncation, and reasons for every bounded
       collection.
-- [ ] Top-level quality distinguishes expected profile projection from resource exhaustion, stale evidence,
+- [x] Top-level quality distinguishes expected profile projection from resource exhaustion, stale evidence,
       missing history, unsafe paths, unsupported relevant source, and partial recommended/focused files.
-- [ ] Unsupported or partial files outside the reading plan remain discoverable but do not automatically poison a
+- [x] Unsupported or partial files outside the reading plan remain discoverable but do not automatically poison a
       useful compact briefing.
-- [ ] `--strict` emits the typed report and exits 5 only for documented actionable degradation; evidence mode and
+- [x] `--strict` emits the typed report and exits 5 only for documented actionable degradation; evidence mode and
       focused commands apply the same policy consistently.
-- [ ] The schema and golden corpus preserve existing meanings or deliberately advance the schema version if that
+- [x] The schema and golden corpus preserve existing meanings or deliberately advance the schema version if that
       cannot be done additively.
-- [ ] Markdown limitations are concise, prioritized, and include the next useful command.
+- [x] Markdown limitations are concise, prioritized, and include the next useful command.
 
 **Verification:**
 

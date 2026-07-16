@@ -238,9 +238,6 @@ Machine reports include typed provenance:
 History provenance records its observed committer-date range, author-versus-committer time
 basis, current-HEAD semantics, and completeness status (`complete`, `shallow`, `missing_objects`, or `partial`).
 
-Use `--strict` when automation must reject a report with stale, truncated, incomplete,
-unsupported, or partial evidence.
-
 The v1 JSON schema is [`schema/v1/codeplat.json`](schema/v1/codeplat.json), with compatibility
 examples in [`schema/v1/golden`](schema/v1/golden).
 

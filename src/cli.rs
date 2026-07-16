@@ -657,7 +657,7 @@ struct OutputOptions {
     #[arg(long, global = true, value_enum, default_value_t = ProfileOption::Compact)]
     profile: ProfileOption,
 
-    /// Fail after rendering when the report has stale, truncated, incomplete, unsupported, or partial evidence.
+    /// Fail after rendering when actionable evidence is stale, resource-limited, unsafe, unsupported, or partial.
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     strict: bool,
 }

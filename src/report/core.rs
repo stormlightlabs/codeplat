@@ -15,6 +15,7 @@ pub enum AnalysisProfile {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TruncationReason {
+    ProfileProjection,
     CollectionLimit,
     OutputBudget,
     ResourceLimit,
@@ -591,11 +592,28 @@ pub enum ExplainTargetKind {
 #[serde(rename_all = "snake_case")]
 pub enum StrictIssue {
     Stale,
+    ResourceLimit,
+    /// Retained so schema-v1 reports produced before Ticket 24 remain readable.
     Truncated,
     Incomplete,
+    UnsafePath,
     Unsupported,
     #[default]
     Partial,
+}
+
+impl StrictIssue {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Stale => "stale evidence",
+            Self::ResourceLimit => "resource limit",
+            Self::Truncated => "truncated evidence",
+            Self::Incomplete => "missing or incomplete history",
+            Self::UnsafePath => "unsafe path",
+            Self::Unsupported => "unsupported relevant source",
+            Self::Partial => "partial relevant source",
+        }
+    }
 }
 
 /// The role a path plays in the ordered default briefing.
@@ -970,10 +988,16 @@ pub struct HistoryProvenance {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct ReportQuality {
+    /// Expected bounded output selected by the active report profile or map budget.
+    pub projection: bool,
     pub stale: bool,
+    /// True when any emitted collection is shorter than its observed total.
     pub truncated: bool,
+    pub resource_limited: bool,
     pub incomplete: bool,
+    pub unsafe_paths: bool,
     pub unsupported: bool,
     pub partial: bool,
     pub strict_issues: Vec<StrictIssue>,
@@ -1044,6 +1068,7 @@ impl Report {
                     summary,
                     Some(history_report),
                     Some(map_report),
+                    None,
                 ))
             }
             CommandName::History => {
@@ -1058,7 +1083,14 @@ impl Report {
                     "Analyzed {} reachable commits, including {} non-merge commits, within the selected history scope.",
                     history_report.commits_seen, history_report.non_merge_commits_seen
                 );
-                Ok(Self::from_parts(req, captured_at, summary, Some(history_report), None))
+                Ok(Self::from_parts(
+                    req,
+                    captured_at,
+                    summary,
+                    Some(history_report),
+                    None,
+                    None,
+                ))
             }
             CommandName::Map => {
                 let mut map_settings = req.map.clone();
@@ -1071,6 +1103,7 @@ impl Report {
                     summary.into(),
                     None,
                     Some(map_report),
+                    None,
                 ))
             }
             CommandName::Explain => {
@@ -1087,16 +1120,21 @@ impl Report {
                     map_report.inventory.analyzed,
                     map_report.edges.len(),
                 );
-                let mut report = Self::from_parts(req, captured_at, summary, Some(history_report), Some(map_report));
-                report.explain = Some(explain);
-                Ok(report)
+                Ok(Self::from_parts(
+                    req,
+                    captured_at,
+                    summary,
+                    Some(history_report),
+                    Some(map_report),
+                    Some(explain),
+                ))
             }
         }
     }
 
     fn from_parts(
         req: CommandRequest, captured_at: String, summary: String, history: Option<HistoryReport>,
-        map: Option<MapReport>,
+        map: Option<MapReport>, explain: Option<ExplainReport>,
     ) -> Self {
         let scope_path = map
             .as_ref()
@@ -1143,11 +1181,18 @@ impl Report {
             },
             history: req.history.clone(),
         };
-        let quality = analysis::report_quality(history.as_ref(), map.as_ref());
         let reading_plan = match (req.command.name, history.as_ref(), map.as_ref()) {
             (CommandName::Briefing, Some(history), Some(map)) => Some(analysis::build_reading_plan(history, map)),
             _ => None,
         };
+        let quality = analysis::report_quality(
+            history.as_ref(),
+            map.as_ref(),
+            reading_plan.as_ref(),
+            explain.as_ref(),
+            req.command.name,
+            &req.map,
+        );
         let provenance = ReportProvenance {
             tool_version: TOOL_VERSION.to_owned(),
             captured_at: captured_at.clone(),
@@ -1180,7 +1225,7 @@ impl Report {
             reading_plan,
             history,
             map,
-            explain: None,
+            explain,
         }
     }
 
@@ -1227,6 +1272,7 @@ impl Report {
         writeln!(output, "## Summary").expect("writing to a string cannot fail");
         writeln!(output).expect("writing to a string cannot fail");
         writeln!(output, "{}", utils::sanitize_text(&self.summary)).expect("writing to a string cannot fail");
+        Render::quality_markdown(&mut output, &self.quality, self.command.name);
 
         if self.command.name == CommandName::Briefing {
             if let Some(map) = &self.map {

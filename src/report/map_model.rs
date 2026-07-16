@@ -125,6 +125,18 @@ pub struct MapReport {
 pub struct MapAvailability {
     pub unsupported_paths: usize,
     pub partial_files: usize,
+    #[serde(default)]
+    pub cache_unavailable_paths: usize,
+    #[serde(default)]
+    pub resource_limited: bool,
+    #[serde(default)]
+    pub unsafe_paths: usize,
+    #[serde(default)]
+    pub unsupported_path_names: Vec<String>,
+    #[serde(default)]
+    pub partial_path_names: Vec<String>,
+    #[serde(default)]
+    pub cache_unavailable_path_names: Vec<String>,
 }
 
 impl MapReport {
@@ -457,6 +469,8 @@ pub struct MapClassificationSummary {
     /// Number of bounded path samples returned in `samples`.
     pub returned: usize,
     pub truncated: bool,
+    #[serde(default)]
+    pub reason: Option<TruncationReason>,
     pub generated: usize,
     pub vendor: usize,
     pub minified: usize,

@@ -1229,6 +1229,75 @@ fn strict_quality_uses_complete_counts_when_compact_samples_are_truncated() {
 }
 
 #[test]
+fn compact_projection_is_reported_without_becoming_actionable_quality() {
+    let fixture = FixtureRepository::new();
+    fs::create_dir_all(fixture.root.join("src")).expect("create projection source directory");
+    for index in 0..40 {
+        write_file(
+            fixture.root.join(format!("src/file{index}.rs")),
+            format!("pub fn file{index}() {{}}\n").as_bytes(),
+        );
+    }
+
+    let output = fixture.run(&["map", "--strict", "--no-cache", "--json"]);
+    let value: Value = serde_json::from_slice(&output.stdout).expect("compact projection JSON");
+
+    assert!(
+        output.status.success(),
+        "projection should not fail strict policy: {:?}",
+        output.stderr
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(value["quality"]["projection"], true);
+    assert_eq!(value["quality"]["truncated"], true);
+    assert_eq!(value["quality"]["resource_limited"], false);
+    assert_eq!(value["quality"]["strict_issues"].as_array().unwrap().len(), 0);
+    assert_eq!(value["map"]["collections"]["files"]["reason"], "profile_projection");
+}
+
+#[test]
+fn irrelevant_unsupported_source_does_not_poison_a_briefing_but_focus_does() {
+    let fixture = ClassificationFixtureRepository::new();
+    write_file(fixture.root.join("src/unsupported.go"), b"package unsupported\n");
+
+    let briefing = fixture.run(&["--strict", "--no-cache", "--json"]);
+    let briefing_value: Value = serde_json::from_slice(&briefing.stdout).expect("briefing JSON");
+    assert!(
+        briefing.status.success(),
+        "irrelevant unsupported source: {:?}",
+        briefing.stderr
+    );
+    assert_eq!(briefing_value["quality"]["unsupported"], false);
+    assert_eq!(briefing_value["map"]["availability"]["unsupported_paths"], 1);
+    assert!(
+        briefing_value["map"]["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|omission| omission["path"] == "src/unsupported.go")
+    );
+
+    let focused = fixture.run(&[
+        "map",
+        "--strict",
+        "--focus-path",
+        "src/unsupported.go",
+        "--no-cache",
+        "--json",
+    ]);
+    let focused_value: Value = serde_json::from_slice(&focused.stdout).expect("focused JSON");
+    assert_eq!(focused.status.code(), Some(5));
+    assert_eq!(focused_value["quality"]["unsupported"], true);
+    assert!(
+        focused_value["quality"]["strict_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue == "unsupported")
+    );
+}
+
+#[test]
 fn history_completeness_marks_shallow_and_missing_objects_and_strict_rejects_them() {
     let shallow = HistoryFixtureRepository::new();
     let head = {

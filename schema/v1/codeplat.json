@@ -148,14 +148,17 @@
     },
     "quality": {
       "type": "object",
-      "required": ["stale", "truncated", "incomplete", "unsupported", "partial", "strict_issues"],
+      "required": ["projection", "stale", "truncated", "resource_limited", "incomplete", "unsafe_paths", "unsupported", "partial", "strict_issues"],
       "properties": {
+        "projection": { "type": "boolean" },
         "stale": { "type": "boolean" },
         "truncated": { "type": "boolean" },
+        "resource_limited": { "type": "boolean" },
         "incomplete": { "type": "boolean" },
+        "unsafe_paths": { "type": "boolean" },
         "unsupported": { "type": "boolean" },
         "partial": { "type": "boolean" },
-        "strict_issues": { "type": "array", "items": { "enum": ["stale", "truncated", "incomplete", "unsupported", "partial"] } }
+        "strict_issues": { "type": "array", "items": { "enum": ["stale", "resource_limit", "truncated", "incomplete", "unsafe_path", "unsupported", "partial"] } }
       },
       "additionalProperties": true
     },
