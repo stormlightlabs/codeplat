@@ -105,16 +105,18 @@ pub fn report_quality(
             .any(|path| relevant_paths.contains(path))
     });
     let partial = map.is_some_and(|report| {
-        report
+        report.files.iter().any(|file| {
+            relevant_paths.contains(&file.path)
+                && file.status == FileAnalysisStatus::Partial
+                && file
+                    .limitations
+                    .iter()
+                    .any(|limitation| !limitation.starts_with("The per-file symbol limit"))
+        }) || report
             .availability
-            .partial_path_names
+            .cache_unavailable_path_names
             .iter()
             .any(|path| relevant_paths.contains(path))
-            || report
-                .availability
-                .cache_unavailable_path_names
-                .iter()
-                .any(|path| relevant_paths.contains(path))
     });
     let mut strict_issues = Vec::new();
     if stale {
@@ -300,6 +302,24 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
             },
         );
 
+        if let Some((purpose, score, reason)) = conventional_entry_point(&file.path, root.as_deref()) {
+            add_reading_candidate(
+                &mut candidates,
+                ReadingCandidateInput {
+                    purpose,
+                    path: file.path.clone(),
+                    project_root: root.clone(),
+                    evidence_kinds: [ReadingEvidenceKind::ProjectTopology, ReadingEvidenceKind::SourceMap]
+                        .into_iter()
+                        .collect(),
+                    score,
+                    confidence: ConfidenceTier::High,
+                    reason: reason.to_owned(),
+                    limitations: file.limitations.clone(),
+                },
+            );
+        }
+
         if let Some(rank) = rank
             && rank.focus_matches > 0
         {
@@ -325,7 +345,7 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
         if !is_file_landmark {
             continue;
         }
-        let (purpose, confidence, score) = match landmark.kind {
+        let (purpose, confidence, mut score) = match landmark.kind {
             LandmarkKind::AgentInstructions
             | LandmarkKind::ContributorInstructions
             | LandmarkKind::Readme
@@ -351,6 +371,9 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
             | LandmarkKind::NestedRepository
             | LandmarkKind::Unknown => continue,
         };
+        if landmark.kind == LandmarkKind::Readme && !landmark.path.contains('/') {
+            score = score.saturating_add(500_000);
+        }
         let mut evidence = [ReadingEvidenceKind::Landmark].into_iter().collect::<BTreeSet<_>>();
         if landmark.project_root.is_some() {
             evidence.insert(ReadingEvidenceKind::ProjectTopology);
@@ -425,7 +448,10 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
 
     for root in &evidence.project_roots {
         for manifest in &root.manifests {
-            if evidence.landmarks.iter().any(|landmark| landmark.path == *manifest) {
+            if let Some(candidate) = candidates.get_mut(&(ReadingPurpose::StartHere, manifest.clone())) {
+                if root.path == "." {
+                    candidate.score = candidate.score.max(3_095_250_000);
+                }
                 continue;
             }
             add_reading_candidate(
@@ -437,7 +463,7 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
                     evidence_kinds: [ReadingEvidenceKind::Landmark, ReadingEvidenceKind::ProjectTopology]
                         .into_iter()
                         .collect(),
-                    score: 3_000_000_000,
+                    score: if root.path == "." { 3_090_000_000 } else { 3_000_000_000 },
                     confidence: ConfidenceTier::High,
                     reason: format!("project root manifest for the {} root", root.kind.label()),
                     limitations: Vec::new(),
@@ -520,6 +546,15 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
             selected_paths.insert(candidate.path.clone());
             selected.push(candidate);
         }
+    }
+
+    if let Some(primary_root) = evidence.project_roots.iter().find(|root| root.path == ".")
+        && let Some(manifest) = primary_root.manifests.first()
+        && !selected_paths.contains(manifest)
+        && let Some(candidate) = candidates.get(&(ReadingPurpose::StartHere, manifest.clone()))
+    {
+        selected_paths.insert(candidate.path.clone());
+        selected.push(candidate.clone());
     }
 
     for root in &evidence.project_roots {
@@ -619,6 +654,28 @@ pub fn build_reading_plan(history: &HistoryReport, map: &MapReport) -> ReadingPl
         );
     }
     ReadingPlan { recommendations, omitted_project_roots, shortfall, limitations }
+}
+
+fn conventional_entry_point(path: &str, project_root: Option<&str>) -> Option<(ReadingPurpose, u64, &'static str)> {
+    let relative = match project_root {
+        Some(".") | None => path,
+        Some(root) => path.strip_prefix(root)?.strip_prefix('/')?,
+    };
+    match relative {
+        "src/lib.rs" | "lib.rs" | "src/lib.ts" | "src/lib.js" => Some((
+            ReadingPurpose::Architecture,
+            2_800_000_000,
+            "conventional library entry point for this project root",
+        )),
+        "src/main.rs" | "main.rs" | "src/main.py" | "main.py" | "src/main.rb" | "main.rb" | "src/main.ts"
+        | "main.ts" | "src/main.js" | "main.js" | "src/index.ts" | "index.ts" | "src/index.js" | "index.js"
+        | "src/index.tsx" | "index.tsx" | "src/index.jsx" | "index.jsx" => Some((
+            ReadingPurpose::Runtime,
+            2_800_000_000,
+            "conventional runtime entry point for this project root",
+        )),
+        _ => None,
+    }
 }
 
 pub fn briefing_summary(history: &HistoryReport, map: &MapReport) -> String {

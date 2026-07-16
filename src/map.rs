@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gix::bstr::ByteSlice;
@@ -419,7 +420,7 @@ fn classified_omission(path: String, classifications: Vec<SourceClassification>,
     SourceOmission {
         path,
         reason: OmissionReason::Classified,
-        detail: "The path was classified as generated, vendored, minified, or a source map and was excluded before parsing; use an exact `--focus-path` or `--profile evidence` to inspect it when safe.".to_owned(),
+        detail: "The path was classified as generated, vendored, minified, or a source map and was excluded before parsing; use an exact `--focus-path` to inspect it when safe.".to_owned(),
         classifications,
         classification_overridden: overridden,
     }
@@ -490,14 +491,21 @@ fn classified_path(path: &str) -> Vec<SourceClassification> {
             "target"
                 | "dist"
                 | "build"
+                | "_build"
                 | "out"
                 | "coverage"
                 | "generated"
                 | "gen"
                 | "obj"
                 | "bin"
+                | ".gradle"
                 | ".next"
                 | ".nuxt"
+                | ".svelte-kit"
+                | ".astro"
+                | ".turbo"
+                | ".vite"
+                | ".dart_tool"
                 | "tmp"
         ) {
             (
@@ -508,6 +516,9 @@ fn classified_path(path: &str) -> Vec<SourceClassification> {
             component.as_str(),
             "vendor"
                 | "node_modules"
+                | ".pnpm-store"
+                | ".venv"
+                | "venv"
                 | "bower_components"
                 | "third_party"
                 | "third-party"
@@ -556,6 +567,36 @@ fn classified_path(path: &str) -> Vec<SourceClassification> {
     classifications.sort_by(|left, right| left.kind.cmp(&right.kind).then_with(|| left.reason.cmp(&right.reason)));
     classifications.dedup();
     classifications
+}
+
+fn classification_record_path(path: &str) -> String {
+    let mut prefix = String::new();
+    for component in path.split('/').filter(|component| !component.is_empty()) {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        if !classified_path(&prefix).is_empty() {
+            return prefix;
+        }
+    }
+    path.to_owned()
+}
+
+fn focus_includes_path(path: &str, focus_paths: &[String]) -> bool {
+    focus_paths.iter().any(|focus_path| {
+        let focus_path = focus_path.trim().replace('\\', "/");
+        let focus_path = focus_path.trim_start_matches("./");
+        !focus_path.is_empty() && (path == focus_path || path.starts_with(&format!("{focus_path}/")))
+    })
+}
+
+fn focus_descends_from(path: &str, focus_paths: &[String]) -> bool {
+    focus_paths.iter().any(|focus_path| {
+        let focus_path = focus_path.trim().replace('\\', "/");
+        let focus_path = focus_path.trim_start_matches("./");
+        !focus_path.is_empty() && (focus_path == path || focus_path.starts_with(&format!("{path}/")))
+    })
 }
 
 fn comment_marker(line: &str) -> Option<&str> {
@@ -620,12 +661,7 @@ fn source_classifications(path: &str, source: &str) -> Vec<SourceClassification>
 }
 
 fn classification_override(path: &str, settings: &MapSettings) -> bool {
-    settings.profile == AnalysisProfile::Evidence
-        || settings.focus_paths.iter().any(|focus_path| {
-            let focus_path = focus_path.trim().replace('\\', "/");
-            let focus_path = focus_path.trim_start_matches("./");
-            !focus_path.is_empty() && (path == focus_path || path.starts_with(&format!("{focus_path}/")))
-        })
+    focus_includes_path(path, &settings.focus_paths)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

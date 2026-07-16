@@ -131,15 +131,23 @@ pub fn explicitly_excluded(exclusions: Option<&Gitignore>, path: &Path) -> bool 
     exclusions.is_some_and(|matcher| matcher.matched_path_or_any_parents(path, false).is_ignore())
 }
 
+pub struct TreeCollection<'a> {
+    pub files: &'a mut BTreeSet<String>,
+    pub submodule_paths: &'a mut BTreeSet<String>,
+    pub classification_records: &'a mut Vec<SourceClassificationSample>,
+    pub max_files: usize,
+    pub max_depth: usize,
+    pub focus_paths: &'a [String],
+}
+
 pub fn collect_tree_files(
-    repository: &gix::Repository, tree_id: &gix::Id<'_>, prefix: &[u8], files: &mut BTreeSet<String>,
-    submodule_paths: &mut BTreeSet<String>, max_files: usize, max_depth: usize,
+    repository: &gix::Repository, tree_id: &gix::Id<'_>, prefix: &[u8], collection: &mut TreeCollection<'_>,
 ) -> Result<bool> {
     let mut stack = vec![(tree_id.detach(), prefix.to_vec(), 0usize)];
     let mut truncated = false;
     while let Some((tree_id, prefix, depth)) = stack.pop() {
-        if files.len() >= max_files || depth > max_depth {
-            truncated = files.len() >= max_files || depth > max_depth;
+        if collection.files.len() >= collection.max_files || depth > collection.max_depth {
+            truncated = collection.files.len() >= collection.max_files || depth > collection.max_depth;
             break;
         }
         let tree = repository
@@ -148,7 +156,7 @@ pub fn collect_tree_files(
         let mut names = BTreeSet::new();
         let mut entries = Vec::new();
         for entry in tree.iter() {
-            if entries.len() >= max_files {
+            if entries.len() >= collection.max_files {
                 truncated = true;
                 break;
             }
@@ -164,7 +172,7 @@ pub fn collect_tree_files(
         }
         entries.reverse();
         for entry in entries {
-            if files.len() >= max_files {
+            if collection.files.len() >= collection.max_files {
                 break;
             }
             let mut path_bytes = prefix.clone();
@@ -175,17 +183,22 @@ pub fn collect_tree_files(
             let path = security::validate_repository_path(&path_bytes)
                 .map_err(|error| MapError::safety("decoding a tracked tree path", error))?;
             if entry.mode().is_tree() {
+                let classifications = classified_path(&path);
+                if !classifications.is_empty() && !focus_descends_from(&path, collection.focus_paths) {
+                    record_classification(collection.classification_records, &path, &classifications, false);
+                    continue;
+                }
                 stack.push((entry.id().detach(), path.into_bytes(), depth.saturating_add(1)));
             } else {
                 let is_submodule = entry.mode().is_commit();
-                if !files.insert(path.clone()) {
+                if !collection.files.insert(path.clone()) {
                     return Err(MapError::safety(
                         "decoding a tracked tree path",
                         security::PathSafetyError { kind: security::PathSafetyKind::Collision },
                     ));
                 }
                 if is_submodule {
-                    submodule_paths.insert(path);
+                    collection.submodule_paths.insert(path);
                 }
             }
         }
@@ -194,26 +207,33 @@ pub fn collect_tree_files(
 }
 
 pub fn collect_index_files(
-    repository: &gix::Repository, files: &mut BTreeSet<String>, max_files: usize,
+    repository: &gix::Repository, files: &mut BTreeSet<String>, max_files: usize, focus_paths: &[String],
+    classification_records: &mut Vec<SourceClassificationSample>,
 ) -> Result<bool> {
     let index = repository
         .index_or_empty()
         .map_err(|error| MapError::analysis("reading the worktree index", error))?;
     let mut truncated = false;
     for (path, _) in index.entries_with_paths_by_filter_map(|_, entry| Some(entry.id)) {
+        let path = security::validate_repository_path(path.as_bytes())
+            .map_err(|error| MapError::safety("decoding a worktree index path", error))?;
+        let record_path = classification_record_path(&path);
+        let classifications = classified_path(&record_path);
+        if !classifications.is_empty() && !focus_includes_path(&path, focus_paths) {
+            record_classification(classification_records, &record_path, &classifications, false);
+            continue;
+        }
         if files.len() >= max_files {
             truncated = true;
             break;
         }
-        let path = security::validate_repository_path(path.as_bytes())
-            .map_err(|error| MapError::safety("decoding a worktree index path", error))?;
         files.insert(path);
     }
     Ok(truncated)
 }
 
 pub fn collect_modified_paths(
-    repository: &gix::Repository, repository_root: &Path, max_file_bytes: usize,
+    repository: &gix::Repository, repository_root: &Path, max_file_bytes: usize, focus_paths: &[String],
 ) -> Result<BTreeSet<String>> {
     let index = repository
         .index_or_load_from_head_or_empty()
@@ -222,6 +242,9 @@ pub fn collect_modified_paths(
     for (path, id) in index.entries_with_paths_by_filter_map(|_, entry| Some(entry.id)) {
         let path = security::validate_repository_path(path.as_bytes())
             .map_err(|error| MapError::safety("decoding a status path", error))?;
+        if !classified_path(&path).is_empty() && !focus_includes_path(&path, focus_paths) {
+            continue;
+        }
         let worktree =
             match security::read_worktree_file_limited(repository_root, repository_root, &path, max_file_bytes) {
                 Ok(bytes) => bytes,
@@ -251,7 +274,7 @@ pub fn collect_modified_paths(
 pub fn walk_files(
     root: &Path, repository_root: &Path, standard_filters: bool, max_entries: usize, recursive: bool,
     prune_classified_directories: bool, focus_paths: &[String],
-) -> (BTreeMap<String, bool>, Vec<WalkIssue>) {
+) -> (BTreeMap<String, bool>, Vec<WalkIssue>, Vec<SourceClassificationSample>) {
     let mut builder = WalkBuilder::new(root);
     builder
         .standard_filters(standard_filters)
@@ -260,28 +283,37 @@ pub fn walk_files(
         .sort_by_file_path(|left, right| left.cmp(right));
     let filter_repository_root = repository_root.to_owned();
     let filter_focus_paths = focus_paths.to_owned();
+    let classified_directories = Arc::new(Mutex::new(Vec::new()));
+    let filter_classified_directories = Arc::clone(&classified_directories);
     builder.filter_entry(move |entry| {
         if entry.depth() == 0 || !entry.file_type().is_some_and(|file_type| file_type.is_dir()) {
             return true;
         }
+        let relative = entry
+            .path()
+            .strip_prefix(&filter_repository_root)
+            .ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"));
         let preserve_classified_directory = filter_focus_paths.iter().any(|focus_path| {
             let focus_path = focus_path.trim().replace('\\', "/");
             let focus_path = focus_path.trim_start_matches("./");
-            let relative = entry
-                .path()
-                .strip_prefix(&filter_repository_root)
-                .ok()
-                .map(|path| path.to_string_lossy().replace('\\', "/"));
-            relative.is_some_and(|relative| {
+            relative.as_deref().is_some_and(|relative| {
                 !focus_path.is_empty() && (focus_path == relative || focus_path.starts_with(&format!("{relative}/")))
             })
         });
-        !pruned_directory(
-            entry.path(),
-            &filter_repository_root,
-            recursive,
-            prune_classified_directories && !preserve_classified_directory,
-        )
+        if prune_classified_directories
+            && !preserve_classified_directory
+            && let Some(relative) = relative
+        {
+            let classifications = classified_path(&relative);
+            if !classifications.is_empty() {
+                if let Ok(mut records) = filter_classified_directories.lock() {
+                    records.push(SourceClassificationSample { path: relative, classifications, overridden: false });
+                }
+                return false;
+            }
+        }
+        !pruned_directory(entry.path(), &filter_repository_root, recursive)
     });
     let mut files = BTreeMap::new();
     let mut errors = Vec::new();
@@ -328,44 +360,20 @@ pub fn walk_files(
         native_paths.insert(path.clone(), entry.path().to_owned());
         files.insert(path, entry.path_is_symlink());
     }
-    (files, errors)
+    let mut classified_directories = classified_directories
+        .lock()
+        .map(|records| records.clone())
+        .unwrap_or_default();
+    classified_directories.sort_by(|left, right| left.path.cmp(&right.path));
+    classified_directories.dedup_by(|right, left| right.path == left.path);
+    (files, errors, classified_directories)
 }
 
-pub fn pruned_directory(
-    path: &Path, repository_root: &Path, recursive: bool, prune_classified_directories: bool,
-) -> bool {
+pub fn pruned_directory(path: &Path, repository_root: &Path, recursive: bool) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return true;
     };
     if name == ".git" {
-        return true;
-    }
-    if prune_classified_directories
-        && matches!(
-            name.to_ascii_lowercase().as_str(),
-            "target"
-                | "dist"
-                | "build"
-                | "out"
-                | "coverage"
-                | "generated"
-                | "gen"
-                | "obj"
-                | "bin"
-                | ".next"
-                | ".nuxt"
-                | "tmp"
-                | "vendor"
-                | "node_modules"
-                | "bower_components"
-                | "third_party"
-                | "third-party"
-                | "external"
-                | "deps"
-                | "vendor_modules"
-                | "pods"
-        )
-    {
         return true;
     }
     (!recursive)

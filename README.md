@@ -52,8 +52,8 @@ Git repository and keeps the selected scope inside that repository.
 ## Default briefing
 
 `codeplat [PATH]` starts with a repository overview and an ordered reading plan,
-then includes up to five concise, evidence-backed history observations and the
-ranked source map in one versioned Markdown or JSON report.
+then includes up to five concise, evidence-backed history observations and brief
+evidence notes. JSON retains the complete map and history report.
 
 The source map accepts the same focus, token-budget, exclusion, cache, and color controls described below:
 
@@ -75,6 +75,8 @@ JSON reports include each collection's observed total, returned count, truncatio
 state, and reason.
 
 Use `--profile evidence` for a larger, still resource-limited evidence sample.
+Generated, vendored, minified, and source-map paths remain excluded in both
+profiles unless selected with an exact `--focus-path`.
 
 `--map-tokens` bounds the compact map payload; tiny budgets may return only the
 highest-ranked snippet or summaries.

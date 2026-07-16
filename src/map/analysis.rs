@@ -45,19 +45,35 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     }
     let mut tracked_paths = BTreeSet::new();
     let mut submodule_paths = BTreeSet::new();
+    let mut classification_records = Vec::new();
     let tracked_tree_truncated = collect_tree_files(
         &repository,
         &repository
             .head_tree_id_or_empty()
             .map_err(|error| MapError::analysis("resolving the repository HEAD tree", error))?,
         b"",
-        &mut tracked_paths,
-        &mut submodule_paths,
-        limits.max_files,
-        limits.max_syntax_depth,
+        &mut TreeCollection {
+            files: &mut tracked_paths,
+            submodule_paths: &mut submodule_paths,
+            classification_records: &mut classification_records,
+            max_files: limits.max_files,
+            max_depth: limits.max_syntax_depth,
+            focus_paths: &settings.focus_paths,
+        },
     )?;
-    let tracked_index_truncated = collect_index_files(&repository, &mut tracked_paths, limits.max_files)?;
-    let modified_paths = collect_modified_paths(&repository, repository_root, limits.max_file_bytes)?;
+    let tracked_index_truncated = collect_index_files(
+        &repository,
+        &mut tracked_paths,
+        limits.max_files,
+        &settings.focus_paths,
+        &mut classification_records,
+    )?;
+    let modified_paths = collect_modified_paths(
+        &repository,
+        repository_root,
+        limits.max_file_bytes,
+        &settings.focus_paths,
+    )?;
 
     let mut candidates = BTreeMap::new();
     for path in tracked_paths
@@ -68,13 +84,13 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         candidates.insert(path, Candidate { state, symlink: false });
     }
 
-    let (visible_paths, visible_errors) = walk_files(
+    let (visible_paths, visible_errors, visible_classified_directories) = walk_files(
         &scope.selected_path,
         repository_root,
         true,
         limits.max_files,
         settings.recursive,
-        settings.profile != AnalysisProfile::Evidence,
+        true,
         &settings.focus_paths,
     );
     for (path, symlink) in &visible_paths {
@@ -87,18 +103,17 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             .or_insert(Candidate { state: WorktreeState::Untracked, symlink: *symlink });
     }
 
-    let (all_paths, all_errors) = walk_files(
+    let (all_paths, all_errors, all_classified_directories) = walk_files(
         &scope.selected_path,
         repository_root,
         false,
         limits.max_files,
         settings.recursive,
-        false,
-        &[],
+        true,
+        &settings.focus_paths,
     );
     let visible_path_set: BTreeSet<_> = visible_paths.keys().cloned().collect();
     let mut omissions = Vec::new();
-    let mut classification_records = Vec::new();
     if tracked_tree_truncated || tracked_index_truncated {
         omissions.push(omission(
             scope.relative_path.clone(),
@@ -115,6 +130,20 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             WalkIssue::Safety(detail) => (OmissionReason::UnsafePath, detail),
         };
         omissions.push(omission(scope.relative_path.clone(), reason, detail));
+    }
+    for directory in visible_classified_directories
+        .into_iter()
+        .chain(all_classified_directories)
+    {
+        record_classification(
+            &mut classification_records,
+            &directory.path,
+            &directory.classifications,
+            false,
+        );
+        if !omissions.iter().any(|omission| omission.path == directory.path) {
+            omissions.push(classified_omission(directory.path, directory.classifications, false));
+        }
     }
     for (path, symlink) in all_paths {
         if is_git_internal(&path)
@@ -135,13 +164,12 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             }
             continue;
         }
-        let reason = if symlink { OmissionReason::Symlink } else { OmissionReason::IgnoredUntracked };
         let detail = if symlink {
-            "Symlinked source paths are omitted so map traversal cannot follow a path outside the requested scope."
+            "The ignored untracked symlink was inventoried without following its target."
         } else {
             "The untracked Rust file was omitted by the ignore crate traversal policy."
         };
-        omissions.push(omission(path, reason, detail));
+        omissions.push(omission(path, OmissionReason::IgnoredUntracked, detail));
     }
 
     let requested_cache_files = settings
@@ -478,7 +506,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 .to_owned(),
             "JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, and C# use explicit grammar variants; query-pack provenance is reported per language."
                 .to_owned(),
-            "Tracked files are eligible even when ignore rules match them, except deterministic generated/vendor/minified classifications; exact focus paths and the evidence profile can opt in within the safety limits."
+            "Tracked files are eligible even when ignore rules match them, except deterministic generated/vendor/minified classifications; exact focus paths can opt in within the safety limits."
                 .to_owned(),
         ]
     } else {
@@ -487,7 +515,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 .to_owned(),
             "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
                 .to_owned(),
-            "Tracked files are eligible even when ignore rules match them, except deterministic generated/vendor/minified classifications; exact focus paths and the evidence profile can opt in within the safety limits."
+            "Tracked files are eligible even when ignore rules match them, except deterministic generated/vendor/minified classifications; exact focus paths can opt in within the safety limits."
                 .to_owned(),
         ]
     };
@@ -566,7 +594,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     }) || files.iter().any(|file| {
         file.limitations
             .iter()
-            .any(|limitation| limitation.contains("resource limit"))
+            .any(|limitation| actionable_resource_limit(limitation))
     });
     let unsupported_path_names = omissions
         .iter()
@@ -652,6 +680,11 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     };
     bound_map_report(&mut report, settings.profile, &limits);
     Ok(report)
+}
+
+fn actionable_resource_limit(limitation: &str) -> bool {
+    !limitation.starts_with("The per-file symbol limit")
+        && (limitation.contains("resource limit") || limitation.starts_with("Syntax traversal reached the depth limit"))
 }
 
 pub fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits: &ReportLimits) {
@@ -821,6 +854,9 @@ pub fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits
             TruncationReason::CollectionLimit,
         ),
     };
+    if profile == AnalysisProfile::Evidence {
+        bound_evidence_output(report, 4 * 1_024 * 1_024);
+    }
     if [
         report.collections.files.truncated,
         report.collections.symbols.truncated,
@@ -839,6 +875,67 @@ pub fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits
             "The emitted map is a bounded sample; collection totals and truncation reasons identify evidence that was not returned."
                 .to_owned(),
         );
+    }
+}
+
+fn bound_evidence_output(report: &mut MapReport, max_json_bytes: usize) {
+    while serde_json::to_vec(&*report).is_ok_and(|json| json.len() > max_json_bytes) {
+        let symbols_before = report.files.iter().map(|file| file.symbols.len()).sum::<usize>();
+        for file in &mut report.files {
+            if file.symbols.len() > 16 {
+                file.symbols.truncate(file.symbols.len().div_ceil(2).max(16));
+            }
+        }
+        let symbols_after = report.files.iter().map(|file| file.symbols.len()).sum::<usize>();
+        if symbols_after < symbols_before {
+            continue;
+        }
+
+        let mut changed = false;
+        changed |= truncate_half(&mut report.omissions, 16);
+        changed |= truncate_half(&mut report.findings, 16);
+        changed |= truncate_half(&mut report.edges, 16);
+        changed |= truncate_half(&mut report.ranking, 16);
+        changed |= truncate_half(&mut report.selection.snippets, 16);
+        changed |= truncate_half(&mut report.landmarks, 16);
+        changed |= truncate_half(&mut report.project_roots, 8);
+        if !changed {
+            changed = truncate_half(&mut report.files, 8);
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    update_output_summary(&mut report.collections.files, report.files.len());
+    update_output_summary(
+        &mut report.collections.symbols,
+        report.files.iter().map(|file| file.symbols.len()).sum(),
+    );
+    update_output_summary(&mut report.collections.omissions, report.omissions.len());
+    update_output_summary(&mut report.collections.findings, report.findings.len());
+    update_output_summary(&mut report.collections.edges, report.edges.len());
+    update_output_summary(&mut report.collections.ranking, report.ranking.len());
+    update_output_summary(&mut report.collections.snippets, report.selection.snippets.len());
+    update_output_summary(&mut report.collections.landmarks, report.landmarks.len());
+    update_output_summary(&mut report.collections.project_roots, report.project_roots.len());
+}
+
+fn truncate_half<T>(items: &mut Vec<T>, minimum: usize) -> bool {
+    if items.len() <= minimum {
+        return false;
+    }
+    let previous = items.len();
+    items.truncate(items.len().div_ceil(2).max(minimum));
+    items.len() < previous
+}
+
+fn update_output_summary(summary: &mut CollectionSummary, returned: usize) {
+    let output_truncated = returned < summary.returned;
+    summary.returned = returned.min(summary.total);
+    summary.truncated = summary.returned < summary.total;
+    if output_truncated {
+        summary.reason = Some(TruncationReason::OutputBudget);
     }
 }
 

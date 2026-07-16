@@ -69,7 +69,7 @@ analysis limits, recommendations, or actionable quality status.
       source maps, `.min.*` files, and a documented bounded minification heuristic.
 - [x] Compact mode records typed totals and bounded samples but does not parse or recommend classified files,
       including tracked files.
-- [x] Exact focus paths and the evidence profile can include classified text files within existing safety and
+- [x] Exact focus paths can include classified text files within existing safety and
       resource limits; unsafe, binary, and oversize protections are never overridden.
 - [x] Classification reason and override state are visible in Markdown/JSON and deterministic across runs.
 - [x] A vendor/minified file cannot make an otherwise complete reading plan partial or consume the per-file symbol

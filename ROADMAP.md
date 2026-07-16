@@ -171,7 +171,7 @@ Default compact analysis applies deterministic, explainable classification befor
 - tracked status never grants generated/vendor content priority over maintained source.
 
 Compact mode records typed counts and bounded samples but does not parse or recommend classified files. An exact
-focus path or evidence profile may include them when the file remains within all safety and resource limits. A
+focus path may include them when the file remains within all safety and resource limits. A
 caller-supplied focus never overrides unsafe-path, binary, or hard resource protections.
 
 ### First-Class Language Support

@@ -1272,7 +1272,10 @@ impl Report {
         writeln!(output, "## Summary").expect("writing to a string cannot fail");
         writeln!(output).expect("writing to a string cannot fail");
         writeln!(output, "{}", utils::sanitize_text(&self.summary)).expect("writing to a string cannot fail");
-        Render::quality_markdown(&mut output, &self.quality, self.command.name);
+        let compact_briefing = self.command.name == CommandName::Briefing && self.profile == AnalysisProfile::Compact;
+        if !compact_briefing {
+            Render::quality_markdown(&mut output, &self.quality, self.command.name);
+        }
 
         if self.command.name == CommandName::Briefing {
             if let Some(map) = &self.map {
@@ -1282,13 +1285,18 @@ impl Report {
                 Render::reading_plan_markdown(&mut output, reading_plan);
             }
             if let Some(history) = &self.history {
-                if self.profile == AnalysisProfile::Compact {
+                if compact_briefing {
                     Render::history_briefing_markdown(&mut output, history);
                 } else {
                     Render::history_markdown(&mut output, history);
                 }
             }
-            if let Some(map) = &self.map {
+            if compact_briefing {
+                Render::quality_markdown(&mut output, &self.quality, self.command.name);
+                if let Some(map) = &self.map {
+                    Render::briefing_evidence_notes(&mut output, map);
+                }
+            } else if let Some(map) = &self.map {
                 Render::map_markdown(&mut output, map);
             }
         } else {

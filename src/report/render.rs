@@ -265,6 +265,56 @@ impl Render {
         Render::history_limitations(output, history);
     }
 
+    pub fn briefing_evidence_notes(output: &mut String, map: &super::MapReport) {
+        let has_notes = map.classifications.total > 0
+            || map.availability.unsupported_paths > 0
+            || map.availability.partial_files > 0
+            || map.collections.files.truncated
+            || map.collections.omissions.truncated;
+        if !has_notes {
+            return;
+        }
+        writeln!(output).expect("writing to a string cannot fail");
+        writeln!(output, "## Evidence notes").expect("writing to a string cannot fail");
+        writeln!(output).expect("writing to a string cannot fail");
+        if map.classifications.total > 0 {
+            writeln!(
+                output,
+                "- Excluded {} generated, vendor, minified, or source-map path(s) before parsing.",
+                map.classifications.total
+            )
+            .expect("writing to a string cannot fail");
+        }
+        if map.availability.unsupported_paths > 0 {
+            writeln!(
+                output,
+                "- {} source-like path(s) use an unsupported language; relevant paths are reflected in quality.",
+                map.availability.unsupported_paths
+            )
+            .expect("writing to a string cannot fail");
+        }
+        if map.availability.partial_files > 0 {
+            writeln!(
+                output,
+                "- {} analyzed file(s) contain bounded or incomplete structural evidence; recommendation limitations identify relevant cases.",
+                map.availability.partial_files
+            )
+            .expect("writing to a string cannot fail");
+        }
+        if map.collections.files.truncated || map.collections.omissions.truncated {
+            writeln!(
+                output,
+                "- Compact collections are projected; JSON retains totals and truncation reasons."
+            )
+            .expect("writing to a string cannot fail");
+        }
+        writeln!(
+            output,
+            "Detailed structural evidence: use `codeplat map`, `codeplat explain`, or `--json`."
+        )
+        .expect("writing to a string cannot fail");
+    }
+
     fn history_header(output: &mut String, history: &super::HistoryReport) {
         writeln!(output).expect("writing to a string cannot fail");
         writeln!(output, "## History analysis").expect("writing to a string cannot fail");
@@ -470,11 +520,7 @@ impl Render {
                     output,
                     "- `{}` — {} [{}]",
                     utils::escape_inline_code(&sample.path),
-                    if sample.overridden {
-                        "included by explicit focus/evidence override"
-                    } else {
-                        "excluded before parsing"
-                    },
+                    if sample.overridden { "included by explicit focus override" } else { "excluded before parsing" },
                     reasons
                 )
                 .expect("writing to a string cannot fail");
