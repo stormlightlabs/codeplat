@@ -418,12 +418,13 @@ impl SymbolKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OmissionReason {
     IgnoredUntracked,
     UnsupportedLanguage,
     NonSource,
+    Classified,
     ExplicitExclusion,
     CacheUnavailable,
     Symlink,
@@ -440,6 +441,7 @@ impl OmissionReason {
             Self::IgnoredUntracked => "ignored_untracked",
             Self::UnsupportedLanguage => "unsupported_language",
             Self::NonSource => "non_source",
+            Self::Classified => "classified",
             Self::ExplicitExclusion => "explicit_exclusion",
             Self::CacheUnavailable => "cache_unavailable",
             Self::Symlink => "symlink",

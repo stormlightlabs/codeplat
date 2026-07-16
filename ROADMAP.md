@@ -68,7 +68,8 @@ and identified product-usability work that is being addressed incrementally:
 - compact truncation, unsupported source, and partial-file flags were common enough to obscure which reports
   were genuinely unusable;
 - Go, Lua, and Zig recur in the real project corpus but currently receive no structural map;
-- minified or generated files can consume parser limits and produce low-value partial diagnostics.
+- minified or generated files are now classified before compact parsing, with bounded evidence samples and safe
+  explicit overrides for focused inspection.
 
 The detailed sweep evidence lives under `.sandbox/reports/`. It is development evidence, not a portable test
 fixture or a promise about private repositories.
@@ -294,7 +295,8 @@ Linux, macOS, Windows, and Rust 1.85.
 - Project-root balancing can conflict with task focus. Explicit focus wins, while the report records roots that
   received no recommendation and why.
 - Generated/minified detection can misclassify maintained source. Rules must be deterministic, reported, tested,
-  and safely overridable.
+  and safely overridable; the bounded heuristic is deliberately conservative and its thresholds are documented in
+  the README.
 - Go, Lua, and Zig grammar/query shapes will evolve independently. Pin versions and rerun each conformance corpus
   before upgrades.
 - Compact quality semantics affect automation. Preserve old field meanings where possible; otherwise version the

@@ -396,14 +396,56 @@ impl Render {
         }
         writeln!(
             output,
-            "Inventory: {} tracked ({} modified), {} untracked, {} analyzed, {} omitted",
+            "Inventory: {} tracked ({} modified), {} untracked, {} analyzed, {} omitted, {} classified",
             map.inventory.tracked,
             map.inventory.modified,
             map.inventory.untracked,
             map.inventory.analyzed,
-            map.inventory.omitted
+            map.inventory.omitted,
+            map.classifications.total
         )
         .expect("writing to a string cannot fail");
+        if map.classifications.total > 0 {
+            writeln!(
+                output,
+                "Classifications: {} paths ({} generated, {} vendor, {} minified, {} source maps); {} samples returned{}",
+                map.classifications.total,
+                map.classifications.generated,
+                map.classifications.vendor,
+                map.classifications.minified,
+                map.classifications.source_map,
+                map.classifications.returned,
+                if map.classifications.truncated { "; sample truncated" } else { "" }
+            )
+            .expect("writing to a string cannot fail");
+            Render::section_heading(output, "Generated, vendor, and minified paths");
+            for sample in &map.classifications.samples {
+                let reasons = sample
+                    .classifications
+                    .iter()
+                    .map(|classification| {
+                        format!(
+                            "{} ({})",
+                            classification.kind.label(),
+                            utils::sanitize_text(&classification.reason)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(
+                    output,
+                    "- `{}` — {} [{}]",
+                    utils::escape_inline_code(&sample.path),
+                    if sample.overridden {
+                        "included by explicit focus/evidence override"
+                    } else {
+                        "excluded before parsing"
+                    },
+                    reasons
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
         if map.collections.files.truncated
             || map.collections.symbols.truncated
             || map.collections.omissions.truncated

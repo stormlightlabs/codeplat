@@ -74,6 +74,8 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         true,
         limits.max_files,
         settings.recursive,
+        settings.profile != AnalysisProfile::Evidence,
+        &settings.focus_paths,
     );
     for (path, symlink) in &visible_paths {
         if is_git_internal(path) || !in_scope(path, &scope.relative_path) {
@@ -91,23 +93,36 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         false,
         limits.max_files,
         settings.recursive,
+        false,
+        &[],
     );
     let visible_path_set: BTreeSet<_> = visible_paths.keys().cloned().collect();
     let mut omissions = Vec::new();
+    let mut classification_records = Vec::new();
     for error in visible_errors.into_iter().chain(all_errors) {
         let (reason, detail) = match error {
             WalkIssue::Traversal(detail) => (OmissionReason::TraversalError, detail),
             WalkIssue::Safety(detail) => (OmissionReason::UnsafePath, detail),
         };
-        omissions.push(SourceOmission { path: scope.relative_path.clone(), reason, detail });
+        omissions.push(omission(scope.relative_path.clone(), reason, detail));
     }
     for (path, symlink) in all_paths {
         if is_git_internal(&path)
             || !in_scope(&path, &scope.relative_path)
             || candidates.contains_key(&path)
             || visible_path_set.contains(&path)
-            || support_for_path(Path::new(&path)).is_none()
         {
+            continue;
+        }
+        let classifications = classified_path(&path);
+        if !classifications.is_empty() && !symlink {
+            let overridden = classification_override(&path, settings);
+            record_classification(&mut classification_records, &path, &classifications, overridden);
+            if overridden {
+                candidates.insert(path, Candidate { state: WorktreeState::Untracked, symlink: false });
+            } else {
+                omissions.push(classified_omission(path, classifications, false));
+            }
             continue;
         }
         let reason = if symlink { OmissionReason::Symlink } else { OmissionReason::IgnoredUntracked };
@@ -116,7 +131,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         } else {
             "The untracked Rust file was omitted by the ignore crate traversal policy."
         };
-        omissions.push(SourceOmission { path, reason, detail: detail.to_owned() });
+        omissions.push(omission(path, reason, detail));
     }
 
     let requested_cache_files = settings
@@ -168,14 +183,14 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             .cloned()
             .collect::<BTreeSet<_>>();
         for path in candidates.keys().filter(|path| !kept.contains(*path)) {
-            omissions.push(SourceOmission {
-                path: path.clone(),
-                reason: OmissionReason::TraversalError,
-                detail: format!(
+            omissions.push(omission(
+                path.clone(),
+                OmissionReason::TraversalError,
+                format!(
                     "The file-count resource limit ({}) was reached before this path could be analyzed.",
                     limits.max_files
                 ),
-            });
+            ));
         }
         candidates.retain(|path, _| kept.contains(path));
     }
@@ -187,57 +202,63 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     let mut analyzers = BTreeMap::<SourceLanguage, LanguageAnalyzer>::new();
     for (path, candidate) in candidates {
         if analysis_started.elapsed().as_millis() >= u128::from(limits.max_elapsed_ms) {
-            omissions.push(SourceOmission {
-                path: scope.relative_path.clone(),
-                reason: OmissionReason::TraversalError,
-                detail: format!(
+            omissions.push(omission(
+                scope.relative_path.clone(),
+                OmissionReason::TraversalError,
+                format!(
                     "The analysis time resource limit ({} ms) was reached before this path could be analyzed.",
                     limits.max_elapsed_ms
                 ),
-            });
+            ));
             work_limit_reached = true;
             break;
         }
         let absolute = repository_root.join(&path);
         if explicitly_excluded(exclusions.as_ref(), &absolute) {
-            omissions.push(SourceOmission {
+            omissions.push(omission(
                 path,
-                reason: OmissionReason::ExplicitExclusion,
-                detail: "The caller supplied an exclusion glob for this path.".to_owned(),
-            });
+                OmissionReason::ExplicitExclusion,
+                "The caller supplied an exclusion glob for this path.",
+            ));
             continue;
         }
-        let Some(support) = support_for_path(Path::new(&path)) else {
-            let source_like = is_source_like_path(Path::new(&path));
-            omissions.push(SourceOmission {
-                path: path.clone(),
-                reason: if source_like {
-                    OmissionReason::UnsupportedLanguage
-                } else {
-                    OmissionReason::NonSource
-                },
-                detail: if source_like {
-                    "The source-language extension is not registered with a first-class parser; the path was not parsed."
-                        .to_owned()
-                } else {
-                    "The path is not a registered source-language file; it was inventoried but not parsed.".to_owned()
-                },
-            });
-            continue;
-        };
         let symlink = candidate.symlink
             || fs::symlink_metadata(&absolute)
                 .map(|metadata| metadata.file_type().is_symlink())
                 .unwrap_or(false);
         if symlink {
-            omissions.push(SourceOmission {
+            omissions.push(omission(
                 path,
-                reason: OmissionReason::Symlink,
-                detail: "Symlinked source paths are omitted so map traversal cannot follow a path outside the requested scope."
-                    .to_owned(),
-            });
+                OmissionReason::Symlink,
+                "Symlinked source paths are omitted so map traversal cannot follow a path outside the requested scope.",
+            ));
             continue;
         }
+        let overridden = classification_override(&path, settings);
+        let mut classifications = classified_path(&path);
+        if !classifications.is_empty() {
+            record_classification(&mut classification_records, &path, &classifications, overridden);
+            if !overridden {
+                omissions.push(classified_omission(path, classifications, false));
+                continue;
+            }
+        }
+        let Some(support) = support_for_path(Path::new(&path)) else {
+            let source_like = is_source_like_path(Path::new(&path));
+            let mut path_omission = omission(
+                path,
+                if source_like { OmissionReason::UnsupportedLanguage } else { OmissionReason::NonSource },
+                if source_like {
+                    "The source-language extension is not registered with a first-class parser; the path was not parsed."
+                } else {
+                    "The path is not a registered source-language file; it was inventoried but not parsed."
+                },
+            );
+            path_omission.classifications = classifications;
+            path_omission.classification_overridden = overridden;
+            omissions.push(path_omission);
+            continue;
+        };
         let source = match security::read_worktree_file_limited(
             repository_root,
             &scope.selected_path,
@@ -251,7 +272,10 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 } else {
                     OmissionReason::UnsafePath
                 };
-                omissions.push(SourceOmission { path, reason, detail: error.to_string() });
+                let mut path_omission = omission(path, reason, error.to_string());
+                path_omission.classifications = classifications;
+                path_omission.classification_overridden = overridden;
+                omissions.push(path_omission);
                 continue;
             }
             Err(error) => {
@@ -263,30 +287,59 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 } else {
                     OmissionReason::ReadError
                 };
-                omissions.push(SourceOmission { path, reason, detail: error.to_string() });
+                let mut path_omission = omission(path, reason, error.to_string());
+                path_omission.classifications = classifications;
+                path_omission.classification_overridden = overridden;
+                omissions.push(path_omission);
                 continue;
             }
         };
-        if total_source_bytes.saturating_add(source.len()) > limits.max_total_bytes {
-            omissions.push(SourceOmission {
+        if source.contains(&0) {
+            let mut path_omission = omission(
                 path,
-                reason: OmissionReason::Oversized,
-                detail: format!(
+                OmissionReason::Binary,
+                "Binary or non-UTF-8 source input is not parsed by the Tree-sitter map.",
+            );
+            path_omission.classifications = classifications;
+            path_omission.classification_overridden = overridden;
+            omissions.push(path_omission);
+            continue;
+        }
+        let source_text = match std::str::from_utf8(&source) {
+            Ok(source_text) => source_text,
+            Err(error) => {
+                let mut path_omission = omission(path, OmissionReason::Binary, error.to_string());
+                path_omission.classifications = classifications;
+                path_omission.classification_overridden = overridden;
+                omissions.push(path_omission);
+                continue;
+            }
+        };
+        classifications.extend(source_classifications(&path, source_text));
+        classifications.sort_by(|left, right| left.kind.cmp(&right.kind).then_with(|| left.reason.cmp(&right.reason)));
+        classifications.dedup();
+        if !classifications.is_empty() {
+            record_classification(&mut classification_records, &path, &classifications, overridden);
+            if !overridden {
+                omissions.push(classified_omission(path, classifications, false));
+                continue;
+            }
+        }
+        if total_source_bytes.saturating_add(source.len()) > limits.max_total_bytes {
+            let mut path_omission = omission(
+                path,
+                OmissionReason::Oversized,
+                format!(
                     "The total source-byte resource limit ({}) was reached; this file was not analyzed.",
                     limits.max_total_bytes
                 ),
-            });
+            );
+            path_omission.classifications = classifications;
+            path_omission.classification_overridden = overridden;
+            omissions.push(path_omission);
             continue;
         }
         total_source_bytes = total_source_bytes.saturating_add(source.len());
-        if source.contains(&0) || std::str::from_utf8(&source).is_err() {
-            omissions.push(SourceOmission {
-                path,
-                reason: OmissionReason::Binary,
-                detail: "Binary or non-UTF-8 source input is not parsed by the Tree-sitter map.".to_owned(),
-            });
-            continue;
-        }
         let fingerprint = source_fingerprint(&source);
         let requested = requested_cache_files.contains(&path);
         let forced_refresh =
@@ -318,16 +371,18 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                     cache_stats.misses += 1;
                     if matches!(settings.cache_mode, CacheMode::Manual | CacheMode::Files) {
                         cache_stats.unavailable += 1;
-                        omissions.push(SourceOmission {
-                            path: path.clone(),
-                            reason: OmissionReason::CacheUnavailable,
-                            detail: if settings.cache_mode == CacheMode::Manual {
+                        let mut path_omission = omission(
+                            path.clone(),
+                            OmissionReason::CacheUnavailable,
+                            if settings.cache_mode == CacheMode::Manual {
                                 "Manual cache mode found no usable record for this file and did not refresh it."
                             } else {
                                 "Files cache mode did not refresh this unrequested file because no current cache record was available."
-                            }
-                            .to_owned(),
-                        });
+                            },
+                        );
+                        path_omission.classifications = classifications.clone();
+                        path_omission.classification_overridden = overridden;
+                        omissions.push(path_omission);
                         continue;
                     }
                     let analyzer = analyzers
@@ -374,6 +429,8 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             status,
             symbols,
             limitations,
+            classifications,
+            classification_overridden: overridden,
         });
     }
 
@@ -411,7 +468,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 .to_owned(),
             "JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, and C# use explicit grammar variants; query-pack provenance is reported per language."
                 .to_owned(),
-            "Tracked files are eligible even when ignore rules match them; ignored untracked files are omitted and recorded."
+            "Tracked files are eligible even when ignore rules match them, except deterministic generated/vendor/minified classifications; exact focus paths and the evidence profile can opt in within the safety limits."
                 .to_owned(),
         ]
     } else {
@@ -420,7 +477,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 .to_owned(),
             "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
                 .to_owned(),
-            "Tracked files are eligible even when ignore rules match them; ignored untracked files are omitted and recorded."
+            "Tracked files are eligible even when ignore rules match them, except deterministic generated/vendor/minified classifications; exact focus paths and the evidence profile can opt in within the safety limits."
                 .to_owned(),
         ]
     };
@@ -507,6 +564,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             analyzed: files.len(),
             omitted: omissions.len(),
         },
+        classifications: classification_summary(&mut classification_records),
         availability: MapAvailability {
             unsupported_paths: omissions
                 .iter()

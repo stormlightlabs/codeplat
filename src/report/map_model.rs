@@ -82,7 +82,7 @@ impl LandmarkKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MapReport {
     #[serde(default)]
     pub profile: AnalysisProfile,
@@ -98,6 +98,8 @@ pub struct MapReport {
     pub query_packs: BTreeMap<String, String>,
     pub exclusions: Vec<String>,
     pub inventory: MapInventory,
+    #[serde(default)]
+    pub classifications: MapClassificationSummary,
     pub files: Vec<SourceFile>,
     pub omissions: Vec<SourceOmission>,
     pub findings: Vec<MapFinding>,
@@ -141,6 +143,14 @@ impl MapReport {
                     .map(|limitation| token_count(limitation))
                     .sum::<usize>(),
             );
+            tokens = tokens.saturating_add(
+                file.classifications
+                    .iter()
+                    .map(|classification| {
+                        token_count(classification.kind.label()) + token_count(&classification.reason)
+                    })
+                    .sum::<usize>(),
+            );
             for symbol in &file.symbols {
                 tokens = tokens.saturating_add(token_count(&symbol.name));
                 tokens = tokens.saturating_add(token_count(&symbol.context));
@@ -155,6 +165,15 @@ impl MapReport {
         for omission in &self.omissions {
             tokens = tokens.saturating_add(token_count(&omission.path));
             tokens = tokens.saturating_add(token_count(&omission.detail));
+            tokens = tokens.saturating_add(
+                omission
+                    .classifications
+                    .iter()
+                    .map(|classification| {
+                        token_count(classification.kind.label()) + token_count(&classification.reason)
+                    })
+                    .sum::<usize>(),
+            );
         }
         for finding in &self.findings {
             tokens = tokens.saturating_add(token_count(finding.kind.label()));
@@ -219,13 +238,31 @@ impl MapReport {
         tokens = tokens
             .saturating_add(landmark_tokens)
             .saturating_add(project_root_tokens);
-        tokens.saturating_add(
-            self.selection
-                .snippets
-                .iter()
-                .map(|snippet| snippet.estimated_tokens)
-                .sum::<usize>(),
-        )
+        tokens
+            .saturating_add(
+                self.selection
+                    .snippets
+                    .iter()
+                    .map(|snippet| snippet.estimated_tokens)
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.classifications
+                    .samples
+                    .iter()
+                    .map(|sample| {
+                        token_count(&sample.path)
+                            + sample
+                                .classifications
+                                .iter()
+                                .map(|classification| {
+                                    token_count(classification.kind.label()) + token_count(&classification.reason)
+                                })
+                                .sum::<usize>()
+                            + 1
+                    })
+                    .sum::<usize>(),
+            )
     }
 
     pub fn summary(&self) -> String {
@@ -380,7 +417,54 @@ pub struct MapInventory {
     pub omitted: usize,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceClassificationKind {
+    Generated,
+    Vendor,
+    Minified,
+    SourceMap,
+}
+
+impl SourceClassificationKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Generated => "generated",
+            Self::Vendor => "vendor",
+            Self::Minified => "minified",
+            Self::SourceMap => "source_map",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceClassification {
+    pub kind: SourceClassificationKind,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceClassificationSample {
+    pub path: String,
+    pub classifications: Vec<SourceClassification>,
+    pub overridden: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MapClassificationSummary {
+    /// Number of unique paths classified before parser/cache analysis.
+    pub total: usize,
+    /// Number of bounded path samples returned in `samples`.
+    pub returned: usize,
+    pub truncated: bool,
+    pub generated: usize,
+    pub vendor: usize,
+    pub minified: usize,
+    pub source_map: usize,
+    pub samples: Vec<SourceClassificationSample>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceFile {
     pub path: String,
     pub language: SourceLanguage,
@@ -389,6 +473,10 @@ pub struct SourceFile {
     pub status: FileAnalysisStatus,
     pub symbols: Vec<SourceSymbol>,
     pub limitations: Vec<String>,
+    #[serde(default)]
+    pub classifications: Vec<SourceClassification>,
+    #[serde(default)]
+    pub classification_overridden: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -466,14 +554,18 @@ pub struct Position {
     pub column: usize,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceOmission {
     pub path: String,
     pub reason: OmissionReason,
     pub detail: String,
+    #[serde(default)]
+    pub classifications: Vec<SourceClassification>,
+    #[serde(default)]
+    pub classification_overridden: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MapFinding {
     pub kind: MapFindingKind,
     pub path: String,

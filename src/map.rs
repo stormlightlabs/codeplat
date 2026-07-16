@@ -50,6 +50,11 @@ const CACHE_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
 const RANK_SCALE: f64 = 1_000_000.0;
 const PAGE_RANK_DAMPING: f64 = 0.85;
 const PAGE_RANK_ITERATIONS: usize = 24;
+const MAX_CLASSIFICATION_SAMPLES: usize = 64;
+const MINIFIED_HEURISTIC_MIN_BYTES: usize = 1_024;
+const MINIFIED_HEURISTIC_MAX_BYTES: usize = 64 * 1_024;
+const MINIFIED_HEURISTIC_MAX_WHITESPACE_PERCENT: usize = 2;
+const MINIFIED_HEURISTIC_MIN_AVERAGE_LINE_BYTES: usize = 512;
 
 type LanguageFactory = fn() -> tree_sitter::Language;
 
@@ -398,6 +403,228 @@ impl Default for MapSettings {
 struct Candidate {
     state: WorktreeState,
     symlink: bool,
+}
+
+fn omission(path: String, reason: OmissionReason, detail: impl Into<String>) -> SourceOmission {
+    SourceOmission {
+        path,
+        reason,
+        detail: detail.into(),
+        classifications: Vec::new(),
+        classification_overridden: false,
+    }
+}
+
+fn classified_omission(path: String, classifications: Vec<SourceClassification>, overridden: bool) -> SourceOmission {
+    SourceOmission {
+        path,
+        reason: OmissionReason::Classified,
+        detail: "The path was classified as generated, vendored, minified, or a source map and was excluded before parsing; use an exact `--focus-path` or `--profile evidence` to inspect it when safe.".to_owned(),
+        classifications,
+        classification_overridden: overridden,
+    }
+}
+
+fn record_classification(
+    records: &mut Vec<SourceClassificationSample>, path: &str, classifications: &[SourceClassification],
+    overridden: bool,
+) {
+    if classifications.is_empty() {
+        return;
+    }
+    if let Some(record) = records.iter_mut().find(|record| record.path == path) {
+        record.classifications.extend_from_slice(classifications);
+        record.overridden |= overridden;
+        record
+            .classifications
+            .sort_by(|left, right| left.kind.cmp(&right.kind).then_with(|| left.reason.cmp(&right.reason)));
+        record.classifications.dedup_by(|right, left| right == left);
+        return;
+    }
+    records.push(SourceClassificationSample {
+        path: path.to_owned(),
+        classifications: classifications.to_vec(),
+        overridden,
+    });
+}
+
+fn classification_summary(records: &mut Vec<SourceClassificationSample>) -> MapClassificationSummary {
+    records.sort_by(|left, right| left.path.cmp(&right.path));
+    records.dedup_by(|right, left| right.path == left.path);
+    let total = records.len();
+    let count = |kind: SourceClassificationKind| {
+        records
+            .iter()
+            .filter(|record| {
+                record
+                    .classifications
+                    .iter()
+                    .any(|classification| classification.kind == kind)
+            })
+            .count()
+    };
+    let samples = records
+        .iter()
+        .take(MAX_CLASSIFICATION_SAMPLES)
+        .cloned()
+        .collect::<Vec<_>>();
+    MapClassificationSummary {
+        total,
+        returned: samples.len(),
+        truncated: samples.len() < total,
+        generated: count(SourceClassificationKind::Generated),
+        vendor: count(SourceClassificationKind::Vendor),
+        minified: count(SourceClassificationKind::Minified),
+        source_map: count(SourceClassificationKind::SourceMap),
+        samples,
+    }
+}
+
+fn classified_path(path: &str) -> Vec<SourceClassification> {
+    let mut classifications = Vec::new();
+    for component in path.split('/').take_while(|component| !component.is_empty()) {
+        let component = component.to_ascii_lowercase();
+        let (kind, reason) = if matches!(
+            component.as_str(),
+            "target"
+                | "dist"
+                | "build"
+                | "out"
+                | "coverage"
+                | "generated"
+                | "gen"
+                | "obj"
+                | "bin"
+                | ".next"
+                | ".nuxt"
+                | "tmp"
+        ) {
+            (
+                SourceClassificationKind::Generated,
+                format!("generated_directory:{component}"),
+            )
+        } else if matches!(
+            component.as_str(),
+            "vendor"
+                | "node_modules"
+                | "bower_components"
+                | "third_party"
+                | "third-party"
+                | "external"
+                | "deps"
+                | "vendor_modules"
+                | "pods"
+        ) {
+            (
+                SourceClassificationKind::Vendor,
+                format!("vendor_directory:{component}"),
+            )
+        } else {
+            continue;
+        };
+        classifications.push(SourceClassification { kind, reason });
+    }
+
+    let filename = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let stem = filename.rsplit_once('.').map_or(filename.as_str(), |(stem, _)| stem);
+    if filename.ends_with(".map") {
+        classifications.push(SourceClassification {
+            kind: SourceClassificationKind::SourceMap,
+            reason: "source_map_filename".to_owned(),
+        });
+    }
+    if filename.contains(".min.") || stem.ends_with(".min") {
+        classifications.push(SourceClassification {
+            kind: SourceClassificationKind::Minified,
+            reason: "minified_filename".to_owned(),
+        });
+    }
+    if matches!(
+        stem,
+        "generated" | "autogenerated" | "auto-generated" | "codegen" | "generated_code"
+    ) || stem.ends_with(".generated")
+        || stem.ends_with(".gen")
+        || stem.ends_with("_pb")
+        || stem.ends_with(".designer")
+    {
+        classifications.push(SourceClassification {
+            kind: SourceClassificationKind::Generated,
+            reason: "generated_filename".to_owned(),
+        });
+    }
+    classifications.sort_by(|left, right| left.kind.cmp(&right.kind).then_with(|| left.reason.cmp(&right.reason)));
+    classifications.dedup();
+    classifications
+}
+
+fn comment_marker(line: &str) -> Option<&str> {
+    let line = line.trim();
+    ["//", "#", "/*", "*", "<!--", "--"]
+        .iter()
+        .find_map(|prefix| line.strip_prefix(prefix).map(str::trim))
+}
+
+fn generated_marker(source: &str) -> bool {
+    source.lines().take(16).any(|line| {
+        let Some(comment) = comment_marker(line) else {
+            return false;
+        };
+        let comment = comment.to_ascii_lowercase();
+        comment.contains("@generated")
+            || comment.contains("generated file")
+            || comment.contains("this file is generated")
+            || comment.contains("this file was generated")
+            || comment.contains("automatically generated")
+            || (comment.contains("code generated") && comment.contains("do not edit"))
+    })
+}
+
+fn minified_heuristic(path: &str, source: &str) -> bool {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    if !matches!(extension, "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx") {
+        return false;
+    }
+    let bytes = source.len();
+    if !(MINIFIED_HEURISTIC_MIN_BYTES..=MINIFIED_HEURISTIC_MAX_BYTES).contains(&bytes) {
+        return false;
+    }
+    let lines = source.lines().collect::<Vec<_>>();
+    let average_line_bytes = bytes / lines.len().max(1);
+    let whitespace = source.bytes().filter(u8::is_ascii_whitespace).count();
+    average_line_bytes >= MINIFIED_HEURISTIC_MIN_AVERAGE_LINE_BYTES
+        && lines.len() <= 3
+        && whitespace.saturating_mul(100) <= bytes.saturating_mul(MINIFIED_HEURISTIC_MAX_WHITESPACE_PERCENT)
+}
+
+fn source_classifications(path: &str, source: &str) -> Vec<SourceClassification> {
+    let mut classifications = classified_path(path);
+    if generated_marker(source) {
+        classifications.push(SourceClassification {
+            kind: SourceClassificationKind::Generated,
+            reason: "generated_header_marker".to_owned(),
+        });
+    }
+    if minified_heuristic(path, source) {
+        classifications.push(SourceClassification {
+            kind: SourceClassificationKind::Minified,
+            reason: "bounded_minification_heuristic".to_owned(),
+        });
+    }
+    classifications.sort_by(|left, right| left.kind.cmp(&right.kind).then_with(|| left.reason.cmp(&right.reason)));
+    classifications.dedup();
+    classifications
+}
+
+fn classification_override(path: &str, settings: &MapSettings) -> bool {
+    settings.profile == AnalysisProfile::Evidence
+        || settings.focus_paths.iter().any(|focus_path| {
+            let focus_path = focus_path.trim().replace('\\', "/");
+            let focus_path = focus_path.trim_start_matches("./");
+            !focus_path.is_empty() && (path == focus_path || path.starts_with(&format!("{focus_path}/")))
+        })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

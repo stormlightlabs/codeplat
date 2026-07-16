@@ -66,16 +66,16 @@ analysis limits, recommendations, or actionable quality status.
 
 **Acceptance criteria:**
 
-- [ ] Deterministic rules cover conventional dependency/vendor/build directories, generated filenames/markers,
+- [x] Deterministic rules cover conventional dependency/vendor/build directories, generated filenames/markers,
       source maps, `.min.*` files, and a documented bounded minification heuristic.
-- [ ] Compact mode records typed totals and bounded samples but does not parse or recommend classified files,
+- [x] Compact mode records typed totals and bounded samples but does not parse or recommend classified files,
       including tracked files.
-- [ ] Exact focus paths and the evidence profile can include classified text files within existing safety and
+- [x] Exact focus paths and the evidence profile can include classified text files within existing safety and
       resource limits; unsafe, binary, and oversize protections are never overridden.
-- [ ] Classification reason and override state are visible in Markdown/JSON and deterministic across runs.
-- [ ] A vendor/minified file cannot make an otherwise complete reading plan partial or consume the per-file symbol
+- [x] Classification reason and override state are visible in Markdown/JSON and deterministic across runs.
+- [x] A vendor/minified file cannot make an otherwise complete reading plan partial or consume the per-file symbol
       budget.
-- [ ] Maintained source that resembles generated output has negative fixtures and an explicit recovery path.
+- [x] Maintained source that resembles generated output has negative fixtures and an explicit recovery path.
 
 **Verification:**
 
@@ -258,7 +258,6 @@ and platform gate is green.
 
 ## Frontier
 
-- Ticket 20: Keep generated, vendored, and minified source out of the default plan.
 - Ticket 21: Add first-class Go maps.
 - Ticket 22: Add first-class Lua maps.
 - Ticket 23: Add first-class Zig maps.

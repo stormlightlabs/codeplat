@@ -243,6 +243,7 @@ pub fn collect_modified_paths(
 
 pub fn walk_files(
     root: &Path, repository_root: &Path, standard_filters: bool, max_entries: usize, recursive: bool,
+    prune_classified_directories: bool, focus_paths: &[String],
 ) -> (BTreeMap<String, bool>, Vec<WalkIssue>) {
     let mut builder = WalkBuilder::new(root);
     builder
@@ -251,11 +252,29 @@ pub fn walk_files(
         .follow_links(false)
         .sort_by_file_path(|left, right| left.cmp(right));
     let filter_repository_root = repository_root.to_owned();
+    let filter_focus_paths = focus_paths.to_owned();
     builder.filter_entry(move |entry| {
         if entry.depth() == 0 || !entry.file_type().is_some_and(|file_type| file_type.is_dir()) {
             return true;
         }
-        !pruned_directory(entry.path(), &filter_repository_root, recursive)
+        let preserve_classified_directory = filter_focus_paths.iter().any(|focus_path| {
+            let focus_path = focus_path.trim().replace('\\', "/");
+            let focus_path = focus_path.trim_start_matches("./");
+            let relative = entry
+                .path()
+                .strip_prefix(&filter_repository_root)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"));
+            relative.is_some_and(|relative| {
+                !focus_path.is_empty() && (focus_path == relative || focus_path.starts_with(&format!("{relative}/")))
+            })
+        });
+        !pruned_directory(
+            entry.path(),
+            &filter_repository_root,
+            recursive,
+            prune_classified_directories && !preserve_classified_directory,
+        )
     });
     let mut files = BTreeMap::new();
     let mut errors = Vec::new();
@@ -305,14 +324,41 @@ pub fn walk_files(
     (files, errors)
 }
 
-pub fn pruned_directory(path: &Path, repository_root: &Path, recursive: bool) -> bool {
+pub fn pruned_directory(
+    path: &Path, repository_root: &Path, recursive: bool, prune_classified_directories: bool,
+) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return true;
     };
-    if matches!(
-        name,
-        ".git" | "target" | "node_modules" | "vendor" | "dist" | "build" | "out" | "coverage"
-    ) {
+    if name == ".git" {
+        return true;
+    }
+    if prune_classified_directories
+        && matches!(
+            name.to_ascii_lowercase().as_str(),
+            "target"
+                | "dist"
+                | "build"
+                | "out"
+                | "coverage"
+                | "generated"
+                | "gen"
+                | "obj"
+                | "bin"
+                | ".next"
+                | ".nuxt"
+                | "tmp"
+                | "vendor"
+                | "node_modules"
+                | "bower_components"
+                | "third_party"
+                | "third-party"
+                | "external"
+                | "deps"
+                | "vendor_modules"
+                | "pods"
+        )
+    {
         return true;
     }
     (!recursive)
