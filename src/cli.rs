@@ -25,6 +25,8 @@ enum SubcommandName {
     Cache(CacheCommandCli),
     /// Report installed schema, language, query-pack, and limit capabilities.
     Capabilities,
+    /// Explain the bounded evidence behind a path or symbol recommendation.
+    Explain(ExplainCommand),
     /// Check local discovery and Codeplat support without analyzing source.
     Doctor(DoctorCommand),
 }
@@ -238,6 +240,7 @@ Examples:
     codeplat --no-cache .
     codeplat map --json
     codeplat history contributors .
+    codeplat explain src/parser.rs --json
     codeplat capabilities --json
     codeplat doctor --json
 
@@ -320,6 +323,11 @@ impl From<Cli> for CommandRequest {
                 HistorySettings::default(),
                 default_map_settings,
             ),
+            Some(SubcommandName::Explain(explain)) => (
+                CommandDescriptor::explain(explain.target, explain.path),
+                HistorySettings::default(),
+                explain.options.settings(),
+            ),
         };
 
         let mut map = map_settings;
@@ -342,6 +350,14 @@ impl Cli {
         if let Some(SubcommandName::Map(map)) = &self.command {
             map.options.validate()?;
         }
+        if let Some(SubcommandName::Explain(explain)) = &self.command {
+            explain.options.validate()?;
+            if explain.target.trim().is_empty() {
+                return Err(ApplicationError::usage(
+                    "`explain` requires a non-empty path or symbol target",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -361,6 +377,31 @@ struct MapCommand {
         value_name = "PATH",
         default_value = ".",
         help = "Repository or subdirectory to analyze (default: current directory)."
+    )]
+    path: PathBuf,
+}
+
+#[derive(Debug, clap::Args)]
+#[command(after_help = "Examples:
+    codeplat explain src/parser.rs --json
+    codeplat explain Parser --focus Parser --json
+
+The explanation reports bounded focus, history, landmark, graph, ranking,
+ambiguity, and omission evidence. It is heuristic evidence, not a semantic call graph.
+
+Support: https://github.com/stormlightlabs/codeplat/issues
+")]
+struct ExplainCommand {
+    #[command(flatten)]
+    options: MapOptions,
+
+    #[arg(value_name = "PATH-OR-SYMBOL", help = "Path or symbol to explain.")]
+    target: String,
+
+    #[arg(
+        value_name = "PATH",
+        default_value = ".",
+        help = "Repository or subdirectory to analyze."
     )]
     path: PathBuf,
 }

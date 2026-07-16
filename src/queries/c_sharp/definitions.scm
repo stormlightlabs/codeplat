@@ -1,5 +1,7 @@
 (namespace_declaration name: (_) @definition.module)
 (file_scoped_namespace_declaration name: (_) @definition.module)
+(using_directive name: (identifier) @definition.import)
+(using_directive (qualified_name name: (identifier) @definition.import))
 (class_declaration name: (identifier) @definition.class)
 (struct_declaration name: (identifier) @definition.struct)
 (enum_declaration name: (identifier) @definition.enum)

@@ -55,9 +55,9 @@ larger report.
 - The Rust 2024 binary implements the focused `map` and `history` commands, both renderers,
   all five history diagnostics, cache modes, graph ranking, and Tree-sitter query packs for all
   seven first-class language families.
-- Feature implementations for Tickets 1 through 7 exist, and the local formatting, test, Clippy,
-  documentation, and release-build checks pass. The suite currently contains 38 tests; audit-reopened
-  acceptance boxes remain unchecked in `TODO.md`.
+- Feature implementations for Tickets 1 through 14 exist, and the local formatting, test, Clippy,
+  documentation, and release-build checks pass. The suite currently contains 44 tests; remaining release
+  packaging and cross-platform gates are tracked by Ticket 17.
 - The default `codeplat [PATH]` command now renders the promised integrated briefing: one typed report
   contains all five history diagnostics and the ranked, cache-aware source map. The remaining audit
   hardening and release criteria are tracked by Tickets 9 through 14.
@@ -72,6 +72,10 @@ larger report.
 - Ticket 13 now makes history envelopes scope-correct, applies committed `.mailmap` aliases while redacting
   email by default, records exact word-aware keyword matches, reports current-HEAD size-normalized churn,
   and labels rename continuity unavailable until bounded rename detection is implemented.
+- Ticket 14 now uses language-scoped, import/module-aware lexical evidence with typed visibility, syntactic
+  evidence, confidence/reason metadata, stable candidate groups, grouped ambiguity, per-language parser/query
+  reuse, preaggregated incoming counts, and the bounded `explain` command. Bare cross-file and cross-language
+  matches no longer affect centrality without explicit evidence.
 - [Research notes](notes/README.md) capture the source material, Rust library boundaries, and
   the limits of Git-history and Tree-sitter-derived evidence.
 

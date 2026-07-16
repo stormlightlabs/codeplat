@@ -1,7 +1,7 @@
 (package_declaration (identifier) @definition.module)
 (package_declaration (scoped_identifier) @definition.module)
 (import_declaration (identifier) @definition.import)
-(import_declaration (scoped_identifier) @definition.import)
+(import_declaration (scoped_identifier name: (identifier) @definition.import))
 (class_declaration name: (identifier) @definition.class)
 (record_declaration name: (identifier) @definition.class)
 (interface_declaration name: (identifier) @definition.interface)

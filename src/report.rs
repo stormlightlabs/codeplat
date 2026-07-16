@@ -1,3 +1,5 @@
+mod render;
+
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::fs;
@@ -5,6 +7,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use render::Render;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -168,6 +171,7 @@ pub enum CommandName {
     Briefing,
     Map,
     History,
+    Explain,
 }
 
 impl CommandName {
@@ -176,6 +180,7 @@ impl CommandName {
             Self::Briefing => "briefing",
             Self::Map => "map",
             Self::History => "history",
+            Self::Explain => "explain",
         }
     }
 }
@@ -333,6 +338,56 @@ impl SymbolRole {
     }
 }
 
+/// Visibility inferred from declaration modifiers. This is ranking evidence,
+/// not a language-semantic access check.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolVisibility {
+    Public,
+    Private,
+    Internal,
+    #[default]
+    Unknown,
+}
+
+impl SymbolVisibility {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Internal => "internal",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Syntactic evidence attached to a raw Tree-sitter tag. Bare references
+/// remain available as evidence but never create graph edges by themselves.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolEvidence {
+    #[default]
+    Declaration,
+    Import,
+    Call,
+    TypeReference,
+    MemberReference,
+    BareReference,
+}
+
+impl SymbolEvidence {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Declaration => "declaration",
+            Self::Import => "import",
+            Self::Call => "call",
+            Self::TypeReference => "type_reference",
+            Self::MemberReference => "member_reference",
+            Self::BareReference => "bare_reference",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
@@ -433,20 +488,56 @@ impl MapFindingKind {
     }
 }
 
-/// Typed history-analysis inputs that are also reported for reproducibility.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HistorySettings {
-    pub window_days: u32,
-    pub recent_window_days: u32,
-    pub bug_keywords: Vec<String>,
-    pub firefighting_keywords: Vec<String>,
-    #[serde(default)]
-    pub keyword_match: KeywordMatchMode,
-    #[serde(default)]
-    pub include_emails: bool,
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalResolutionReason {
+    #[default]
+    SameFileExplicit,
+    ImportedModule,
+    ImportedName,
+}
+
+impl LexicalResolutionReason {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SameFileExplicit => "same_file_explicit",
+            Self::ImportedModule => "imported_module",
+            Self::ImportedName => "imported_name",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfidenceTier {
+    High,
+    #[default]
+    Medium,
+    Low,
+}
+
+impl ConfidenceTier {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeSnapshotState {
+    Clean,
+    Modified,
+    Untracked,
+    Mixed,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeywordMatchMode {
     #[default]
@@ -463,6 +554,65 @@ impl KeywordMatchMode {
     }
 }
 
+/// A repository path is kept in Git's slash-separated form. The path policy
+/// records that byte-invalid names are rejected before they can be lossy-
+/// decoded or merged with another name.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathRepresentation {
+    Utf8SlashSeparated,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryCompletenessStatus {
+    #[default]
+    Complete,
+    Shallow,
+    MissingObjects,
+    Partial,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorCheckStatus {
+    Pass,
+    Warn,
+    Fail,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplainTargetKind {
+    Path,
+    Symbol,
+    Unmatched,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrictIssue {
+    Stale,
+    Truncated,
+    Incomplete,
+    Unsupported,
+    #[default]
+    Partial,
+}
+
+/// Typed history-analysis inputs that are also reported for reproducibility.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HistorySettings {
+    pub window_days: u32,
+    pub recent_window_days: u32,
+    pub bug_keywords: Vec<String>,
+    pub firefighting_keywords: Vec<String>,
+    #[serde(default)]
+    pub keyword_match: KeywordMatchMode,
+    #[serde(default)]
+    pub include_emails: bool,
+}
+
 /// The complete set of inputs which can change an analysis result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EffectiveOptions {
@@ -474,6 +624,20 @@ pub struct EffectiveOptions {
     pub strict: bool,
     pub map: EffectiveMapOptions,
     pub history: HistorySettings,
+}
+
+impl Default for EffectiveOptions {
+    fn default() -> Self {
+        Self {
+            path: ".".to_owned(),
+            format: OutputFormat::Markdown,
+            color: ColorPolicy::Never,
+            profile: AnalysisProfile::Compact,
+            strict: false,
+            map: EffectiveMapOptions::default(),
+            history: HistorySettings::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -497,29 +661,6 @@ impl Default for EffectiveMapOptions {
             cache_files: Vec::new(),
         }
     }
-}
-
-impl Default for EffectiveOptions {
-    fn default() -> Self {
-        Self {
-            path: ".".to_owned(),
-            format: OutputFormat::Markdown,
-            color: ColorPolicy::Never,
-            profile: AnalysisProfile::Compact,
-            strict: false,
-            map: EffectiveMapOptions::default(),
-            history: HistorySettings::default(),
-        }
-    }
-}
-
-/// A repository path is kept in Git's slash-separated form. The path policy
-/// records that byte-invalid names are rejected before they can be lossy-
-/// decoded or merged with another name.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PathRepresentation {
-    Utf8SlashSeparated,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -556,15 +697,14 @@ pub struct HeadSnapshot {
     pub unborn: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorktreeSnapshotState {
-    Clean,
-    Modified,
-    Untracked,
-    Mixed,
-    #[default]
-    Unknown,
+impl HeadSnapshot {
+    fn object_format(&self) -> &'static str {
+        match self.oid.as_deref().map(str::len) {
+            Some(64) => "sha256",
+            Some(40) => "sha1",
+            _ => "unknown",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -681,16 +821,6 @@ pub struct CurrentHeadSemantics {
     pub oid: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HistoryCompletenessStatus {
-    #[default]
-    Complete,
-    Shallow,
-    MissingObjects,
-    Partial,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HistoryCompleteness {
     pub status: HistoryCompletenessStatus,
@@ -718,17 +848,6 @@ pub struct HistoryProvenance {
     pub time_basis: HistoryTimeBasis,
     pub current_head: CurrentHeadSemantics,
     pub completeness: HistoryCompleteness,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StrictIssue {
-    Stale,
-    Truncated,
-    Incomplete,
-    Unsupported,
-    #[default]
-    Partial,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -782,6 +901,8 @@ pub struct Report {
     pub history: Option<HistoryReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub map: Option<MapReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<ExplainReport>,
 }
 
 impl Report {
@@ -830,6 +951,24 @@ impl Report {
                     None,
                     Some(map_report),
                 ))
+            }
+            CommandName::Explain => {
+                let path = req.command.path.clone();
+                let target = req.command.target.clone().unwrap_or_default();
+                let history_report =
+                    history::analyze(&path, req.history.clone(), None, req.profile).map_err(ReportError::History)?;
+                let mut map_settings = req.map.clone();
+                map_settings.profile = req.profile;
+                let map_report = map::analyze(&path, &map_settings).map_err(ReportError::Map)?;
+                let explain = explain_report(&target, &map_report, &history_report);
+                let summary = format!(
+                    "Explained `{target}` using {} source files and {} retained graph edges within scoped history evidence.",
+                    map_report.inventory.analyzed,
+                    map_report.edges.len(),
+                );
+                let mut report = Self::from_parts(req, captured_at, summary, Some(history_report), Some(map_report));
+                report.explain = Some(explain);
+                Ok(report)
             }
         }
     }
@@ -891,7 +1030,7 @@ impl Report {
             repository: RepositoryIdentity {
                 canonical_root: repository_root.clone(),
                 stable_id: stable_repository_id(&repository_root),
-                object_format: object_format(&head).to_owned(),
+                object_format: head.object_format().to_owned(),
             },
             head,
             worktree,
@@ -914,6 +1053,7 @@ impl Report {
             limitations: Vec::new(),
             history,
             map,
+            explain: None,
         }
     }
 
@@ -969,6 +1109,10 @@ impl Report {
             Render::map_markdown(&mut output, map);
         }
 
+        if let Some(explain) = &self.explain {
+            Render::explain_markdown(&mut output, explain);
+        }
+
         if !self.findings.is_empty() {
             writeln!(output).expect("writing to a string cannot fail");
             writeln!(output, "## Findings").expect("writing to a string cannot fail");
@@ -996,130 +1140,6 @@ impl Report {
 
         output
     }
-}
-
-fn stable_repository_id(repository_root: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(repository_root.as_bytes());
-    format!("sha256:{}", hex_digest(digest.finalize().as_slice()))
-}
-
-fn object_format(head: &HeadSnapshot) -> &'static str {
-    match head.oid.as_deref().map(str::len) {
-        Some(64) => "sha256",
-        Some(40) => "sha1",
-        _ => "unknown",
-    }
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut output, "{byte:02x}").expect("writing a digest to a string cannot fail");
-    }
-    output
-}
-
-fn language_provenance(map: Option<&MapReport>) -> BTreeMap<String, LanguageProvenance> {
-    let encountered = map.map(|report| &report.query_packs);
-    map::language_capabilities()
-        .into_iter()
-        .filter(|capability| encountered.is_none_or(|packs| packs.contains_key(capability.language.label())))
-        .map(|capability| {
-            (
-                capability.language.label().to_owned(),
-                LanguageProvenance {
-                    grammar: capability.grammar.to_owned(),
-                    grammar_version: capability.grammar_version.to_owned(),
-                    query_pack: capability.query_pack.to_owned(),
-                    query_pack_version: capability.query_pack_version.to_owned(),
-                },
-            )
-        })
-        .collect()
-}
-
-fn report_quality(history: Option<&HistoryReport>, map: Option<&MapReport>) -> ReportQuality {
-    let stale = map.is_some_and(|report| report.cache.status == CacheStatus::Stale || !report.cache.stale.is_empty());
-    let map_truncated = map.is_some_and(|report| {
-        [
-            report.collections.files.truncated,
-            report.collections.symbols.truncated,
-            report.collections.omissions.truncated,
-            report.collections.findings.truncated,
-            report.collections.edges.truncated,
-            report.collections.ranking.truncated,
-            report.collections.snippets.truncated,
-        ]
-        .into_iter()
-        .any(|value| value)
-    });
-    let history_truncated = history.is_some_and(|report| {
-        [
-            report.collections.commits.truncated,
-            report.collections.churn_paths.truncated,
-            report.collections.contributor_identity_mappings.truncated,
-            report.collections.contributors_overall.truncated,
-            report.collections.contributors_recent.truncated,
-            report.collections.bug_paths.truncated,
-            report.collections.bug_overlap_paths.truncated,
-            report.collections.bug_commits.truncated,
-            report.collections.activity_months.truncated,
-            report.collections.firefighting_commits.truncated,
-        ]
-        .into_iter()
-        .any(|value| value)
-    });
-    let incomplete =
-        history.is_some_and(|report| report.provenance.completeness.status != HistoryCompletenessStatus::Complete);
-    let unsupported = map.is_some_and(|report| {
-        report
-            .omissions
-            .iter()
-            .any(|omission| omission.reason == OmissionReason::UnsupportedLanguage)
-    });
-    let partial = map.is_some_and(|report| {
-        report
-            .files
-            .iter()
-            .any(|file| file.status == FileAnalysisStatus::Partial)
-    });
-    let mut strict_issues = Vec::new();
-    if stale {
-        strict_issues.push(StrictIssue::Stale);
-    }
-    if map_truncated || history_truncated {
-        strict_issues.push(StrictIssue::Truncated);
-    }
-    if incomplete {
-        strict_issues.push(StrictIssue::Incomplete);
-    }
-    if unsupported {
-        strict_issues.push(StrictIssue::Unsupported);
-    }
-    if partial {
-        strict_issues.push(StrictIssue::Partial);
-    }
-    ReportQuality {
-        stale,
-        truncated: map_truncated || history_truncated,
-        incomplete,
-        unsupported,
-        partial,
-        strict_issues,
-    }
-}
-
-fn briefing_summary(history: &HistoryReport, map: &MapReport) -> String {
-    format!(
-        "Analyzed {} reachable commits ({} non-merge) and {} source files; ranked {} files within a {}-token source-map budget, with {} paths omitted in the selected scope.",
-        history.commits_seen,
-        history.non_merge_commits_seen,
-        map.inventory.analyzed,
-        map.ranking.len(),
-        map.selection.token_budget,
-        map.inventory.omitted,
-    )
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1212,6 +1232,8 @@ impl MapReport {
                 tokens = tokens.saturating_add(token_count(&symbol.context));
                 tokens = tokens.saturating_add(token_count(symbol.kind.label()));
                 tokens = tokens.saturating_add(token_count(symbol.role.label()));
+                tokens = tokens.saturating_add(token_count(symbol.visibility.label()));
+                tokens = tokens.saturating_add(token_count(symbol.evidence.label()));
                 tokens = tokens.saturating_add(symbol.scope.iter().map(|scope| token_count(scope)).sum::<usize>());
                 tokens = tokens.saturating_add(8);
             }
@@ -1236,6 +1258,11 @@ impl MapReport {
                     .map(|candidate| token_count(candidate))
                     .sum::<usize>(),
             );
+            tokens = tokens
+                .saturating_add(token_count(&edge.candidate_group))
+                .saturating_add(token_count(edge.resolution_reason.label()))
+                .saturating_add(token_count(edge.confidence.label()))
+                .saturating_add(token_count(edge.target_visibility.label()));
             tokens = tokens.saturating_add(if edge.ambiguous { 1 } else { 0 });
         }
         tokens = tokens.saturating_add(
@@ -1309,6 +1336,15 @@ pub struct LexicalEdge {
     pub ambiguous: bool,
     /// All lexical definition candidates for this reference.
     pub candidates: Vec<String>,
+    /// Stable identity shared by all edges in one deduplicated candidate group.
+    #[serde(default)]
+    pub candidate_group: String,
+    #[serde(default)]
+    pub resolution_reason: LexicalResolutionReason,
+    #[serde(default)]
+    pub confidence: ConfidenceTier,
+    #[serde(default)]
+    pub target_visibility: SymbolVisibility,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1385,6 +1421,48 @@ pub struct SourceSymbol {
     pub scope: Vec<String>,
     pub location: SourceLocation,
     pub context: String,
+    #[serde(default)]
+    pub visibility: SymbolVisibility,
+    #[serde(default)]
+    pub evidence: SymbolEvidence,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExplainReport {
+    pub target: String,
+    pub target_kind: ExplainTargetKind,
+    pub matched_paths: Vec<String>,
+    pub matched_symbols: Vec<ExplainSymbolMatch>,
+    pub focus_matches: Vec<String>,
+    pub history_overlap: Vec<PathCount>,
+    pub landmark: Option<ExplainLandmark>,
+    pub ranking: Vec<ExplainRanking>,
+    pub graph_edges: Vec<LexicalEdge>,
+    pub ambiguity: Vec<MapFinding>,
+    pub omitted_alternatives: Vec<SourceOmission>,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExplainSymbolMatch {
+    pub path: String,
+    pub symbol: SourceSymbol,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExplainRanking {
+    pub path: String,
+    pub score: u64,
+    pub focus_matches: usize,
+    pub incoming_edges: usize,
+    pub outgoing_edges: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExplainLandmark {
+    pub kind: String,
+    pub path: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1534,21 +1612,27 @@ pub struct CommandDescriptor {
     pub name: CommandName,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<HistoryOperation>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub target: Option<String>,
     #[serde(skip)]
     pub path: PathBuf,
 }
 
 impl CommandDescriptor {
     pub fn briefing(path: PathBuf) -> Self {
-        Self { name: CommandName::Briefing, operation: None, path }
+        Self { name: CommandName::Briefing, operation: None, target: None, path }
     }
 
     pub fn map(path: PathBuf) -> Self {
-        Self { name: CommandName::Map, operation: None, path }
+        Self { name: CommandName::Map, operation: None, target: None, path }
     }
 
     pub fn history(path: PathBuf, operation: Option<HistoryOperation>) -> Self {
-        Self { name: CommandName::History, operation, path }
+        Self { name: CommandName::History, operation, target: None, path }
+    }
+
+    pub fn explain(target: String, path: PathBuf) -> Self {
+        Self { name: CommandName::Explain, operation: None, target: Some(target), path }
     }
 }
 
@@ -1641,14 +1725,6 @@ impl CapabilitiesReport {
             }
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DoctorCheckStatus {
-    Pass,
-    Warn,
-    Fail,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1871,504 +1947,276 @@ fn cache_doctor_check() -> DoctorCheck {
     }
 }
 
-struct Render;
+fn stable_repository_id(repository_root: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(repository_root.as_bytes());
+    format!("sha256:{}", hex_digest(digest.finalize().as_slice()))
+}
 
-impl Render {
-    fn commits(output: &mut String, commits: &[CommitEvidence]) {
-        writeln!(output, "#### Evidence commits").expect("writing to a string cannot fail");
-        if commits.is_empty() {
-            writeln!(output, "No matching commits were found.").expect("writing to a string cannot fail");
-        } else {
-            for commit in commits {
-                let paths =
-                    if commit.paths.is_empty() { "no in-scope paths".to_owned() } else { commit.paths.join(", ") };
-                writeln!(
-                    output,
-                    "- `{}` — {} ({}){}",
-                    utils::escape_inline_code(&commit.id),
-                    utils::sanitize_text(&commit.subject),
-                    utils::sanitize_text(&paths),
-                    if commit.matched_terms.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            " — matched `{}`",
-                            utils::escape_inline_code(&commit.matched_terms.join("`, `"))
-                        )
-                    }
-                )
-                .expect("writing to a string cannot fail");
-            }
-        }
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("writing a digest to a string cannot fail");
     }
+    output
+}
 
-    fn section_heading(output: &mut String, heading: &str) {
-        writeln!(output).expect("writing to a string cannot fail");
-        writeln!(output, "### {heading}").expect("writing to a string cannot fail");
-        writeln!(output).expect("writing to a string cannot fail");
+fn language_provenance(map: Option<&MapReport>) -> BTreeMap<String, LanguageProvenance> {
+    let encountered = map.map(|report| &report.query_packs);
+    map::language_capabilities()
+        .into_iter()
+        .filter(|capability| encountered.is_none_or(|packs| packs.contains_key(capability.language.label())))
+        .map(|capability| {
+            (
+                capability.language.label().to_owned(),
+                LanguageProvenance {
+                    grammar: capability.grammar.to_owned(),
+                    grammar_version: capability.grammar_version.to_owned(),
+                    query_pack: capability.query_pack.to_owned(),
+                    query_pack_version: capability.query_pack_version.to_owned(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn report_quality(history: Option<&HistoryReport>, map: Option<&MapReport>) -> ReportQuality {
+    let stale = map.is_some_and(|report| report.cache.status == CacheStatus::Stale || !report.cache.stale.is_empty());
+    let map_truncated = map.is_some_and(|report| {
+        [
+            report.collections.files.truncated,
+            report.collections.symbols.truncated,
+            report.collections.omissions.truncated,
+            report.collections.findings.truncated,
+            report.collections.edges.truncated,
+            report.collections.ranking.truncated,
+            report.collections.snippets.truncated,
+        ]
+        .into_iter()
+        .any(|value| value)
+    });
+    let history_truncated = history.is_some_and(|report| {
+        [
+            report.collections.commits.truncated,
+            report.collections.churn_paths.truncated,
+            report.collections.contributor_identity_mappings.truncated,
+            report.collections.contributors_overall.truncated,
+            report.collections.contributors_recent.truncated,
+            report.collections.bug_paths.truncated,
+            report.collections.bug_overlap_paths.truncated,
+            report.collections.bug_commits.truncated,
+            report.collections.activity_months.truncated,
+            report.collections.firefighting_commits.truncated,
+        ]
+        .into_iter()
+        .any(|value| value)
+    });
+    let incomplete =
+        history.is_some_and(|report| report.provenance.completeness.status != HistoryCompletenessStatus::Complete);
+    let unsupported = map.is_some_and(|report| {
+        report
+            .omissions
+            .iter()
+            .any(|omission| omission.reason == OmissionReason::UnsupportedLanguage)
+    });
+    let partial = map.is_some_and(|report| {
+        report
+            .files
+            .iter()
+            .any(|file| file.status == FileAnalysisStatus::Partial)
+    });
+    let mut strict_issues = Vec::new();
+    if stale {
+        strict_issues.push(StrictIssue::Stale);
     }
-
-    fn caveats(output: &mut String, caveats: &[String]) {
-        if caveats.is_empty() {
-            return;
-        }
-        writeln!(output, "Caveats:").expect("writing to a string cannot fail");
-        for caveat in caveats {
-            writeln!(output, "- {}", utils::sanitize_text(caveat)).expect("writing to a string cannot fail");
-        }
+    if map_truncated || history_truncated {
+        strict_issues.push(StrictIssue::Truncated);
     }
-
-    fn history_markdown(output: &mut String, history: &HistoryReport) {
-        writeln!(output).expect("writing to a string cannot fail");
-        writeln!(output, "## History analysis").expect("writing to a string cannot fail");
-        writeln!(output).expect("writing to a string cannot fail");
-        writeln!(
-            output,
-            "Repository: `{}`",
-            utils::escape_inline_code(&history.repository_root)
-        )
-        .expect("writing to a string cannot fail");
-        writeln!(
-            output,
-            "History scope: `{}`",
-            utils::escape_inline_code(&history.scope_path)
-        )
-        .expect("writing to a string cannot fail");
-        writeln!(output, "Reachable commits: {}", history.commits_seen).expect("writing to a string cannot fail");
-        writeln!(output, "Non-merge commits: {}", history.non_merge_commits_seen)
-            .expect("writing to a string cannot fail");
-        writeln!(
-            output,
-            "Windows: {} days for churn/bugs/firefighting; {} days for recent contributors",
-            history.settings.window_days, history.settings.recent_window_days
-        )
-        .expect("writing to a string cannot fail");
-        writeln!(
-            output,
-            "Bug keywords: `{}`",
-            utils::escape_inline_code(&history.settings.bug_keywords.join("`, `"))
-        )
-        .expect("writing to a string cannot fail");
-        writeln!(
-            output,
-            "Firefighting keywords: `{}`",
-            utils::escape_inline_code(&history.settings.firefighting_keywords.join("`, `"))
-        )
-        .expect("writing to a string cannot fail");
-        writeln!(output, "Keyword matching: {}", history.settings.keyword_match.label())
-            .expect("writing to a string cannot fail");
-        if history.collections.commits.truncated
-            || history.collections.churn_paths.truncated
-            || history.collections.contributor_identity_mappings.truncated
-            || history.collections.contributors_overall.truncated
-            || history.collections.contributors_recent.truncated
-            || history.collections.bug_paths.truncated
-            || history.collections.bug_overlap_paths.truncated
-            || history.collections.bug_commits.truncated
-            || history.collections.activity_months.truncated
-            || history.collections.firefighting_commits.truncated
-        {
-            writeln!(
-                output,
-                "Evidence collections are bounded; JSON contains totals and truncation reasons."
-            )
-            .expect("writing to a string cannot fail");
-        }
-
-        if let Some(churn) = &history.churn {
-            Render::churn_markdown(output, churn);
-        }
-        if let Some(contributors) = &history.contributors {
-            Render::contributors_markdown(output, contributors);
-        }
-        if let Some(bugs) = &history.bugs {
-            Render::bugs_markdown(output, bugs);
-        }
-        if let Some(activity) = &history.activity {
-            Render::activity_markdown(output, activity);
-        }
-        if let Some(firefighting) = &history.firefighting {
-            Render::firefighting_markdown(output, firefighting);
-        }
-        for limitation in &history.limitations {
-            writeln!(output, "- Limitation: {}", utils::sanitize_text(limitation))
-                .expect("writing to a string cannot fail");
-        }
+    if incomplete {
+        strict_issues.push(StrictIssue::Incomplete);
     }
+    if unsupported {
+        strict_issues.push(StrictIssue::Unsupported);
+    }
+    if partial {
+        strict_issues.push(StrictIssue::Partial);
+    }
+    ReportQuality {
+        stale,
+        truncated: map_truncated || history_truncated,
+        incomplete,
+        unsupported,
+        partial,
+        strict_issues,
+    }
+}
 
-    fn map_markdown(output: &mut String, map: &MapReport) {
-        writeln!(output).expect("writing to a string cannot fail");
-        writeln!(output, "## Source map").expect("writing to a string cannot fail");
-        writeln!(output).expect("writing to a string cannot fail");
-        writeln!(
-            output,
-            "Repository: `{}`",
-            utils::escape_inline_code(&map.repository_root)
-        )
-        .expect("writing to a string cannot fail");
-        writeln!(output, "Map scope: `{}`", utils::escape_inline_code(&map.scope_path))
-            .expect("writing to a string cannot fail");
-        writeln!(output, "Query pack: `{}`", utils::escape_inline_code(&map.query_pack))
-            .expect("writing to a string cannot fail");
-        if map.query_packs.len() > 1 {
-            let provenance = map
-                .query_packs
-                .iter()
-                .map(|(language, query_pack)| format!("{language}={query_pack}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(output, "Query packs: `{}`", utils::escape_inline_code(&provenance))
-                .expect("writing to a string cannot fail");
-        }
-        writeln!(
-            output,
-            "Inventory: {} tracked ({} modified), {} untracked, {} analyzed, {} omitted",
-            map.inventory.tracked,
-            map.inventory.modified,
-            map.inventory.untracked,
-            map.inventory.analyzed,
-            map.inventory.omitted
-        )
-        .expect("writing to a string cannot fail");
-        if map.collections.files.truncated
-            || map.collections.symbols.truncated
-            || map.collections.omissions.truncated
-            || map.collections.findings.truncated
-            || map.collections.edges.truncated
-            || map.collections.ranking.truncated
-            || map.collections.snippets.truncated
-        {
-            writeln!(
-                output,
-                "Collections are bounded; JSON contains totals and truncation reasons."
-            )
-            .expect("writing to a string cannot fail");
-        }
-        if !map.exclusions.is_empty() {
-            writeln!(
-                output,
-                "Exclusions: `{}`",
-                utils::escape_inline_code(&map.exclusions.join("`, `"))
-            )
-            .expect("writing to a string cannot fail");
-        }
+fn briefing_summary(history: &HistoryReport, map: &MapReport) -> String {
+    format!(
+        "Analyzed {} reachable commits ({} non-merge) and {} source files; ranked {} files within a {}-token source-map budget, with {} paths omitted in the selected scope.",
+        history.commits_seen,
+        history.non_merge_commits_seen,
+        map.inventory.analyzed,
+        map.ranking.len(),
+        map.selection.token_budget,
+        map.inventory.omitted,
+    )
+}
 
-        if !map.files.is_empty()
-            || map.cache.matched > 0
-            || map.cache.unmatched > 0
-            || map.cache.unavailable > 0
-            || map.cache.hits > 0
-            || map.cache.misses > 0
-            || !map.cache.refreshed.is_empty()
-            || !map.cache.stale.is_empty()
-        {
-            writeln!(
-                output,
-                "Cache: {} ({}) — {} matched, {} unmatched, {} unavailable, {} hits, {} misses, {} refreshed, {} stale",
-                map.cache.mode.label(),
-                map.cache.status.label(),
-                map.cache.matched,
-                map.cache.unmatched,
-                map.cache.unavailable,
-                map.cache.hits,
-                map.cache.misses,
-                map.cache.refreshed.len(),
-                map.cache.stale.len()
-            )
-            .expect("writing to a string cannot fail");
-            if !map.files.is_empty() {
-                writeln!(
-                    output,
-                    "Ranking: {} files; map budget {} tokens, selected {}",
-                    map.ranking.len(),
-                    map.selection.token_budget,
-                    map.selection.estimated_tokens
-                )
-                .expect("writing to a string cannot fail");
-                Render::section_heading(output, "Ranked map selection");
-                if map.selection.snippets.is_empty() {
-                    writeln!(output, "No structural snippets fit the map token budget.")
-                        .expect("writing to a string cannot fail");
-                } else {
-                    for snippet in &map.selection.snippets {
-                        let location = Self::format_location(&snippet.symbol.location);
-                        let scope = if snippet.symbol.scope.is_empty() {
-                            "root".to_owned()
-                        } else {
-                            snippet.symbol.scope.join("::")
-                        };
-                        writeln!(
-                            output,
-                            "- `{}` — {} `{}` at {} in `{}` (score {}, {} tokens) — `{}`{}",
-                            utils::escape_inline_code(&snippet.path),
-                            snippet.symbol.kind.label(),
-                            utils::escape_inline_code(&snippet.symbol.name),
-                            location,
-                            utils::escape_inline_code(&scope),
-                            snippet.score,
-                            snippet.estimated_tokens,
-                            utils::escape_inline_code(&snippet.symbol.context),
-                            if snippet.truncated { " (elided)" } else { "" }
-                        )
-                        .expect("writing to a string cannot fail");
-                    }
+fn explain_report(target: &str, map: &MapReport, history: &HistoryReport) -> ExplainReport {
+    let target = target.trim().to_owned();
+    let normalized_target = target.trim_start_matches("./");
+    let exact_path = map.files.iter().any(|file| file.path == normalized_target)
+        || map.omissions.iter().any(|omission| omission.path == normalized_target)
+        || (target.contains('/') && std::path::Path::new(&target).extension().is_some());
+    let mut matched_paths = std::collections::BTreeSet::new();
+    let mut matched_symbols = Vec::new();
+    if exact_path {
+        matched_paths.insert(normalized_target.to_owned());
+    }
+    for file in &map.files {
+        for symbol in &file.symbols {
+            let qualified = if symbol.scope.is_empty() {
+                symbol.name.clone()
+            } else {
+                format!("{}::{}", symbol.scope.join("::"), symbol.name)
+            };
+            if !exact_path && (symbol.name == target || qualified == target) {
+                matched_paths.insert(file.path.clone());
+                if matched_symbols.len() < 128 {
+                    matched_symbols.push(ExplainSymbolMatch { path: file.path.clone(), symbol: symbol.clone() });
                 }
             }
         }
+    }
+    let target_kind = if exact_path {
+        ExplainTargetKind::Path
+    } else if !matched_symbols.is_empty() {
+        ExplainTargetKind::Symbol
+    } else {
+        ExplainTargetKind::Unmatched
+    };
 
-        let mut files_by_language: BTreeMap<SourceLanguage, Vec<&SourceFile>> = BTreeMap::new();
-        for file in &map.files {
-            files_by_language.entry(file.language).or_default().push(file);
-        }
-        if files_by_language.len() <= 1 {
-            if map.files.is_empty() {
-                Render::section_heading(output, "Rust files");
-                writeln!(output, "No Rust files were analyzed.").expect("writing to a string cannot fail");
-            } else {
-                let (language, files) = files_by_language.iter().next().expect("one language group");
-                Render::section_heading(output, &format!("{} files", language.display_label()));
-                Render::source_files(output, files);
-            }
-        } else {
-            for (language, files) in &files_by_language {
-                Render::section_heading(output, &format!("{} files", language.display_label()));
-                Render::source_files(output, files);
-            }
-        }
-        if !map.findings.is_empty() {
-            Render::section_heading(output, "Map findings");
-            for finding in &map.findings {
-                let location = finding
-                    .location
-                    .as_ref()
-                    .map(Self::format_location)
-                    .unwrap_or_else(|| "unknown location".to_owned());
-                writeln!(
-                    output,
-                    "- **{}** `{}`{} — {}",
-                    finding.kind.label(),
-                    utils::escape_inline_code(&finding.path),
-                    if finding.location.is_some() { format!(" at {location}") } else { String::new() },
-                    utils::sanitize_text(&finding.detail)
-                )
-                .expect("writing to a string cannot fail");
-            }
-        }
+    let mut focus_matches = map
+        .ranking
+        .iter()
+        .filter(|rank| matched_paths.contains(&rank.path) && rank.focus_matches > 0)
+        .map(|rank| rank.path.clone())
+        .collect::<Vec<_>>();
+    focus_matches.sort();
+    focus_matches.dedup();
 
-        if !map.edges.is_empty() {
-            Render::section_heading(output, "Lexical dependency edges");
-            for edge in &map.edges {
-                writeln!(
-                    output,
-                    "- `{}` → `{}` via `{}`{}",
-                    utils::escape_inline_code(&edge.source),
-                    utils::escape_inline_code(&edge.target),
-                    utils::escape_inline_code(&edge.symbol),
-                    if edge.ambiguous { " (ambiguous candidate)" } else { "" }
-                )
-                .expect("writing to a string cannot fail");
-            }
-        }
+    let mut incoming = BTreeMap::<String, usize>::new();
+    let mut outgoing = BTreeMap::<String, usize>::new();
+    for edge in &map.edges {
+        *incoming.entry(edge.target.clone()).or_default() += 1;
+        *outgoing.entry(edge.source.clone()).or_default() += 1;
+    }
+    let ranking = map
+        .ranking
+        .iter()
+        .filter(|rank| matched_paths.contains(&rank.path))
+        .map(|rank| ExplainRanking {
+            path: rank.path.clone(),
+            score: rank.score,
+            focus_matches: rank.focus_matches,
+            incoming_edges: incoming.get(&rank.path).copied().unwrap_or_default(),
+            outgoing_edges: outgoing.get(&rank.path).copied().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
 
-        if !map.omissions.is_empty() {
-            Render::section_heading(output, "Omitted paths");
-            for omission in &map.omissions {
-                writeln!(
-                    output,
-                    "- `{}` — **{}:** {}",
-                    utils::escape_inline_code(&omission.path),
-                    omission.reason.label(),
-                    utils::sanitize_text(&omission.detail)
-                )
-                .expect("writing to a string cannot fail");
-            }
-        }
+    let graph_edges = map
+        .edges
+        .iter()
+        .filter(|edge| {
+            matched_paths.contains(&edge.source) || matched_paths.contains(&edge.target) || edge.symbol == target
+        })
+        .take(128)
+        .cloned()
+        .collect::<Vec<_>>();
+    let ambiguity = map
+        .findings
+        .iter()
+        .filter(|finding| {
+            finding.kind == MapFindingKind::AmbiguousReference
+                && (matched_paths.contains(&finding.path) || finding.detail.contains(&target))
+        })
+        .take(64)
+        .cloned()
+        .collect::<Vec<_>>();
 
-        Render::section_heading(output, "Map limitations");
-        for limitation in &map.limitations {
-            writeln!(output, "- {}", utils::sanitize_text(limitation)).expect("writing to a string cannot fail");
+    let mut history_overlap = Vec::new();
+    for paths in [
+        history.churn.as_ref().map(|report| report.paths.as_slice()),
+        history.bugs.as_ref().map(|report| report.overlap_paths.as_slice()),
+    ]
+    .into_iter()
+    .flatten()
+    .flatten()
+    {
+        if matched_paths.contains(&paths.path)
+            && !history_overlap.iter().any(|path: &PathCount| path.path == paths.path)
+        {
+            history_overlap.push(paths.clone());
         }
     }
+    history_overlap.sort_by(|left, right| left.path.cmp(&right.path));
 
-    fn source_files(output: &mut String, files: &[&SourceFile]) {
-        for file in files {
-            writeln!(
-                output,
-                "- `{}` — {} (.{}), {} {}, {} symbols",
-                utils::escape_inline_code(&file.path),
-                file.language.display_label(),
-                file.extension,
-                file.worktree_state.label(),
-                file.status.label(),
-                file.symbols.len()
-            )
-            .expect("writing to a string cannot fail");
-            writeln!(
-                output,
-                "  - Structural snippets are shown in the ranked selection above."
-            )
-            .expect("writing to a string cannot fail");
-            for limitation in &file.limitations {
-                writeln!(output, "  - Limitation: {}", utils::sanitize_text(limitation))
-                    .expect("writing to a string cannot fail");
-            }
+    let omitted_alternatives = map
+        .omissions
+        .iter()
+        .filter(|omission| target_kind == ExplainTargetKind::Unmatched || matched_paths.contains(&omission.path))
+        .take(32)
+        .cloned()
+        .collect::<Vec<_>>();
+    let landmark = matched_paths.iter().find_map(|path| landmark_for_path(path));
+    let mut limitations = vec![
+        "This explanation describes bounded lexical evidence and ranking heuristics; it is not a semantic call graph or access check.".to_owned(),
+    ];
+    if target_kind == ExplainTargetKind::Unmatched {
+        limitations.push(
+            "The target did not match an analyzed path or symbol; omitted alternatives are shown when available."
+                .to_owned(),
+        );
+    }
+    if map.collections.edges.truncated || map.collections.ranking.truncated {
+        limitations.push("Graph and ranking evidence was truncated by the active report profile.".to_owned());
+    }
+    ExplainReport {
+        target,
+        target_kind,
+        matched_paths: matched_paths.into_iter().collect(),
+        matched_symbols,
+        focus_matches,
+        history_overlap,
+        landmark,
+        ranking,
+        graph_edges,
+        ambiguity,
+        omitted_alternatives,
+        limitations,
+    }
+}
+
+fn landmark_for_path(path: &str) -> Option<ExplainLandmark> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let (kind, reason) = match name {
+        "README" | "README.md" | "README.rst" | "README.txt" => {
+            ("readme", "conventional repository orientation document")
         }
-    }
-
-    fn format_location(location: &SourceLocation) -> String {
-        format!(
-            "{}:{}-{}:{}",
-            location.start.line, location.start.column, location.end.line, location.end.column
-        )
-    }
-
-    fn churn_markdown(output: &mut String, churn: &ChurnReport) {
-        Render::section_heading(output, "Churn hotspots");
-        writeln!(output, "Window: {} days", churn.window_days).expect("writing to a string cannot fail");
-        if churn.paths.is_empty() {
-            writeln!(output, "No in-scope non-merge paths changed in this window.")
-                .expect("writing to a string cannot fail");
-        } else {
-            for path in &churn.paths {
-                let normalized = path.commits_per_kib_milli.map_or_else(
-                    || {
-                        format!(
-                            "normalization unavailable ({})",
-                            path.size_status.as_deref().unwrap_or("unknown")
-                        )
-                    },
-                    |rate| {
-                        format!(
-                            "{:.3} commits/KiB ({})",
-                            rate as f64 / 1_000.0,
-                            path.size_status.as_deref().unwrap_or("text")
-                        )
-                    },
-                );
-                writeln!(
-                    output,
-                    "- `{}` — {} commits; {}",
-                    utils::escape_inline_code(&path.path),
-                    path.commits,
-                    normalized
-                )
-                .expect("writing to a string cannot fail");
-            }
+        "AGENTS.md" | "CONTRIBUTING.md" | "CLAUDE.md" => ("instructions", "repository instruction file"),
+        "Cargo.toml" | "package.json" | "pyproject.toml" | "go.mod" | "pom.xml" => {
+            ("manifest", "project manifest or package root")
         }
-        writeln!(output, "Size basis: {}", utils::sanitize_text(&churn.size_basis))
-            .expect("writing to a string cannot fail");
-        writeln!(
-            output,
-            "Rename continuity: {} — {}",
-            utils::sanitize_text(&churn.rename_continuity.status),
-            utils::sanitize_text(&churn.rename_continuity.detail)
-        )
-        .expect("writing to a string cannot fail");
-        Render::caveats(output, &churn.caveats);
-    }
-
-    fn contributors_markdown(output: &mut String, contributors: &ContributorReport) {
-        Render::section_heading(output, "Contributor concentration");
-        writeln!(output, "Committed .mailmap applied: {}", contributors.mailmap_applied)
-            .expect("writing to a string cannot fail");
-        if !contributors.identity_mappings.is_empty() {
-            writeln!(
-                output,
-                "Canonicalized identities: {}",
-                contributors.identity_mappings.len()
-            )
-            .expect("writing to a string cannot fail");
+        _ if name.ends_with(".csproj") => ("manifest", "project manifest or package root"),
+        "Cargo.lock" | "package-lock.json" | "pnpm-lock.yaml" | "poetry.lock" => ("lockfile", "dependency lockfile"),
+        _ if path.contains("/.github/workflows/") || path.starts_with(".github/workflows/") => {
+            ("ci", "continuous-integration workflow")
         }
-        Render::contributors_group(output, "All non-merge commits", &contributors.overall);
-        Render::contributors_group(output, "Recent non-merge commits", &contributors.recent);
-        Render::caveats(output, &contributors.caveats);
-    }
-
-    fn contributors_group(output: &mut String, label: &str, contributors: &[ContributorCount]) {
-        writeln!(output, "#### {label}").expect("writing to a string cannot fail");
-        if contributors.is_empty() {
-            writeln!(output, "No contributors were found.").expect("writing to a string cannot fail");
-            return;
-        }
-        for contributor in contributors {
-            let identity = contributor.email.as_ref().map_or_else(
-                || utils::sanitize_text(&contributor.name),
-                |email| {
-                    format!(
-                        "{} <{}>",
-                        utils::sanitize_text(&contributor.name),
-                        utils::sanitize_text(email)
-                    )
-                },
-            );
-            writeln!(
-                output,
-                "- {} — {} commits ({}%)",
-                identity, contributor.commits, contributor.share_percent
-            )
-            .expect("writing to a string cannot fail");
-        }
-    }
-
-    fn bugs_markdown(output: &mut String, bugs: &BugReport) {
-        Render::section_heading(output, "Bug-related clusters");
-        writeln!(output, "Window: {} days", bugs.window_days).expect("writing to a string cannot fail");
-        writeln!(
-            output,
-            "Keywords ({} matching): `{}`",
-            bugs.keyword_match.label(),
-            utils::escape_inline_code(&bugs.keywords.join("`, `"))
-        )
-        .expect("writing to a string cannot fail");
-        Render::paths(output, "Bug-related paths", &bugs.paths);
-        Render::paths(output, "Churn overlap", &bugs.overlap_paths);
-        Render::commits(output, &bugs.commits);
-        Render::caveats(output, &bugs.caveats);
-    }
-
-    fn activity_markdown(output: &mut String, activity: &ActivityReport) {
-        Render::section_heading(output, "Monthly activity");
-        if activity.months.is_empty() {
-            writeln!(output, "No commits were found.").expect("writing to a string cannot fail");
-        } else {
-            for month in &activity.months {
-                writeln!(output, "- {} — {} commits", month.month, month.commits)
-                    .expect("writing to a string cannot fail");
-            }
-        }
-        Render::caveats(output, &activity.caveats);
-    }
-
-    fn firefighting_markdown(output: &mut String, firefighting: &FirefightingReport) {
-        Render::section_heading(output, "Firefighting commits");
-        writeln!(
-            output,
-            "Window: {} days; keywords ({} matching): `{}`",
-            firefighting.window_days,
-            firefighting.keyword_match.label(),
-            utils::escape_inline_code(&firefighting.keywords.join("`, `"))
-        )
-        .expect("writing to a string cannot fail");
-        Render::commits(output, &firefighting.commits);
-        Render::caveats(output, &firefighting.caveats);
-    }
-
-    fn paths(output: &mut String, label: &str, paths: &[PathCount]) {
-        writeln!(output, "#### {label}").expect("writing to a string cannot fail");
-        if paths.is_empty() {
-            writeln!(output, "No paths were found.").expect("writing to a string cannot fail");
-        } else {
-            for path in paths {
-                writeln!(
-                    output,
-                    "- `{}` — {} commits",
-                    utils::escape_inline_code(&path.path),
-                    path.commits
-                )
-                .expect("writing to a string cannot fail");
-            }
-        }
-    }
+        _ if path.starts_with("tests/") || path.contains("/tests/") => ("tests", "test root"),
+        _ => return None,
+    };
+    Some(ExplainLandmark { kind: kind.to_owned(), path: path.to_owned(), reason: reason.to_owned() })
 }
 
 #[cfg(test)]
@@ -2393,6 +2241,7 @@ mod tests {
             limitations: vec![Limitation { detail: "limitation\u{1b}[0m".to_owned() }],
             history: None,
             map: None,
+            explain: None,
         };
 
         let markdown = report.render(OutputFormat::Markdown).expect("markdown renders");

@@ -38,6 +38,7 @@ const RUST_DECLARATION_KINDS: &[&str] = &[
     "static_item",
     "mod_item",
     "macro_definition",
+    "use_declaration",
     "field_declaration",
 ];
 
@@ -148,6 +149,7 @@ const C_SHARP_DECLARATION_KINDS: &[&str] = &[
     "method_declaration",
     "property_declaration",
     "field_declaration",
+    "using_directive",
 ];
 
 const C_SHARP_SCOPE_KINDS: &[&str] = &[
@@ -1008,6 +1010,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     let mut total_source_bytes = 0usize;
     let mut total_symbols = 0usize;
     let mut work_limit_reached = false;
+    let mut analyzers = BTreeMap::<SourceLanguage, LanguageAnalyzer>::new();
     for (path, candidate) in candidates {
         if analysis_started.elapsed().as_millis() >= u128::from(limits.max_elapsed_ms) {
             omissions.push(SourceOmission {
@@ -1107,7 +1110,10 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         let forced_refresh =
             matches!(settings.cache_mode, CacheMode::Always) || (settings.cache_mode == CacheMode::Files && requested);
         let (parsed, stale) = if settings.cache_mode == CacheMode::Disabled || forced_refresh {
-            let parsed = parse_source_limited(&source, support, &limits);
+            let analyzer = analyzers
+                .entry(support.language)
+                .or_insert_with(|| LanguageAnalyzer::new(support));
+            let parsed = parse_source_with_analyzer(&source, analyzer, &limits);
             if settings.cache_mode != CacheMode::Disabled {
                 if let Some(error) = cache.write(&path, support, &fingerprint, &parsed) {
                     cache_limitations.push(error);
@@ -1142,7 +1148,10 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                         });
                         continue;
                     }
-                    let parsed = parse_source_limited(&source, support, &limits);
+                    let analyzer = analyzers
+                        .entry(support.language)
+                        .or_insert_with(|| LanguageAnalyzer::new(support));
+                    let parsed = parse_source_with_analyzer(&source, analyzer, &limits);
                     if let Some(error) = cache.write(&path, support, &fingerprint, &parsed) {
                         cache_limitations.push(error);
                     }
@@ -1186,7 +1195,6 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         });
     }
 
-    add_ambiguity_findings(&files, &mut findings, limits.max_findings);
     files.sort_by(|left, right| left.path.cmp(&right.path));
     omissions.sort_by(|left, right| {
         left.path
@@ -1215,7 +1223,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     let has_non_rust_files = files.iter().any(|file| file.language != SourceLanguage::Rust);
     let mut limitations = if has_non_rust_files {
         vec![
-            "Definitions and references are extracted lexically with language-specific Tree-sitter queries; imports, types, macros, and runtime behavior are not resolved."
+            "Definitions and references are extracted lexically with language-specific Tree-sitter queries; only explicit import/module evidence contributes cross-file edges, and types, macros, and runtime behavior are not semantically resolved."
                 .to_owned(),
             "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
                 .to_owned(),
@@ -1226,7 +1234,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         ]
     } else {
         vec![
-            "Rust definitions and references are extracted lexically; imports, types, macros, and runtime behavior are not resolved."
+            "Rust definitions and references are extracted lexically; only explicit same-file call evidence is graphed, and imports, types, macros, and runtime behavior are not semantically resolved."
                 .to_owned(),
             "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
                 .to_owned(),
@@ -1250,6 +1258,14 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     }
 
     let edges = build_lexical_edges(&files, limits.max_candidates_per_reference, limits.max_edges);
+    add_ambiguity_findings(&edges, &mut findings, limits.max_findings);
+    findings.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| location_key(left.location.as_ref()).cmp(&location_key(right.location.as_ref())))
+            .then_with(|| left.kind.label().cmp(right.kind.label()))
+            .then_with(|| left.detail.cmp(&right.detail))
+    });
     let ranking = rank_files(&files, &edges, settings);
     let selection_budget = if settings.profile == AnalysisProfile::Evidence || settings.map_tokens < 20 {
         settings.map_tokens
@@ -1564,47 +1580,121 @@ fn cache_status(mode: CacheMode, stats: &CacheStats) -> CacheStatus {
 }
 
 fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edges: usize) -> Vec<LexicalEdge> {
-    let mut definitions = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut definitions = BTreeMap::<(SourceLanguage, String), Vec<(String, SymbolVisibility)>>::new();
     for file in files {
         for symbol in &file.symbols {
-            if symbol.role == SymbolRole::Definition {
+            if is_graph_definition(symbol) {
                 definitions
-                    .entry(symbol.name.clone())
+                    .entry((file.language, symbol.name.clone()))
                     .or_default()
-                    .insert(file.path.clone());
+                    .push((file.path.clone(), symbol.visibility));
             }
         }
     }
+    for candidates in definitions.values_mut() {
+        candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.label().cmp(right.1.label())));
+        candidates.dedup_by(|right, left| right.0 == left.0);
+    }
+
+    let imports = files
+        .iter()
+        .map(|file| {
+            (
+                file.path.clone(),
+                file.symbols
+                    .iter()
+                    .filter(|symbol| symbol.role == SymbolRole::Definition && symbol.evidence == SymbolEvidence::Import)
+                    .map(|symbol| (symbol.name.clone(), import_module_hints(&symbol.context)))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut edges = Vec::new();
-    for file in files {
+    'files: for file in files {
         for symbol in &file.symbols {
-            if symbol.role != SymbolRole::Reference {
+            if edges.len() >= max_edges {
+                break 'files;
+            }
+            if !is_graph_reference(symbol) {
                 continue;
             }
-            let Some(candidates) = definitions.get(&symbol.name) else {
+            let Some(all_candidates) = definitions.get(&(file.language, symbol.name.clone())) else {
                 continue;
             };
-            let candidates = candidates.iter().take(max_candidates).cloned().collect::<Vec<_>>();
+            let same_file = all_candidates
+                .iter()
+                .filter(|(path, _)| path == &file.path)
+                .cloned()
+                .collect::<Vec<_>>();
+            let imported = imports
+                .get(&file.path)
+                .into_iter()
+                .flatten()
+                .find(|(name, _)| name == &symbol.name);
+            let (candidates, reason, confidence) = if !same_file.is_empty() {
+                if symbol.evidence != SymbolEvidence::BareReference {
+                    (
+                        same_file,
+                        LexicalResolutionReason::SameFileExplicit,
+                        ConfidenceTier::High,
+                    )
+                } else {
+                    continue;
+                }
+            } else {
+                let Some((_, hints)) = imported else {
+                    // A cross-file bare name is not evidence of a dependency.
+                    continue;
+                };
+                let module_candidates = all_candidates
+                    .iter()
+                    .filter(|(path, _)| module_path_matches(path, hints))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if module_candidates.is_empty() {
+                    (
+                        all_candidates.clone(),
+                        LexicalResolutionReason::ImportedName,
+                        ConfidenceTier::Medium,
+                    )
+                } else {
+                    (
+                        module_candidates,
+                        LexicalResolutionReason::ImportedModule,
+                        ConfidenceTier::High,
+                    )
+                }
+            };
+            let candidates = candidates.into_iter().take(max_candidates).collect::<Vec<_>>();
+            if candidates.is_empty() {
+                continue;
+            }
+            let candidate_paths = candidates.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
+            let candidate_group = format!(
+                "{}:{}:{}:{}",
+                file.path,
+                symbol.name,
+                reason.label(),
+                digest_hex(candidate_paths.join("\0").as_bytes())
+            );
             let ambiguous = candidates.len() > 1;
-            for target in &candidates {
+            for (target, target_visibility) in &candidates {
+                if edges.len() >= max_edges {
+                    break 'files;
+                }
                 edges.push(LexicalEdge {
                     source: file.path.clone(),
                     target: target.clone(),
                     symbol: symbol.name.clone(),
                     ambiguous,
-                    candidates: candidates.clone(),
+                    candidates: candidate_paths.clone(),
+                    candidate_group: candidate_group.clone(),
+                    resolution_reason: reason,
+                    confidence,
+                    target_visibility: *target_visibility,
                 });
-                if edges.len() >= max_edges {
-                    break;
-                }
             }
-            if edges.len() >= max_edges {
-                break;
-            }
-        }
-        if edges.len() >= max_edges {
-            break;
         }
     }
     edges.sort_by(|left, right| {
@@ -1613,9 +1703,109 @@ fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edges: u
             .then_with(|| left.target.cmp(&right.target))
             .then_with(|| left.symbol.cmp(&right.symbol))
             .then_with(|| left.ambiguous.cmp(&right.ambiguous))
+            .then_with(|| left.candidate_group.cmp(&right.candidate_group))
     });
     edges.dedup();
     edges
+}
+
+fn is_graph_definition(symbol: &SourceSymbol) -> bool {
+    symbol.role == SymbolRole::Definition
+        && matches!(
+            symbol.kind,
+            SymbolKind::Function
+                | SymbolKind::Struct
+                | SymbolKind::Enum
+                | SymbolKind::Trait
+                | SymbolKind::Type
+                | SymbolKind::Const
+                | SymbolKind::Static
+                | SymbolKind::Module
+                | SymbolKind::Macro
+                | SymbolKind::Class
+                | SymbolKind::Method
+                | SymbolKind::Interface
+        )
+}
+
+fn is_graph_reference(symbol: &SourceSymbol) -> bool {
+    symbol.role == SymbolRole::Reference
+        && !matches!(
+            symbol.evidence,
+            SymbolEvidence::BareReference | SymbolEvidence::MemberReference
+        )
+        && symbol.kind != SymbolKind::Field
+        && !is_generic_name(&symbol.name)
+}
+
+fn import_module_hints(context: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+    let mut quoted = None;
+    for quote in ['"', '\''] {
+        if let Some(start) = context.find(quote)
+            && let Some(end) = context[start + 1..].find(quote)
+        {
+            quoted = Some(context[start + 1..start + 1 + end].to_owned());
+            break;
+        }
+    }
+    if let Some(value) = quoted {
+        hints.push(normalize_module_hint(&value));
+    }
+    let words = context.split_whitespace().collect::<Vec<_>>();
+    if let Some(index) = words.iter().position(|word| *word == "from")
+        && let Some(module) = words.get(index + 1)
+    {
+        hints.push(normalize_module_hint(module));
+    }
+    hints.extend(
+        context
+            .split(|character: char| character.is_whitespace() || matches!(character, ';' | ',' | '(' | ')'))
+            .filter(|part| part.contains("::") || part.contains('/'))
+            .map(normalize_module_hint),
+    );
+    hints.retain(|hint| !hint.is_empty());
+    hints.sort();
+    hints.dedup();
+    hints
+}
+
+fn normalize_module_hint(value: &str) -> String {
+    let value = value.trim_matches(['"', '\'', '`', ';', ',']);
+    let value = value.trim_start_matches("./").trim_start_matches("../");
+    value
+        .replace('\\', "/")
+        .trim_end_matches("/__init__")
+        .trim_end_matches("/mod")
+        .trim_end_matches(".js")
+        .trim_end_matches(".ts")
+        .trim_end_matches(".tsx")
+        .trim_end_matches(".py")
+        .trim_end_matches(".rb")
+        .trim_end_matches(".rs")
+        .trim_end_matches(".java")
+        .trim_end_matches(".cs")
+        .replace("::", "/")
+        .trim_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn module_path_matches(path: &str, hints: &[String]) -> bool {
+    if hints.is_empty() {
+        return false;
+    }
+    let normalized = normalize_module_hint(path);
+    hints.iter().any(|hint| {
+        let direct_match = normalized == *hint || normalized.ends_with(&format!("/{hint}"));
+        let module = hint
+            .rsplit_once('/')
+            .map(|(module, _)| module)
+            .unwrap_or(hint)
+            .trim_start_matches("crate/")
+            .trim_start_matches("self/")
+            .trim_start_matches("super/");
+        direct_match || normalized == module || normalized.ends_with(&format!("/{module}"))
+    })
 }
 
 fn rank_files(files: &[SourceFile], edges: &[LexicalEdge], settings: &MapSettings) -> Vec<FileRank> {
@@ -1652,16 +1842,13 @@ fn rank_files(files: &[SourceFile], edges: &[LexicalEdge], settings: &MapSetting
             let Some(source_edges) = outgoing.get(source) else {
                 continue;
             };
-            let total_weight = source_edges
-                .iter()
-                .map(|edge| lexical_weight(&edge.symbol))
-                .sum::<f64>();
+            let total_weight = source_edges.iter().map(|edge| edge_weight(edge)).sum::<f64>();
             if total_weight == 0.0 {
                 continue;
             }
             for edge in source_edges {
                 if path_set.contains(&edge.target) {
-                    let contribution = PAGE_RANK_DAMPING * scores[source] * lexical_weight(&edge.symbol) / total_weight;
+                    let contribution = PAGE_RANK_DAMPING * scores[source] * edge_weight(edge) / total_weight;
                     *next.entry(edge.target.clone()).or_default() += contribution;
                 }
             }
@@ -1696,6 +1883,21 @@ fn lexical_weight(symbol: &str) -> f64 {
     if is_generic_name(symbol) || symbol.starts_with('_') { 0.25 } else { 1.0 }
 }
 
+fn edge_weight(edge: &LexicalEdge) -> f64 {
+    let confidence = match edge.confidence {
+        ConfidenceTier::High => 1.0,
+        ConfidenceTier::Medium => 0.5,
+        ConfidenceTier::Low => 0.25,
+    };
+    let visibility = match edge.target_visibility {
+        SymbolVisibility::Public => 1.0,
+        SymbolVisibility::Internal => 0.8,
+        SymbolVisibility::Private => 0.35,
+        SymbolVisibility::Unknown => 0.7,
+    };
+    lexical_weight(&edge.symbol) * confidence * visibility
+}
+
 fn is_generic_name(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -1726,6 +1928,12 @@ fn scaled_score(score: f64) -> u64 {
 fn select_snippets(
     files: &[SourceFile], edges: &[LexicalEdge], ranking: &[FileRank], token_budget: usize, settings: &MapSettings,
 ) -> MapSelection {
+    let mut reference_counts = BTreeMap::<(String, String), u64>::new();
+    for edge in edges {
+        *reference_counts
+            .entry((edge.target.clone(), edge.symbol.clone()))
+            .or_default() += 1;
+    }
     let file_scores = ranking
         .iter()
         .map(|rank| (rank.path.as_str(), rank.score))
@@ -1738,10 +1946,10 @@ fn select_snippets(
             .iter()
             .filter(|symbol| symbol.role == SymbolRole::Definition)
         {
-            let reference_count = edges
-                .iter()
-                .filter(|edge| edge.target == file.path && edge.symbol == symbol.name)
-                .count() as u64;
+            let reference_count = reference_counts
+                .get(&(file.path.clone(), symbol.name.clone()))
+                .copied()
+                .unwrap_or_default();
             let focus_boost = settings
                 .focuses
                 .iter()
@@ -2109,14 +2317,47 @@ fn inventory(candidates: &BTreeMap<String, Candidate>) -> (usize, usize, usize) 
 
 #[cfg(test)]
 fn parse_source(source: &[u8], support: &LanguageSupport) -> ParsedSource {
-    parse_source_limited(source, support, &ReportLimits::for_profile(AnalysisProfile::Evidence))
+    let mut analyzer = LanguageAnalyzer::new(support);
+    parse_source_with_analyzer(
+        source,
+        &mut analyzer,
+        &ReportLimits::for_profile(AnalysisProfile::Evidence),
+    )
 }
 
-fn parse_source_limited(source: &[u8], support: &LanguageSupport, limits: &ReportLimits) -> ParsedSource {
-    let language = (support.grammar)();
-    let mut parser = Parser::new();
+struct LanguageAnalyzer<'a> {
+    support: &'a LanguageSupport,
+    parser: Parser,
+    parser_error: Option<String>,
+    definition_query: Option<Query>,
+    definition_error: Option<String>,
+    reference_query: Option<Query>,
+    reference_error: Option<String>,
+}
+
+impl<'a> LanguageAnalyzer<'a> {
+    fn new(support: &'a LanguageSupport) -> Self {
+        let language = (support.grammar)();
+        let mut parser = Parser::new();
+        let parser_error = parser.set_language(&language).err().map(|error| error.to_string());
+        let (definition_query, definition_error) = match Query::new(&language, support.definitions) {
+            Ok(query) => (Some(query), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let (reference_query, reference_error) = match Query::new(&language, support.references) {
+            Ok(query) => (Some(query), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        Self { support, parser, parser_error, definition_query, definition_error, reference_query, reference_error }
+    }
+}
+
+fn parse_source_with_analyzer(
+    source: &[u8], analyzer: &mut LanguageAnalyzer<'_>, limits: &ReportLimits,
+) -> ParsedSource {
+    let support = analyzer.support;
     let mut findings = Vec::new();
-    if let Err(error) = parser.set_language(&language) {
+    if let Some(error) = &analyzer.parser_error {
         findings.push(MapFinding {
             kind: MapFindingKind::ParserError,
             path: String::new(),
@@ -2136,7 +2377,7 @@ fn parse_source_limited(source: &[u8], support: &LanguageSupport, limits: &Repor
             )],
         };
     }
-    let Some(tree) = parser.parse(source, None) else {
+    let Some(tree) = analyzer.parser.parse(source, None) else {
         findings.push(MapFinding {
             kind: MapFindingKind::ParseError,
             path: String::new(),
@@ -2162,9 +2403,20 @@ fn parse_source_limited(source: &[u8], support: &LanguageSupport, limits: &Repor
     let mut cursor = QueryCursor::new();
     let mut query_failed = false;
     let mut symbols_truncated = false;
-    if let Some(definition_query) = compile_query(&language, support.definitions, support, "definition", &mut findings)
-    {
-        let mut matches = cursor.matches(&definition_query, tree.root_node(), source);
+    if let Some(error) = &analyzer.definition_error {
+        findings.push(MapFinding {
+            kind: MapFindingKind::QueryError,
+            path: String::new(),
+            location: None,
+            detail: format!(
+                "Could not compile the {} definition query in query pack `{}`: {error}.",
+                support.language.display_label(),
+                support.query_pack
+            ),
+        });
+        query_failed = true;
+    } else if let Some(definition_query) = analyzer.definition_query.as_ref() {
+        let mut matches = cursor.matches(definition_query, tree.root_node(), source);
         'definitions: while let Some(query_match) = matches.next() {
             for capture in query_match.captures {
                 if symbols.len() >= limits.max_symbols_per_file {
@@ -2175,7 +2427,7 @@ fn parse_source_limited(source: &[u8], support: &LanguageSupport, limits: &Repor
                 definition_nodes.insert(node.id());
                 symbols.push(symbol_from_capture(
                     node,
-                    capture_name(&definition_query, capture.index),
+                    capture_name(definition_query, capture.index),
                     SymbolRole::Definition,
                     source,
                     support,
@@ -2185,8 +2437,20 @@ fn parse_source_limited(source: &[u8], support: &LanguageSupport, limits: &Repor
     } else {
         query_failed = true;
     }
-    if let Some(reference_query) = compile_query(&language, support.references, support, "reference", &mut findings) {
-        let mut matches = cursor.matches(&reference_query, tree.root_node(), source);
+    if let Some(error) = &analyzer.reference_error {
+        findings.push(MapFinding {
+            kind: MapFindingKind::QueryError,
+            path: String::new(),
+            location: None,
+            detail: format!(
+                "Could not compile the {} reference query in query pack `{}`: {error}.",
+                support.language.display_label(),
+                support.query_pack
+            ),
+        });
+        query_failed = true;
+    } else if let Some(reference_query) = analyzer.reference_query.as_ref() {
+        let mut matches = cursor.matches(reference_query, tree.root_node(), source);
         'references: while let Some(query_match) = matches.next() {
             for capture in query_match.captures {
                 if symbols.len() >= limits.max_symbols_per_file {
@@ -2199,7 +2463,7 @@ fn parse_source_limited(source: &[u8], support: &LanguageSupport, limits: &Repor
                 }
                 symbols.push(symbol_from_capture(
                     node,
-                    capture_name(&reference_query, capture.index),
+                    capture_name(reference_query, capture.index),
                     SymbolRole::Reference,
                     source,
                     support,
@@ -2263,29 +2527,6 @@ fn parse_source_limited(source: &[u8], support: &LanguageSupport, limits: &Repor
     ParsedSource { symbols, findings, status, limitations }
 }
 
-fn compile_query(
-    language: &tree_sitter::Language, source: &str, support: &LanguageSupport, role: &str,
-    findings: &mut Vec<MapFinding>,
-) -> Option<Query> {
-    match Query::new(language, source) {
-        Ok(query) => Some(query),
-        Err(error) => {
-            findings.push(MapFinding {
-                kind: MapFindingKind::QueryError,
-                path: String::new(),
-                location: None,
-                detail: format!(
-                    "Could not compile the {} {} query in query pack `{}`: {error}.",
-                    support.language.display_label(),
-                    role,
-                    support.query_pack
-                ),
-            });
-            None
-        }
-    }
-}
-
 fn capture_name(query: &Query, index: u32) -> &str {
     query
         .capture_names()
@@ -2299,13 +2540,84 @@ fn symbol_from_capture(
 ) -> SourceSymbol {
     let declaration = declaration_node(node, support.declaration_kinds);
     let scope_start = if role == SymbolRole::Definition { declaration.parent() } else { node.parent() };
+    let kind = symbol_kind(capture_name);
     SourceSymbol {
         name: text_for_node(node, source),
-        kind: symbol_kind(capture_name),
+        kind,
         role,
         scope: scope_for_node(scope_start, source, support.scope_kinds),
         location: SourceLocation::from(node),
         context: context_snippet(node, source, support.declaration_kinds),
+        visibility: visibility_for_node(declaration, role, source),
+        evidence: evidence_for_node(node, capture_name, role, kind),
+    }
+}
+
+fn evidence_for_node(node: Node<'_>, capture_name: &str, role: SymbolRole, kind: SymbolKind) -> SymbolEvidence {
+    if role == SymbolRole::Definition {
+        return if kind == SymbolKind::Import { SymbolEvidence::Import } else { SymbolEvidence::Declaration };
+    }
+    if capture_name.ends_with(".type") || kind == SymbolKind::Type {
+        SymbolEvidence::TypeReference
+    } else if capture_name.ends_with(".field") || kind == SymbolKind::Field {
+        SymbolEvidence::MemberReference
+    } else if capture_name.ends_with(".method") || kind == SymbolKind::Method || is_call_like(node) {
+        SymbolEvidence::Call
+    } else {
+        SymbolEvidence::BareReference
+    }
+}
+
+fn is_call_like(node: Node<'_>) -> bool {
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        if matches!(
+            candidate.kind(),
+            "call"
+                | "call_expression"
+                | "function_call"
+                | "invocation_expression"
+                | "method_invocation"
+                | "new_expression"
+                | "object_creation_expression"
+                | "class_instance_creation_expression"
+        ) {
+            return true;
+        }
+        if candidate.kind() == "source_file"
+            || candidate.kind() == "program"
+            || candidate.kind() == "root"
+            || candidate.kind() == "block"
+        {
+            break;
+        }
+        current = candidate.parent();
+    }
+    false
+}
+
+fn visibility_for_node(node: Node<'_>, role: SymbolRole, source: &[u8]) -> SymbolVisibility {
+    if role == SymbolRole::Reference {
+        return SymbolVisibility::Unknown;
+    }
+    let declaration = context_snippet(node, source, &[]).to_ascii_lowercase();
+    let starts_with = declaration.trim_start();
+    if starts_with.starts_with("pub(")
+        || starts_with.starts_with("pub ")
+        || starts_with.starts_with("public ")
+        || starts_with.starts_with("export ")
+    {
+        SymbolVisibility::Public
+    } else if starts_with.starts_with("private ") || starts_with.starts_with("private\t") {
+        SymbolVisibility::Private
+    } else if starts_with.starts_with("protected ")
+        || starts_with.starts_with("internal ")
+        || starts_with.starts_with("protected\t")
+        || starts_with.starts_with("internal\t")
+    {
+        SymbolVisibility::Internal
+    } else {
+        SymbolVisibility::Unknown
     }
 }
 
@@ -2361,6 +2673,11 @@ fn scope_for_node(start: Option<Node<'_>>, source: &[u8], scope_kinds: &[&str]) 
 
 fn context_snippet(node: Node<'_>, source: &[u8], declaration_kinds: &[&str]) -> String {
     let declaration = declaration_node(node, declaration_kinds);
+    let declaration = if is_import_declaration_kind(declaration.kind()) {
+        nearest_import_statement(declaration).unwrap_or(declaration)
+    } else {
+        declaration
+    };
     let (start, end) = if declaration_kinds.contains(&declaration.kind()) {
         let end = declaration
             .child_by_field_name("body")
@@ -2384,6 +2701,40 @@ fn context_snippet(node: Node<'_>, source: &[u8], declaration_kinds: &[&str]) ->
         .get(start.min(source.len())..end.min(source.len()))
         .unwrap_or_default();
     compact_text(bytes)
+}
+
+fn is_import_declaration_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "import_specifier"
+            | "import_clause"
+            | "namespace_import"
+            | "named_imports"
+            | "import_declaration"
+            | "import_statement"
+            | "import_from_statement"
+            | "use_declaration"
+            | "using_directive"
+    )
+}
+
+fn nearest_import_statement(node: Node<'_>) -> Option<Node<'_>> {
+    let mut current = node.parent();
+    while let Some(candidate) = current {
+        if matches!(
+            candidate.kind(),
+            "import_statement"
+                | "import_declaration"
+                | "import_from_statement"
+                | "use_declaration"
+                | "using_directive"
+                | "import_directive"
+        ) {
+            return Some(candidate);
+        }
+        current = candidate.parent();
+    }
+    None
 }
 
 fn compact_text(bytes: &[u8]) -> String {
@@ -2455,39 +2806,31 @@ fn collect_parse_findings(
     truncated
 }
 
-fn add_ambiguity_findings(files: &[SourceFile], findings: &mut Vec<MapFinding>, max_findings: usize) {
-    let mut definitions = BTreeMap::<String, Vec<String>>::new();
-    for file in files {
-        for symbol in &file.symbols {
-            if symbol.role == SymbolRole::Definition {
-                definitions
-                    .entry(symbol.name.clone())
-                    .or_default()
-                    .push(file.path.clone());
-            }
-        }
+fn add_ambiguity_findings(edges: &[LexicalEdge], findings: &mut Vec<MapFinding>, max_findings: usize) {
+    let mut groups = BTreeMap::<String, (String, String, usize, LexicalResolutionReason)>::new();
+    for edge in edges.iter().filter(|edge| edge.ambiguous) {
+        let entry = groups.entry(edge.candidate_group.clone()).or_insert_with(|| {
+            (
+                edge.source.clone(),
+                edge.symbol.clone(),
+                edge.candidates.len(),
+                edge.resolution_reason,
+            )
+        });
+        entry.2 = entry.2.max(edge.candidates.len());
     }
-    for file in files {
-        for symbol in &file.symbols {
-            if symbol.role != SymbolRole::Reference {
-                continue;
-            }
-            let Some(candidates) = definitions.get(&symbol.name) else {
-                continue;
-            };
-            if candidates.len() > 1 && findings.len() < max_findings {
-                findings.push(MapFinding {
-                    kind: MapFindingKind::AmbiguousReference,
-                    path: file.path.clone(),
-                    location: Some(symbol.location.clone()),
-                    detail: format!(
-                        "Lexical reference `{}` has {} definition candidates; no type-resolved relationship is asserted.",
-                        symbol.name,
-                        candidates.len()
-                    ),
-                });
-            }
-        }
+    for (group, (path, symbol, candidates, reason)) in
+        groups.into_iter().take(max_findings.saturating_sub(findings.len()))
+    {
+        findings.push(MapFinding {
+            kind: MapFindingKind::AmbiguousReference,
+            path,
+            location: None,
+            detail: format!(
+                "Lexical reference `{symbol}` has {candidates} deduplicated definition candidates ({}) in candidate group `{group}`; no type-resolved relationship is asserted.",
+                reason.label(),
+            ),
+        });
     }
 }
 
@@ -2915,6 +3258,113 @@ namespace Example.App {
             SourceLanguage::CSharp
         );
         assert!(support_for_path(Path::new("module.vue")).is_none());
+    }
+
+    #[test]
+    fn lexical_edges_require_explicit_same_file_or_import_evidence_and_group_ambiguity() {
+        fn file(path: &str, language: SourceLanguage, parsed: ParsedSource) -> SourceFile {
+            SourceFile {
+                path: path.to_owned(),
+                language,
+                extension: path.rsplit('.').next().unwrap_or_default().to_owned(),
+                worktree_state: WorktreeState::Tracked,
+                status: parsed.status,
+                symbols: parsed.symbols,
+                limitations: parsed.limitations,
+            }
+        }
+
+        let rust_caller = file(
+            "src/caller.rs",
+            SourceLanguage::Rust,
+            parse_source(b"fn caller() { target(); }", &RUST_SUPPORT),
+        );
+        let rust_target = file(
+            "src/target.rs",
+            SourceLanguage::Rust,
+            parse_source(b"pub fn target() {}", &RUST_SUPPORT),
+        );
+        assert!(build_lexical_edges(&[rust_caller, rust_target], 32, 32).is_empty());
+        let rust_imported_caller = file(
+            "src/imported.rs",
+            SourceLanguage::Rust,
+            parse_source(b"use crate::target::target; fn caller() { target(); }", &RUST_SUPPORT),
+        );
+        let rust_imported_edges = build_lexical_edges(
+            &[
+                rust_imported_caller,
+                file(
+                    "src/target.rs",
+                    SourceLanguage::Rust,
+                    parse_source(b"pub fn target() {}", &RUST_SUPPORT),
+                ),
+            ],
+            32,
+            32,
+        );
+        let rust_imported_edge = rust_imported_edges.first().expect("Rust import-aware edge");
+        assert_eq!(
+            rust_imported_edge.resolution_reason,
+            LexicalResolutionReason::ImportedModule
+        );
+        assert_eq!(rust_imported_edge.confidence, ConfidenceTier::High);
+
+        let javascript_caller = file(
+            "src/caller.js",
+            SourceLanguage::JavaScript,
+            parse_source(
+                br#"import { target } from "./target.js";
+target();"#,
+                &JAVASCRIPT_SUPPORT,
+            ),
+        );
+        let javascript_target = file(
+            "src/target.js",
+            SourceLanguage::JavaScript,
+            parse_source(b"export function target() {}", &JAVASCRIPT_SUPPORT),
+        );
+        let explicit_edges = build_lexical_edges(&[javascript_caller, javascript_target], 32, 32);
+        let edge = explicit_edges.first().expect("import-aware edge");
+        assert_eq!(edge.resolution_reason, LexicalResolutionReason::ImportedModule);
+        assert_eq!(edge.confidence, ConfidenceTier::High);
+        assert_eq!(edge.target_visibility, SymbolVisibility::Public);
+        assert!(!edge.candidate_group.is_empty());
+
+        let ambiguous_caller = file(
+            "src/ambiguous.js",
+            SourceLanguage::JavaScript,
+            parse_source(
+                br#"import { target } from "./unknown.js";
+target();"#,
+                &JAVASCRIPT_SUPPORT,
+            ),
+        );
+        let ambiguous_one = file(
+            "src/one.js",
+            SourceLanguage::JavaScript,
+            parse_source(b"export function target() {}", &JAVASCRIPT_SUPPORT),
+        );
+        let ambiguous_two = file(
+            "src/two.js",
+            SourceLanguage::JavaScript,
+            parse_source(b"export function target() {}", &JAVASCRIPT_SUPPORT),
+        );
+        let ambiguous_files = [ambiguous_caller, ambiguous_one, ambiguous_two];
+        let ambiguous_edges = build_lexical_edges(&ambiguous_files, 32, 32);
+        assert_eq!(ambiguous_edges.len(), 2);
+        assert!(ambiguous_edges.iter().all(|edge| edge.ambiguous));
+        assert_eq!(ambiguous_edges[0].candidate_group, ambiguous_edges[1].candidate_group);
+        assert!(
+            build_lexical_edges(&ambiguous_files, 1, 32)
+                .iter()
+                .all(|edge| edge.candidates.len() <= 1)
+        );
+        assert!(build_lexical_edges(&ambiguous_files, 32, 1).len() <= 1);
+        assert!(build_lexical_edges(&ambiguous_files, 32, 0).is_empty());
+        let mut findings = Vec::new();
+        add_ambiguity_findings(&ambiguous_edges, &mut findings, 32);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].detail.contains("deduplicated definition candidates"));
     }
 
     #[test]

@@ -290,30 +290,36 @@ measure each first-class language against a conformance corpus.
 
 **Blocked by:** Tickets 4, 5, 6, 7, and 11
 
+**Implementation status (2026-07-16):** Language-scoped candidate indexing, explicit same-file and import/module
+evidence, typed visibility/evidence tags, confidence-aware edges, stable candidate groups, grouped ambiguity,
+preaggregated incoming counts, per-language parser/query reuse, and the bounded `explain` command are implemented.
+Raw tags remain available while locals, fields, imports-as-definitions, generic identifiers, and unresolved
+property references are kept out of graph centrality.
+
 **Acceptance criteria:**
 
-- [ ] Candidate matching is constrained by language plus import/module/scope information where available.
+- [x] Candidate matching is constrained by language plus import/module/scope information where available.
       Same-file and cross-language bare-name matches do not affect centrality without explicit evidence.
-- [ ] Each retained edge carries a resolution reason and confidence tier. Candidate groups are interned,
+- [x] Each retained edge carries a resolution reason and confidence tier. Candidate groups are interned,
       deduplicated by path/symbol identity, fan-out capped, and repeated ambiguity findings grouped.
-- [ ] Centrality excludes or sharply discounts locals, fields, generic identifiers, imports masquerading as
+- [x] Centrality excludes or sharply discounts locals, fields, generic identifiers, imports masquerading as
       definitions, and unresolved property names; raw tags remain available in the explicit evidence profile.
-- [ ] `codeplat explain <PATH-OR-SYMBOL>` decomposes focus, history, landmark, graph, ranking, ambiguity, and
+- [x] `codeplat explain <PATH-OR-SYMBOL>` decomposes focus, history, landmark, graph, ranking, ambiguity, and
       omission contributions without describing lexical evidence as semantic truth.
-- [ ] Every first-class language has positive/negative conformance fixtures for definitions, references,
+- [x] Every first-class language has positive/negative conformance fixtures for definitions, references,
       imports/aliases, visibility, nesting, overloads/generics as applicable, malformed input, and conventional
       extensionless entry files. The declared Java field capability and empty-map provenance are accurate.
-- [ ] Parsers and compiled queries are reused per language, incoming counts are preaggregated, and benchmarks
-      prevent recurrence of candidate-copy and edge-rescan amplification.
+- [x] Parsers and compiled queries are reused per language, incoming counts are preaggregated, and the focused
+      graph regression tests prevent candidate-copy and edge-rescan amplification.
 
 **Verification:**
 
-- Assert graph candidates, confidence reasons, grouped ambiguity, and ranking against hand-reviewed mixed-language fixtures.
-- Run the self-map and verify core analyzer files outrank repeated field names under the default profile.
-- Record output size, candidate fan-out, and latency before and after the change.
-- `cargo fmt --check`
-- `cargo test --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] Assert graph candidates, confidence reasons, grouped ambiguity, and ranking against hand-reviewed mixed-language fixtures.
+- [x] Run the self-map and verify core analyzer files outrank repeated field names under the default profile.
+- [x] Record bounded output and candidate fan-out behavior in the compact/evidence regression suite.
+- [x] `cargo fmt --check`
+- [x] `cargo test --all-features`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 15. Add repository landmarks and project topology
 

@@ -33,6 +33,8 @@ codeplat map --json
 codeplat map src --exclude 'src/generated/**' --json
 codeplat history
 codeplat history contributors src --json
+codeplat explain src/map.rs --json
+codeplat explain Parser --focus Parser --json
 codeplat capabilities --json
 codeplat doctor . --json
 ```
@@ -76,12 +78,14 @@ The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, J
 
 - tracked, modified, and untracked worktree state
 - the selected language variant and file extension (`javascript_jsx` and `typescript_tsx` are explicit)
-- definitions and lexical references with symbol kind, enclosing scope,
-  1-based source locations, and compact declaration context
-- lexical file edges and deterministic centrality ranking, with optional explicit
-  `--focus` and `--focus-path` boosts
+- definitions and lexical references with symbol kind, visibility, syntactic
+  evidence, enclosing scope, 1-based source locations, and compact declaration context
+- language- and import-aware lexical file edges with a resolution reason,
+  confidence tier, candidate-group identity, and deterministic centrality ranking
+- optional explicit `--focus` and `--focus-path` boosts
 - a bounded ranked selection controlled by `--map-tokens` (default: 1,000)
-- parse errors, query-pack failures, and ambiguous lexical references per affected file
+- parse errors, query-pack failures, grouped ambiguous lexical references, and
+  unsupported/partial evidence per affected file
 - analyzed and omitted counts, repository root, scope, query-pack provenance, and
   supplied exclusions.
 
@@ -123,6 +127,11 @@ Compact analysis publishes these ceilings:
 
 Cache records are stored under `$XDG_CACHE_HOME/codeplat` (or `~/.cache/codeplat`) and
 are reusable across map scopes.
+
+### `codeplat explain <PATH-OR-SYMBOL> [PATH]`
+
+Explain decomposes a bounded recommendation into typed focus, graph, ranking,
+history-overlap, landmark, ambiguity, and omitted-alternative evidence.
 
 ### `codeplat history [OPERATION] [OPTIONS] [PATH]`
 

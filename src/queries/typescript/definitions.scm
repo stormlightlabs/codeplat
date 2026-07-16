@@ -7,5 +7,6 @@
 (method_definition name: (property_identifier) @definition.method)
 (variable_declarator name: (identifier) @definition.variable)
 (import_specifier name: (identifier) @definition.import)
+(import_specifier alias: (identifier) @definition.import)
 (import_clause (identifier) @definition.import)
 (namespace_import (identifier) @definition.import)

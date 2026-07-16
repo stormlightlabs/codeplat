@@ -30,7 +30,8 @@
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
         "limitations": { "type": "array", "items": { "$ref": "#/$defs/limitation" } },
         "history": { "type": ["object", "null"] },
-        "map": { "type": ["object", "null"] }
+        "map": { "type": ["object", "null"] },
+        "explain": { "type": ["object", "null"] }
       },
       "additionalProperties": true
     },
@@ -38,8 +39,9 @@
       "type": "object",
       "required": ["name"],
       "properties": {
-        "name": { "enum": ["briefing", "map", "history"] },
-        "operation": { "enum": ["churn", "contributors", "bugs", "activity", "firefighting"] }
+        "name": { "enum": ["briefing", "map", "history", "explain"] },
+        "operation": { "enum": ["churn", "contributors", "bugs", "activity", "firefighting"] },
+        "target": { "type": "string" }
       },
       "additionalProperties": true
     },

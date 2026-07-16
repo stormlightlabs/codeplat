@@ -1267,7 +1267,7 @@ fn map_inventory_and_rust_findings_are_reported_semantically() {
     let findings = value["map"]["findings"].as_array().expect("map findings");
     assert!(findings.iter().any(|finding| finding["kind"] == "parse_error"));
     assert!(
-        findings
+        !findings
             .iter()
             .any(|finding| { finding["kind"] == "ambiguous_reference" && finding["path"] == "src/use.rs" })
     );
@@ -1347,7 +1347,7 @@ fn map_scope_exclusions_and_markdown_limitations_are_preserved() {
 }
 
 #[test]
-fn map_builds_ambiguous_edges_and_applies_focus_and_token_budget() {
+fn map_rejects_unqualified_cross_file_edges_and_applies_focus_and_token_budget() {
     let fixture = MapFixtureRepository::new();
     let output = fixture.run(&[
         "map",
@@ -1372,12 +1372,13 @@ fn map_builds_ambiguous_edges_and_applies_focus_and_token_budget() {
     assert!(json["map"]["selection"]["estimated_tokens"].as_u64().unwrap() <= 40);
     assert_eq!(json["map"]["ranking"][0]["path"], "src/one.rs");
     assert_eq!(json["map"]["cache"]["status"], "disabled");
-    assert!(json["map"]["edges"].as_array().unwrap().iter().any(|edge| {
-        edge["source"] == "src/use.rs"
-            && edge["symbol"] == "duplicate"
-            && edge["ambiguous"] == true
-            && (edge["target"] == "src/one.rs" || edge["target"] == "src/two.rs")
-    }));
+    assert!(
+        !json["map"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| { edge["source"] == "src/use.rs" && edge["symbol"] == "duplicate" })
+    );
 
     let elided = fixture.run(&[
         "map",
@@ -1395,6 +1396,35 @@ fn map_builds_ambiguous_edges_and_applies_focus_and_token_budget() {
             .unwrap()
             .iter()
             .any(|snippet| snippet["truncated"] == true && snippet["symbol"]["location"]["start"]["line"] == 1)
+    );
+}
+
+#[test]
+fn explain_reports_typed_focus_graph_history_and_omission_evidence() {
+    let fixture = MapFixtureRepository::new();
+    let output = fixture.run(&["explain", "duplicate", "--focus", "duplicate", "--no-cache", "--json"]);
+    assert!(
+        output.status.success(),
+        "explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let json: Value = serde_json::from_str(&stdout(&output)).expect("valid explain JSON");
+    assert_eq!(json["command"]["name"], "explain");
+    assert_eq!(json["command"]["target"], "duplicate");
+    assert_eq!(json["explain"]["target_kind"], "symbol");
+    assert!(json["explain"]["matched_paths"].as_array().unwrap().len() >= 2);
+    assert!(
+        json["explain"]["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|limitation| {
+                limitation
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("not a semantic call graph")
+            })
     );
 }
 
@@ -2284,7 +2314,7 @@ fn java_and_c_sharp_map_is_first_class_and_preserves_visibility_duplicates_and_l
             .any(|omission| { omission["path"] == "README.md" && omission["reason"] == "unsupported_language" })
     );
     assert!(
-        json["map"]["findings"]
+        !json["map"]["findings"]
             .as_array()
             .expect("map findings")
             .iter()
@@ -2358,7 +2388,7 @@ fn markdown_snapshot_is_direct_and_readable() {
          \n\
          ### Map limitations\n\
          \n\
-         - Rust definitions and references are extracted lexically; imports, types, macros, and runtime behavior are not resolved.\n\
+         - Rust definitions and references are extracted lexically; only explicit same-file call evidence is graphed, and imports, types, macros, and runtime behavior are not semantically resolved.\n\
          - Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge.\n\
          - Tracked files are eligible even when ignore rules match them; ignored untracked files are omitted and recorded.\n"
     );
