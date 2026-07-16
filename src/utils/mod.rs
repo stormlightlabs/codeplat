@@ -40,6 +40,27 @@ pub fn month_for_timestamp(seconds: i64) -> String {
     format!("{year:04}-{month:02}")
 }
 
+/// Reports use a UTC capture date as their stable reference marker. Analysis
+/// windows still use the precise process clock internally, while repeated
+/// runs of unchanged inputs remain byte-comparable within one UTC day.
+pub fn capture_date(time: std::time::SystemTime) -> String {
+    let seconds = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    timestamp_to_rfc3339_seconds(seconds - seconds.rem_euclid(SECONDS_PER_DAY))
+}
+
+pub fn timestamp_to_rfc3339_seconds(seconds: i64) -> String {
+    let days = seconds.div_euclid(SECONDS_PER_DAY);
+    let seconds_of_day = seconds.rem_euclid(SECONDS_PER_DAY);
+    let (year, month, day) = civil_date_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = seconds_of_day.rem_euclid(3_600) / 60;
+    let second = seconds_of_day.rem_euclid(60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
 /// Gregorian calendar conversion based on the civil-from-days algorithm.
 pub fn civil_date_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
@@ -53,6 +74,10 @@ pub fn civil_date_from_days(days: i64) -> (i64, i64, i64) {
     let month = month_part + if month_part < 10 { 3 } else { -9 };
     let year = year + i64::from(month <= 2);
     (year, month, day)
+}
+
+pub fn token_count(text: &str) -> usize {
+    text.chars().count().div_ceil(4).max(1)
 }
 
 #[cfg(test)]

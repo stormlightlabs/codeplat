@@ -571,7 +571,7 @@ fn root_map_and_history_help_are_complete() {
         assert!(help.contains("Examples:"));
         assert!(help.contains("--format <FORMAT>"));
         assert!(help.contains("--json"));
-        assert!(help.contains("github.com/stormlightlabs/setaryb/issues"));
+        assert!(help.contains("github.com/stormlightlabs/codeplat/issues"));
         if arguments.first().copied() == Some("map") {
             assert!(help.contains("--exclude <GLOB>"));
         }
@@ -732,6 +732,158 @@ fn json_rendering_is_versioned_semantic_and_plain() {
     assert_eq!(value["status"], "analyzed");
     assert!(value["history"].is_object());
     assert!(value["map"].is_object());
+}
+
+#[test]
+fn machine_report_provenance_is_typed_and_repeated_runs_are_comparable() {
+    let fixture = MapFixtureRepository::new();
+    let first = fixture.run(&["map", "--no-cache", "--json"]);
+    let second = fixture.run(&["map", "--no-cache", "--json"]);
+    let first_json = stdout(&first);
+    let value: Value = serde_json::from_str(&first_json).expect("valid provenance report");
+
+    assert!(first.status.success());
+    assert!(second.status.success());
+    assert_eq!(first_json, stdout(&second));
+    assert_eq!(value["provenance"]["tool_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["provenance"]["effective_options"]["format"], "json");
+    assert_eq!(value["provenance"]["repository"]["object_format"], "sha1");
+    assert!(
+        value["provenance"]["repository"]["stable_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(value["provenance"]["head"]["reference"], "refs/heads/main");
+    assert!(value["provenance"]["head"]["oid"].as_str().unwrap().len() >= 40);
+    assert!(value["provenance"]["captured_at"].as_str().unwrap().contains('T'));
+    assert_eq!(value["provenance"]["cache"]["status"], "disabled");
+    assert!(value["provenance"]["languages"]["rust"]["grammar_version"].is_string());
+    assert_eq!(value["provenance"]["worktree"]["state"], "mixed");
+}
+
+#[test]
+fn capabilities_are_available_without_repository_analysis() {
+    let fixture = FixtureRepository::new();
+    let output = fixture.run(&["capabilities", "--json"]);
+    let value: Value = serde_json::from_slice(&output.stdout).expect("valid capabilities JSON");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["report_kind"], "capabilities");
+    assert_eq!(value["query_packs_valid"], true);
+    assert_eq!(value["limits"]["compact"]["max_files"], 4_096);
+    assert!(
+        value["languages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|language| language["language"] == "java")
+    );
+}
+
+#[test]
+fn doctor_reports_support_health_without_source_evidence_or_repository_mutation() {
+    let fixture = FixtureRepository::new();
+    let before = fs::read(fixture.root.join(".git/HEAD")).expect("read HEAD before doctor");
+    let output = fixture.run(&["doctor", "--json"]);
+    let value: Value = serde_json::from_slice(&output.stdout).expect("valid doctor JSON");
+
+    assert!(
+        output.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(value["report_kind"], "doctor");
+    assert_eq!(value["source_evidence_collected"], false);
+    assert_eq!(value["repository_state_changed"], false);
+    assert!(
+        value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "path_safety")
+    );
+    assert!(
+        value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "query_packs")
+    );
+    assert_eq!(
+        fs::read(fixture.root.join(".git/HEAD")).expect("read HEAD after doctor"),
+        before
+    );
+    assert!(!stdout(&output).contains("pub fn"));
+}
+
+#[test]
+fn strict_policy_renders_typed_partial_report_then_returns_analysis_failure() {
+    let fixture = MapFixtureRepository::new();
+    let output = fixture.run(&["map", "--strict", "--no-cache", "--json"]);
+    let value: Value = serde_json::from_slice(&output.stdout).expect("strict mode still emits JSON");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(value["quality"]["partial"], true);
+    assert!(
+        value["quality"]["strict_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue == "partial")
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("strict report policy rejected"));
+}
+
+#[test]
+fn history_completeness_marks_shallow_and_missing_objects_and_strict_rejects_them() {
+    let shallow = HistoryFixtureRepository::new();
+    let head = {
+        let repository = gix::open(&shallow.root).expect("open shallow fixture");
+        repository.head_id().expect("resolve shallow HEAD").to_string()
+    };
+    write_file(shallow.root.join(".git/shallow"), format!("{head}\n").as_bytes());
+
+    let shallow_output = shallow.run(&["history", "--json"]);
+    let shallow_value: Value = serde_json::from_slice(&shallow_output.stdout).expect("valid shallow JSON");
+    assert!(shallow_output.status.success());
+    assert_eq!(
+        shallow_value["provenance"]["history"]["completeness"]["status"],
+        "shallow"
+    );
+    assert_eq!(shallow_value["quality"]["incomplete"], true);
+
+    let missing = HistoryFixtureRepository::new();
+    let repository = gix::open(&missing.root).expect("open missing-object fixture");
+    let head = repository.head_id().expect("resolve missing-object HEAD");
+    let parent = repository
+        .find_commit(head)
+        .expect("read missing-object HEAD")
+        .parent_ids()
+        .next()
+        .expect("fixture HEAD has a parent");
+    let parent_text = parent.to_string();
+    let parent_path = missing
+        .root
+        .join(".git/objects")
+        .join(&parent_text[..2])
+        .join(&parent_text[2..]);
+    drop(repository);
+    assert!(parent_path.is_file(), "fixture parent should be a loose object");
+    fs::remove_file(parent_path).expect("remove one reachable Git object");
+
+    let missing_output = missing.run(&["history", "--strict", "--json"]);
+    let missing_value: Value = serde_json::from_slice(&missing_output.stdout).expect("valid missing-object JSON");
+    assert_eq!(missing_output.status.code(), Some(5));
+    assert_eq!(
+        missing_value["provenance"]["history"]["completeness"]["status"],
+        "missing_objects"
+    );
+    assert_eq!(missing_value["quality"]["incomplete"], true);
+    assert!(String::from_utf8_lossy(&missing_output.stderr).contains("strict report policy rejected"));
 }
 
 #[test]

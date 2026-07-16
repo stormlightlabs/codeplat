@@ -3,22 +3,20 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gix::bstr::ByteSlice;
-use gix::revision::walk::{Sorting, iter::Error as WalkIterError};
+use gix::revision::walk::Sorting;
 use gix::traverse::commit::simple::CommitTimeOrder;
 
 use crate::cli::ExitCategory;
-use crate::report::{
-    ActivityReport, AnalysisProfile, BugReport, ChurnReport, CollectionSummary, CommitEvidence, ContributorCount,
-    ContributorReport, FirefightingReport, HistoryCollections, HistoryOperation, HistoryReport, HistorySettings,
-    MonthlyActivity, PathCount, ReportLimits, TruncationReason,
-};
+use crate::report::*;
 use crate::security;
 use crate::utils;
 
 const CHURN_CAVEAT: &str =
     "Absolute churn is not normalized by file size & active development is not automatically risky.";
+
 const CONTRIBUTOR_CAVEAT: &str =
     "Squash merges can credit a merger rather than the original author so commit count is only a knowledge proxy.";
+
 const BUG_CAVEAT: &str = "Bug clusters depend on commit-message discipline and do not prove a defect rate.";
 const ACTIVITY_CAVEAT: &str = "Cadence reflects team and release habits.";
 const FIREFIGHTING_CAVEAT: &str =
@@ -97,6 +95,7 @@ struct CommitScan {
     non_merge_commits_seen: usize,
     truncated: bool,
     elapsed_limited: bool,
+    missing_objects: usize,
 }
 
 struct ChangedPaths {
@@ -134,13 +133,18 @@ pub fn analyze(
     let head = repository
         .head_id()
         .map_err(|error| HistoryError::analysis("resolving HEAD", error))?;
-    let limits = ReportLimits::for_profile(profile);
-    let scan = collect_commits(&repository, head, &scope.relative_path, operation, &limits)?;
-    let records = scan.records;
-    let now = SystemTime::now()
+    let head_reference = repository
+        .head_name()
+        .map_err(|error| HistoryError::analysis("resolving HEAD reference", error))?
+        .map(|name| name.as_bstr().to_str_lossy().into_owned());
+    let reference_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| HistoryError::analysis("reading the current time", error))?
         .as_secs() as i64;
+    let limits = ReportLimits::for_profile(profile);
+    let mut scan = collect_commits(&repository, head, &scope.relative_path, operation, &limits)?;
+    let records = std::mem::take(&mut scan.records);
+    let now = reference_seconds;
 
     let include = |candidate| operation.is_none_or(|selected| selected == candidate);
     let churn_analysis = analyze_churn(&records, &scope.relative_path, &settings, now);
@@ -155,6 +159,14 @@ pub fn analyze(
         .then(|| analyze_firefighting(&records, &scope.relative_path, &settings, now));
     let commits_seen = scan.commits_seen;
     let non_merge_commits_seen = scan.non_merge_commits_seen;
+    let head_snapshot = HeadSnapshot {
+        reference: head_reference.clone(),
+        oid: Some(head.to_string()),
+        detached: head_reference.is_none(),
+        unborn: false,
+    };
+    let completeness = history_completeness(&repository, &scan);
+    let provenance = history_provenance(&records, &head_snapshot, completeness);
     let mut limitations = Vec::new();
     if scan.truncated {
         limitations.push(format!(
@@ -171,6 +183,8 @@ pub fn analyze(
     let mut report = HistoryReport {
         repository_root: scope.repository_root.to_string_lossy().into_owned(),
         scope_path: scope.relative_path,
+        head: head_snapshot,
+        provenance,
         settings,
         commits_seen,
         non_merge_commits_seen,
@@ -240,6 +254,70 @@ fn truncate<T>(values: &mut Vec<T>, limit: usize) -> CollectionSummary {
     let total = values.len();
     values.truncate(limit);
     CollectionSummary::bounded(total, values.len(), TruncationReason::CollectionLimit)
+}
+
+fn history_completeness(repository: &gix::Repository, scan: &CommitScan) -> HistoryCompleteness {
+    let shallow = repository.is_shallow();
+    let status = if scan.missing_objects > 0 {
+        HistoryCompletenessStatus::MissingObjects
+    } else if shallow {
+        HistoryCompletenessStatus::Shallow
+    } else if scan.truncated {
+        HistoryCompletenessStatus::Partial
+    } else {
+        HistoryCompletenessStatus::Complete
+    };
+    let mut notes = Vec::new();
+    if shallow {
+        notes.push("The repository has a shallow boundary; commits before it were not reachable.".to_owned());
+    }
+    if scan.missing_objects > 0 {
+        notes.push(format!(
+            "{} reachable Git object(s) could not be read.",
+            scan.missing_objects
+        ));
+    }
+    if scan.truncated {
+        notes.push("The commit scan was bounded by a resource or elapsed-work limit.".to_owned());
+    }
+    HistoryCompleteness {
+        status,
+        authoritative: matches!(status, HistoryCompletenessStatus::Complete),
+        shallow,
+        missing_objects: scan.missing_objects,
+        notes,
+    }
+}
+
+fn history_provenance(
+    records: &[CommitRecord], head: &HeadSnapshot, completeness: HistoryCompleteness,
+) -> HistoryProvenance {
+    let mut timestamps = records.iter().map(|record| record.committer_seconds);
+    let start = timestamps.next().map(|first| {
+        records
+            .iter()
+            .map(|record| record.committer_seconds)
+            .min()
+            .unwrap_or(first)
+    });
+    let end = records.iter().map(|record| record.committer_seconds).max();
+    HistoryProvenance {
+        observed_date_range: ObservedDateRange {
+            start: start.map(utils::timestamp_to_rfc3339_seconds),
+            end: end.map(utils::timestamp_to_rfc3339_seconds),
+            basis: "committer_date".to_owned(),
+        },
+        time_basis: HistoryTimeBasis {
+            window_filters: "committer_date".to_owned(),
+            contributor_recent_and_activity: "author_date".to_owned(),
+        },
+        current_head: CurrentHeadSemantics {
+            meaning: "The report walks commits reachable from the current HEAD resolved at capture time; it does not imply an unbounded or complete history.".to_owned(),
+            reference: head.reference.clone(),
+            oid: head.oid.clone(),
+        },
+        completeness,
+    }
 }
 
 fn analyze_churn(records: &[CommitRecord], scope: &str, settings: &HistorySettings, now: i64) -> ChurnReport {
@@ -391,6 +469,7 @@ fn collect_commits(
     let mut non_merge_commits_seen = 0usize;
     let mut truncated = false;
     let mut elapsed_limited = false;
+    let mut missing_objects = 0usize;
     let scan_started = Instant::now();
     for info in walk {
         if scan_started.elapsed().as_millis() >= u128::from(limits.max_elapsed_ms) {
@@ -398,27 +477,73 @@ fn collect_commits(
             elapsed_limited = true;
             break;
         }
-        let info = info.map_err(|error: WalkIterError| HistoryError::analysis("walking revisions", error))?;
+        let info = match info {
+            Ok(info) => info,
+            Err(error) if is_missing_object_error(&error) => {
+                missing_objects = missing_objects.saturating_add(1);
+                truncated = true;
+                continue;
+            }
+            Err(error) => return Err(HistoryError::analysis("walking revisions", error)),
+        };
         let id = info.id;
-        let commit = info
-            .object()
-            .map_err(|error| HistoryError::analysis("reading a commit object", error))?;
-        let author = commit
-            .author()
-            .map_err(|error| HistoryError::analysis("decoding a commit author", error))?;
-        let author_time = author
-            .time()
-            .map_err(|error| HistoryError::analysis("decoding an author timestamp", error))?;
-        let committer = commit
-            .committer()
-            .map_err(|error| HistoryError::analysis("decoding a commit committer", error))?;
-        let committer_time = committer
-            .time()
-            .map_err(|error| HistoryError::analysis("decoding a committer timestamp", error))?;
+        let commit = match info.object() {
+            Ok(commit) => commit,
+            Err(error) if is_missing_object_error(&error) => {
+                missing_objects = missing_objects.saturating_add(1);
+                truncated = true;
+                continue;
+            }
+            Err(error) => return Err(HistoryError::analysis("reading a commit object", error)),
+        };
+        let author = match commit.author() {
+            Ok(author) => author,
+            Err(error) if is_missing_object_error(&error) => {
+                missing_objects = missing_objects.saturating_add(1);
+                truncated = true;
+                continue;
+            }
+            Err(error) => return Err(HistoryError::analysis("decoding a commit author", error)),
+        };
+        let author_time = match author.time() {
+            Ok(time) => time,
+            Err(error) if is_missing_object_error(&error) => {
+                missing_objects = missing_objects.saturating_add(1);
+                truncated = true;
+                continue;
+            }
+            Err(error) => return Err(HistoryError::analysis("decoding an author timestamp", error)),
+        };
+        let committer = match commit.committer() {
+            Ok(committer) => committer,
+            Err(error) if is_missing_object_error(&error) => {
+                missing_objects = missing_objects.saturating_add(1);
+                truncated = true;
+                continue;
+            }
+            Err(error) => return Err(HistoryError::analysis("decoding a commit committer", error)),
+        };
+        let committer_time = match committer.time() {
+            Ok(time) => time,
+            Err(error) if is_missing_object_error(&error) => {
+                missing_objects = missing_objects.saturating_add(1);
+                truncated = true;
+                continue;
+            }
+            Err(error) => return Err(HistoryError::analysis("decoding a committer timestamp", error)),
+        };
         let parents: Vec<_> = commit.parent_ids().take(2).collect();
         let is_merge = parents.len() > 1;
         let changed = if needs_paths && !is_merge {
-            changed_paths(repository, &commit, parents.first().copied())?
+            match changed_paths(repository, &commit, parents.first().copied()) {
+                Ok(changed) => changed,
+                Err(error) if is_missing_object_error(&error) => {
+                    missing_objects = missing_objects.saturating_add(1);
+                    truncated = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             ChangedPaths { paths: Vec::new(), truncated: false }
         };
@@ -436,15 +561,24 @@ fn collect_commits(
         }
         truncated |= changed_truncated;
         let (subject, message) = if needs_message {
-            let message = commit
-                .message_raw()
-                .map_err(|error| HistoryError::analysis("decoding a commit message", error))?
-                .to_str_lossy()
-                .into_owned();
-            let subject = commit
-                .message()
-                .map_err(|error| HistoryError::analysis("decoding a commit message", error))?
-                .summary();
+            let message = match commit.message_raw() {
+                Ok(message) => message.to_str_lossy().into_owned(),
+                Err(error) if is_missing_object_error(&error) => {
+                    missing_objects = missing_objects.saturating_add(1);
+                    truncated = true;
+                    continue;
+                }
+                Err(error) => return Err(HistoryError::analysis("decoding a commit message", error)),
+            };
+            let subject = match commit.message() {
+                Ok(message) => message.summary(),
+                Err(error) if is_missing_object_error(&error) => {
+                    missing_objects = missing_objects.saturating_add(1);
+                    truncated = true;
+                    continue;
+                }
+                Err(error) => return Err(HistoryError::analysis("decoding a commit message", error)),
+            };
             (String::from_utf8_lossy(subject.as_ref()).trim().to_owned(), message)
         } else {
             (String::new(), String::new())
@@ -462,7 +596,16 @@ fn collect_commits(
             paths,
         });
     }
-    Ok(CommitScan { records, commits_seen, non_merge_commits_seen, truncated, elapsed_limited })
+    Ok(CommitScan { records, commits_seen, non_merge_commits_seen, truncated, elapsed_limited, missing_objects })
+}
+
+fn is_missing_object_error(error: &impl std::fmt::Display) -> bool {
+    let message = error.to_string().to_lowercase();
+    message.contains("missing")
+        || message.contains("not found")
+        || message.contains("could not be found")
+        || message.contains("could not find")
+        || message.contains("promisor")
 }
 
 fn changed_paths(

@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/stormlightlabs/codeplat/schema/v1/codeplat.json",
+  "title": "Codeplat schema version 1",
+  "description": "The additive machine-report contract for Codeplat v1. Existing fields may not be removed, retyped, or semantically reused without changing schema_version.",
+  "oneOf": [
+    { "$ref": "#/$defs/analysis_report" },
+    { "$ref": "#/$defs/capabilities_report" },
+    { "$ref": "#/$defs/doctor_report" }
+  ],
+  "$defs": {
+    "analysis_report": {
+      "type": "object",
+      "required": ["schema_version", "command", "scope", "status", "summary", "findings", "limitations"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "profile": { "enum": ["compact", "evidence"] },
+        "limits": { "$ref": "#/$defs/limits" },
+        "command": { "$ref": "#/$defs/command" },
+        "scope": {
+          "type": "object",
+          "required": ["selected_path"],
+          "properties": { "selected_path": { "type": "string" } },
+          "additionalProperties": true
+        },
+        "status": { "enum": ["foundation", "analyzed"] },
+        "summary": { "type": "string" },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "quality": { "$ref": "#/$defs/quality" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+        "limitations": { "type": "array", "items": { "$ref": "#/$defs/limitation" } },
+        "history": { "type": ["object", "null"] },
+        "map": { "type": ["object", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "command": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "enum": ["briefing", "map", "history"] },
+        "operation": { "enum": ["churn", "contributors", "bugs", "activity", "firefighting"] }
+      },
+      "additionalProperties": true
+    },
+    "finding": {
+      "type": "object",
+      "required": ["title", "detail"],
+      "properties": { "title": { "type": "string" }, "detail": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "limitation": {
+      "type": "object",
+      "required": ["detail"],
+      "properties": { "detail": { "type": "string" } },
+      "additionalProperties": true
+    },
+    "limits": {
+      "type": "object",
+      "required": ["max_files", "max_file_bytes", "max_total_bytes", "max_syntax_depth", "max_symbols_per_file", "max_symbols", "max_candidates_per_reference", "max_edges", "max_findings", "max_commits", "max_history_evidence", "max_elapsed_ms", "max_output_bytes"],
+      "properties": {
+        "max_files": { "type": "integer", "minimum": 1 },
+        "max_file_bytes": { "type": "integer", "minimum": 1 },
+        "max_total_bytes": { "type": "integer", "minimum": 1 },
+        "max_syntax_depth": { "type": "integer", "minimum": 1 },
+        "max_symbols_per_file": { "type": "integer", "minimum": 1 },
+        "max_symbols": { "type": "integer", "minimum": 1 },
+        "max_candidates_per_reference": { "type": "integer", "minimum": 1 },
+        "max_edges": { "type": "integer", "minimum": 1 },
+        "max_findings": { "type": "integer", "minimum": 1 },
+        "max_commits": { "type": "integer", "minimum": 1 },
+        "max_history_evidence": { "type": "integer", "minimum": 1 },
+        "max_elapsed_ms": { "type": "integer", "minimum": 1 },
+        "max_output_bytes": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["tool_version", "captured_at", "reference_time", "effective_options", "repository", "head", "worktree", "languages", "cache", "path_encoding"],
+      "properties": {
+        "tool_version": { "type": "string" },
+        "captured_at": { "type": "string", "format": "date-time" },
+        "reference_time": { "type": "string", "format": "date-time" },
+        "effective_options": { "type": "object" },
+        "repository": { "type": "object" },
+        "head": { "type": "object" },
+        "worktree": { "type": "object" },
+        "languages": { "type": "object", "additionalProperties": { "type": "object" } },
+        "cache": { "type": "object" },
+        "path_encoding": { "type": "object" },
+        "history": { "type": ["object", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "quality": {
+      "type": "object",
+      "required": ["stale", "truncated", "incomplete", "unsupported", "partial", "strict_issues"],
+      "properties": {
+        "stale": { "type": "boolean" },
+        "truncated": { "type": "boolean" },
+        "incomplete": { "type": "boolean" },
+        "unsupported": { "type": "boolean" },
+        "partial": { "type": "boolean" },
+        "strict_issues": { "type": "array", "items": { "enum": ["stale", "truncated", "incomplete", "unsupported", "partial"] } }
+      },
+      "additionalProperties": true
+    },
+    "capabilities_report": {
+      "type": "object",
+      "required": ["schema_version", "report_kind", "tool_version", "languages", "query_packs_valid", "limits"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "report_kind": { "const": "capabilities" },
+        "tool_version": { "type": "string" },
+        "languages": { "type": "array", "items": { "type": "object" } },
+        "query_packs_valid": { "type": "boolean" },
+        "limits": { "type": "object", "additionalProperties": { "$ref": "#/$defs/limits" } }
+      },
+      "additionalProperties": true
+    },
+    "doctor_report": {
+      "type": "object",
+      "required": ["schema_version", "report_kind", "tool_version", "requested_path", "checks", "limits", "source_evidence_collected", "repository_state_changed"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "report_kind": { "const": "doctor" },
+        "tool_version": { "type": "string" },
+        "requested_path": { "type": "string" },
+        "repository": { "type": ["object", "null"] },
+        "checks": { "type": "array", "items": { "type": "object" } },
+        "limits": { "type": "object", "additionalProperties": { "$ref": "#/$defs/limits" } },
+        "source_evidence_collected": { "const": false },
+        "repository_state_changed": { "const": false }
+      },
+      "additionalProperties": true
+    }
+  }
+}

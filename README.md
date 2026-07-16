@@ -3,7 +3,7 @@
 Codeplat (“code” + “plat” - a plan or map of land) is a CLI to help you orient
 yourself in a new codebase.
 
-Its produces an integrated briefing, or a focused report when you needs only one
+It produces an integrated briefing, or a focused report when you need only one
 evidence family:
 
 - `codeplat map` inventories the current worktree and extracts structural maps for
@@ -33,6 +33,8 @@ codeplat map --json
 codeplat map src --exclude 'src/generated/**' --json
 codeplat history
 codeplat history contributors src --json
+codeplat capabilities --json
+codeplat doctor . --json
 ```
 
 `PATH` defaults to the current directory. `codeplat` discovers the enclosing
@@ -120,7 +122,7 @@ Compact analysis publishes these ceilings:
 - 8 MiB rendered report.
 
 Cache records are stored under `$XDG_CACHE_HOME/codeplat` (or `~/.cache/codeplat`) and
-are are reusable across map scopes.
+are reusable across map scopes.
 
 ### `codeplat history [OPERATION] [OPTIONS] [PATH]`
 
@@ -145,6 +147,14 @@ codeplat history bugs --window-days 30 --bug-keyword parser --json
 History output presents evidence and caveats. It does not treat churn, commit counts,
 or commit-message matches as objective quality scores.
 
+### `codeplat capabilities --json` and `codeplat doctor [PATH]`
+
+`capabilities` reports the schema version, supported language grammars and query packs,
+query-pack validity, and active compact/evidence.
+
+`doctor` checks repository discovery, path-safety support, cache location and permissions,
+the embedded schema, query packs, and effective limits.
+
 ## Output
 
 Markdown is the default format. Use either `--format json` or `--json` for machine-readable output:
@@ -156,6 +166,25 @@ codeplat history --json
 
 JSON reports use `schema_version: 1`. Markdown and JSON are rendered from the same typed report model.
 Reports go to stdout without ANSI escape sequences and diagnostics go to stderr.
+
+Machine reports include typed provenance:
+
+- the effective request and limits
+- stable repository identity
+- resolved HEAD reference/OID
+- worktree state
+- language/query-pack versions,
+- cache state
+- a UTC capture-date marker
+
+History provenance records its observed committer-date range, author-versus-committer time
+basis, current-HEAD semantics, and completeness status (`complete`, `shallow`, `missing_objects`, or `partial`).
+
+Use `--strict` when automation must reject a report with stale, truncated, incomplete,
+unsupported, or partial evidence.
+
+The v1 JSON schema is [`schema/v1/codeplat.json`](schema/v1/codeplat.json), with compatibility
+examples in [`schema/v1/golden`](schema/v1/golden).
 
 Diagnostic color can be controlled with `--color auto|always|never` or `--no-color`.
 

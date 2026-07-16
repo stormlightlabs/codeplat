@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "report_kind": "doctor",
+  "tool_version": "0.1.0",
+  "requested_path": ".",
+  "repository": null,
+  "checks": [],
+  "limits": {},
+  "source_evidence_collected": false,
+  "repository_state_changed": false
+}

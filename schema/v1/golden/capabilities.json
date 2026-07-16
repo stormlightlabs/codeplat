@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "report_kind": "capabilities",
+  "tool_version": "0.1.0",
+  "languages": [],
+  "query_packs_valid": true,
+  "limits": {}
+}

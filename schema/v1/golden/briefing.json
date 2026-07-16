@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "command": {"name": "briefing"},
+  "scope": {"selected_path": "."},
+  "status": "analyzed",
+  "summary": "historical v1 briefing",
+  "findings": [],
+  "limitations": []
+}

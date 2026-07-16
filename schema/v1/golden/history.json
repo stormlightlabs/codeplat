@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "command": {"name": "history", "operation": "activity"},
+  "scope": {"selected_path": "."},
+  "status": "analyzed",
+  "summary": "historical v1 history",
+  "findings": [],
+  "limitations": [],
+  "history": null
+}

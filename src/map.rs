@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::cli::ExitCategory;
-use crate::report::*;
 use crate::security;
+use crate::{report::*, utils};
 
 const MAX_CONTEXT_CHARS: usize = 180;
 const DEFAULT_MAP_TOKENS: usize = 1_000;
@@ -284,6 +284,69 @@ const LANGUAGE_SUPPORT: &[LanguageSupport] = &[
     JAVA_SUPPORT,
     C_SHARP_SUPPORT,
 ];
+
+/// Return the compiled language/query-pack contract without inspecting a repository.
+pub fn language_capabilities() -> Vec<LanguageCapability> {
+    LANGUAGE_SUPPORT
+        .iter()
+        .map(|support| LanguageCapability {
+            language: support.language,
+            extensions: support
+                .extensions
+                .iter()
+                .map(|extension| (*extension).to_owned())
+                .collect(),
+            grammar: grammar_name(support.language).to_owned(),
+            grammar_version: grammar_version(support.language).to_owned(),
+            query_pack: support.query_pack.to_owned(),
+            query_pack_version: query_pack_version(support.query_pack).to_owned(),
+            definitions: !support.definitions.trim().is_empty(),
+            references: !support.references.trim().is_empty(),
+        })
+        .collect()
+}
+
+/// Compile every embedded query against its grammar. This is deliberately
+/// independent of repository discovery so `capabilities` and `doctor` stay
+/// read-only support diagnostics.
+pub fn validate_query_packs() -> std::result::Result<(), String> {
+    for support in LANGUAGE_SUPPORT {
+        let language = (support.grammar)();
+        Query::new(&language, support.definitions)
+            .map_err(|error| format!("{} definition query: {error}", support.language.label()))?;
+        Query::new(&language, support.references)
+            .map_err(|error| format!("{} reference query: {error}", support.language.label()))?;
+    }
+    Ok(())
+}
+
+fn grammar_name(language: SourceLanguage) -> &'static str {
+    match language {
+        SourceLanguage::Rust => "tree-sitter-rust",
+        SourceLanguage::JavaScript | SourceLanguage::JavaScriptJsx => "tree-sitter-javascript",
+        SourceLanguage::TypeScript | SourceLanguage::TypeScriptTsx => "tree-sitter-typescript",
+        SourceLanguage::Python => "tree-sitter-python",
+        SourceLanguage::Ruby => "tree-sitter-ruby",
+        SourceLanguage::Java => "tree-sitter-java",
+        SourceLanguage::CSharp => "tree-sitter-c-sharp",
+    }
+}
+
+fn grammar_version(language: SourceLanguage) -> &'static str {
+    match language {
+        SourceLanguage::Rust => "0.24.2",
+        SourceLanguage::JavaScript | SourceLanguage::JavaScriptJsx => "0.25.0",
+        SourceLanguage::TypeScript | SourceLanguage::TypeScriptTsx => "0.23.2",
+        SourceLanguage::Python => "0.25.0",
+        SourceLanguage::Ruby => "0.23.1",
+        SourceLanguage::Java => "0.23.5",
+        SourceLanguage::CSharp => "0.23.5",
+    }
+}
+
+fn query_pack_version(query_pack: &str) -> &str {
+    query_pack.rsplit_once('-').map_or(query_pack, |(_, version)| version)
+}
 
 type Result<T> = std::result::Result<T, MapError>;
 
@@ -799,6 +862,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         security::ScopeError::Input(reason) => MapError::Input { path: selected_path.clone(), reason },
         security::ScopeError::Safety(error) => MapError::safety("resolving the analysis scope", error),
     })?;
+    let head = repository_head_snapshot(&repository)?;
     let repository_root = &scope.repository_root;
     let limits = ReportLimits::for_profile(settings.profile);
     let analysis_started = Instant::now();
@@ -1202,6 +1266,8 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         profile: settings.profile,
         repository_root: repository_root.to_string_lossy().into_owned(),
         scope_path: scope.relative_path,
+        head,
+        worktree: worktree_snapshot(inventory),
         query_pack,
         query_packs,
         exclusions: settings.excludes.clone(),
@@ -1294,11 +1360,12 @@ fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits: &R
             || omissions_total > 32
             || findings_total > 128
             || edges_total > 256);
+
     if enforce_budget {
         // The selection is the highest-value compact evidence. Other fields
         // are reduced until the same requested budget accounts for every
         // remaining data-dependent field in the map.
-        while compact_payload_tokens(report) > report.selection.token_budget {
+        while report.compact_payload_tokens() > report.selection.token_budget {
             if report.findings.len() > 1 {
                 report.findings.pop();
             } else if report.selection.snippets.len() > 1 {
@@ -1326,7 +1393,7 @@ fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits: &R
     }
 
     report.selection.estimated_tokens = if enforce_budget {
-        compact_payload_tokens(report).min(report.selection.token_budget)
+        report.compact_payload_tokens().min(report.selection.token_budget)
     } else {
         report
             .selection
@@ -1411,69 +1478,6 @@ fn collection_summary(
         };
         CollectionSummary { total, returned, truncated: true, reason: Some(reason) }
     }
-}
-
-fn compact_payload_tokens(report: &MapReport) -> usize {
-    let mut tokens = 0usize;
-    for file in &report.files {
-        tokens = tokens.saturating_add(token_count(&file.path));
-        tokens = tokens
-            .saturating_add(token_count(file.language.label()))
-            .saturating_add(token_count(&file.extension))
-            .saturating_add(token_count(file.worktree_state.label()))
-            .saturating_add(token_count(file.status.label()));
-        tokens = tokens.saturating_add(
-            file.limitations
-                .iter()
-                .map(|limitation| token_count(limitation))
-                .sum::<usize>(),
-        );
-        for symbol in &file.symbols {
-            tokens = tokens.saturating_add(token_count(&symbol.name));
-            tokens = tokens.saturating_add(token_count(&symbol.context));
-            tokens = tokens.saturating_add(token_count(symbol.kind.label()));
-            tokens = tokens.saturating_add(token_count(symbol.role.label()));
-            tokens = tokens.saturating_add(symbol.scope.iter().map(|scope| token_count(scope)).sum::<usize>());
-            tokens = tokens.saturating_add(8);
-        }
-    }
-    for omission in &report.omissions {
-        tokens = tokens.saturating_add(token_count(&omission.path));
-        tokens = tokens.saturating_add(token_count(&omission.detail));
-    }
-    for finding in &report.findings {
-        tokens = tokens.saturating_add(token_count(finding.kind.label()));
-        tokens = tokens.saturating_add(token_count(&finding.path));
-        tokens = tokens.saturating_add(token_count(&finding.detail));
-        tokens = tokens.saturating_add(if finding.location.is_some() { 8 } else { 0 });
-    }
-    for edge in &report.edges {
-        tokens = tokens.saturating_add(token_count(&edge.source));
-        tokens = tokens.saturating_add(token_count(&edge.target));
-        tokens = tokens.saturating_add(token_count(&edge.symbol));
-        tokens = tokens.saturating_add(
-            edge.candidates
-                .iter()
-                .map(|candidate| token_count(candidate))
-                .sum::<usize>(),
-        );
-        tokens = tokens.saturating_add(if edge.ambiguous { 1 } else { 0 });
-    }
-    tokens = tokens.saturating_add(
-        report
-            .ranking
-            .iter()
-            .map(|rank| token_count(&rank.path).saturating_add(2))
-            .sum::<usize>(),
-    );
-    tokens.saturating_add(
-        report
-            .selection
-            .snippets
-            .iter()
-            .map(|snippet| snippet.estimated_tokens)
-            .sum::<usize>(),
-    )
 }
 
 fn bounded_text(text: &str, max_chars: usize) -> String {
@@ -1812,19 +1816,19 @@ fn fit_snippet(candidate: &SnippetCandidate, budget: usize) -> Option<(SourceSym
         scope
     );
     let full = format!("{prefix} {}", candidate.symbol.context);
-    let full_cost = token_count(&full);
+    let full_cost = utils::token_count(&full);
     if full_cost <= budget {
         return Some((candidate.symbol.clone(), full_cost, false));
     }
     let marker = "…";
-    if token_count(&format!("{prefix} {marker}")) > budget {
+    if utils::token_count(&format!("{prefix} {marker}")) > budget {
         return None;
     }
     let max_chars = candidate.symbol.context.chars().count();
     let mut best = 0;
     for chars in 0..=max_chars {
         let context = candidate.symbol.context.chars().take(chars).collect::<String>();
-        if token_count(&format!("{prefix} {context}{marker}")) <= budget {
+        if utils::token_count(&format!("{prefix} {context}{marker}")) <= budget {
             best = chars;
         } else {
             break;
@@ -1833,16 +1837,37 @@ fn fit_snippet(candidate: &SnippetCandidate, budget: usize) -> Option<(SourceSym
     let context = candidate.symbol.context.chars().take(best).collect::<String>();
     let mut symbol = candidate.symbol.clone();
     symbol.context = format!("{context}{marker}");
-    let cost = token_count(&format!("{prefix} {}", symbol.context));
+    let cost = utils::token_count(&format!("{prefix} {}", symbol.context));
     Some((symbol, cost, true))
-}
-
-fn token_count(text: &str) -> usize {
-    text.chars().count().div_ceil(4).max(1)
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
     security::absolute_input_path(path).map_err(|error| MapError::analysis("reading the current directory", error))
+}
+
+fn repository_head_snapshot(repository: &gix::Repository) -> Result<HeadSnapshot> {
+    let reference = repository
+        .head_name()
+        .map_err(|error| MapError::analysis("resolving HEAD reference", error))?
+        .map(|name| name.as_bstr().to_str_lossy().into_owned());
+    let oid = repository.head_id().ok().map(|id| id.to_string());
+    Ok(HeadSnapshot {
+        detached: reference.is_none() && oid.is_some(),
+        unborn: reference.is_some() && oid.is_none(),
+        reference,
+        oid,
+    })
+}
+
+fn worktree_snapshot(inventory: (usize, usize, usize)) -> WorktreeSnapshot {
+    let (tracked_files, modified_files, untracked_files) = inventory;
+    let state = match (modified_files > 0, untracked_files > 0) {
+        (false, false) => WorktreeSnapshotState::Clean,
+        (true, false) => WorktreeSnapshotState::Modified,
+        (false, true) => WorktreeSnapshotState::Untracked,
+        (true, true) => WorktreeSnapshotState::Mixed,
+    };
+    WorktreeSnapshot { state, observed: true, tracked_files, modified_files, untracked_files, detail: None }
 }
 
 fn build_exclusions(root: &Path, exclusions: &[String]) -> Result<Option<Gitignore>> {

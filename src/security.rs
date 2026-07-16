@@ -659,6 +659,8 @@ fn os_str_bytes(value: &OsStr) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -679,5 +681,14 @@ mod tests {
                 .kind,
             PathSafetyKind::NonUtf8
         );
+    }
+
+    #[test]
+    fn preserves_case_distinct_paths_without_merging_them() {
+        let paths: BTreeSet<_> = [b"src/Readme.rs".as_slice(), b"src/README.rs".as_slice()]
+            .into_iter()
+            .map(|path| validate_repository_path(path).expect("valid path"))
+            .collect();
+        assert_eq!(paths.len(), 2);
     }
 }

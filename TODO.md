@@ -194,13 +194,6 @@ give users safe control over retained source-derived metadata.
 
 **Blocked by:** Ticket 7
 
-**Implementation status (2026-07-15):** Cache resolution is an explicit mode state machine. Content and
-query-pack identities use SHA-256, file records are independent of report scope, manual mode selects the
-newest valid record, and `files` mode reports exact matched/unmatched/unavailable outcomes without counting
-unavailable files as analyzed. Records use private atomic replacement, bounded per-repository retention, and
-the `cache path|status|prune|clear` controls. Regression coverage includes scope reuse, duplicate basenames,
-corruption, permissions, and concurrent writers.
-
 **Acceptance criteria:**
 
 - [x] In `auto`, a changed content fingerprint reparses current bytes and reports `refreshed`; it never
@@ -282,28 +275,28 @@ and turn schema version 1 into a real compatibility contract.
 
 **Acceptance criteria:**
 
-- [ ] Reports include tool version, effective command/options and limits, repository identity, resolved HEAD
+- [x] Reports include tool version, effective command/options and limits, repository identity, resolved HEAD
       ref/OID, capture/reference time, worktree snapshot state, grammar/query-pack versions, and cache state.
-- [ ] History reports include observed date range, author-versus-committer time basis, current-HEAD semantics,
+- [x] History reports include observed date range, author-versus-committer time basis, current-HEAD semantics,
       and shallow/partial/missing-object completeness. Incomplete history is typed, not authoritative-looking.
-- [ ] Byte-native Git paths remain distinct internally and have one reversible JSON representation plus a
+- [x] Byte-native Git paths remain distinct internally and have one reversible JSON representation plus a
       readable escaped Markdown representation; invalid UTF-8 and case-collision fixtures do not merge paths.
-- [ ] A committed JSON Schema and golden v1 corpus validate every report variant. CI rejects incompatible
+- [x] A committed JSON Schema and golden v1 corpus validate every report variant. CI rejects incompatible
       removal, retyping, or semantic reuse without a schema-version change.
-- [ ] A documented strict policy lets callers fail on stale, truncated, incomplete, unsupported, or partial
+- [x] A documented strict policy lets callers fail on stale, truncated, incomplete, unsupported, or partial
       results without parsing prose; default mode still returns useful typed partial evidence.
-- [ ] `codeplat capabilities --json` reports schema/query-pack/language support and active limit defaults without
+- [x] `codeplat capabilities --json` reports schema/query-pack/language support and active limit defaults without
       running repository analysis.
-- [ ] `codeplat doctor [PATH]` checks discovery, path-safety support, cache location/permissions, schema/query
+- [x] `codeplat doctor [PATH]` checks discovery, path-safety support, cache location/permissions, schema/query
       availability, and effective limits without emitting source-derived evidence or changing repository state.
 
 **Verification:**
 
-- Validate all JSON fixtures against the schema and deserialize historical v1 golden documents.
-- Run the CLI against shallow, missing-object, dirty-worktree, non-UTF-8, and strict-policy fixtures.
-- `cargo fmt --check`
-- `cargo test --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] Validate all JSON fixtures against the schema and deserialize historical v1 golden documents.
+- [x] Run the CLI against shallow, missing-object, dirty-worktree, non-UTF-8, and strict-policy fixtures.
+- [x] `cargo fmt --check`
+- [x] `cargo test --all-features`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 13. Correct and strengthen Git-history evidence
 
@@ -466,19 +459,3 @@ dependency/trust surface and reproducible cross-platform verification.
 - `cargo doc --workspace --all-features --no-deps`
 - `cargo package`
 - Inspect `cargo tree -e features -i gix`, packaged contents, release artifact checksums, completions, and man pages.
-
-## Frontier
-
-Tickets 1 through 7 are implemented, but audit evidence reopens parts of Tickets 2, 3, and 7 through
-new acceptance tests. Ticket 8 can integrate the default report while Tickets 9 through 14 proceed in
-parallel where their code boundaries permit. Ticket 17 is the v1 release gate and waits for Tickets 8
-through 14. Tickets 15 and 16 are post-v1 improvements; landmarks precede comparison because comparison
-needs a stable topology model.
-
-Recommended order within the stabilization queue:
-
-1. Ticket 9 first: stop reading outside the repository or executing repository-controlled programs.
-2. Tickets 10 and 11 next: stale and unbounded output invalidate everything downstream.
-3. Tickets 12 and 13: make machine/history evidence reproducible and correctly scoped.
-4. Ticket 14: improve map signal only after its inputs and resource envelope are trustworthy.
-5. Ticket 8 integration, then Ticket 17 release hardening.

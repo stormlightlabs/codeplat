@@ -301,6 +301,11 @@ the integration suite; scale benchmarks remain release-verification work.
 
 ### Reproducible and enforceable reports
 
+Ticket 12 implementation status (2026-07-16): typed report provenance and quality state,
+history completeness classification, strict policy, capabilities/doctor inspection, the
+committed `schema/v1/codeplat.json` contract with `schema/v1/golden/` corpus, and a CI
+compatibility gate are implemented.
+
 - Every JSON report includes the Codeplat version, effective command/options, repository identity,
   resolved HEAD reference and object ID, capture/reference time, worktree snapshot state, grammar and
   query-pack versions, cache status, observed history range, and shallow/partial-history status.

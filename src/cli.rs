@@ -6,9 +6,13 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{ArgAction, ColorChoice, Parser, Subcommand, ValueEnum, builder::Styles, error::ErrorKind};
 use owo_colors::OwoColorize;
+use serde::{Deserialize, Serialize};
 
 use crate::map::{CacheCommand, CacheControlReport, MapSettings};
-use crate::report::{AnalysisProfile, CacheMode, CommandDescriptor, HistoryOperation, HistorySettings, Report};
+use crate::report::{
+    AnalysisProfile, CacheMode, CapabilitiesReport, CommandDescriptor, DoctorReport, HistoryOperation, HistorySettings,
+    Report, StrictIssue,
+};
 use crate::utils;
 
 #[derive(Debug, Subcommand)]
@@ -19,6 +23,10 @@ enum SubcommandName {
     History(HistoryCommand),
     /// Inspect or control retained source-analysis cache data.
     Cache(CacheCommandCli),
+    /// Report installed schema, language, query-pack, and limit capabilities.
+    Capabilities,
+    /// Check local discovery and Codeplat support without analyzing source.
+    Doctor(DoctorCommand),
 }
 
 #[derive(Clone, Copy, Debug, clap::Subcommand)]
@@ -59,8 +67,10 @@ enum HistorySubcommand {
 }
 
 /// The report serialization selected by `--format` or `--json`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
+    #[default]
     Markdown,
     Json,
 }
@@ -88,6 +98,16 @@ impl From<ProfileOption> for AnalysisProfile {
     }
 }
 
+#[derive(Debug, clap::Args)]
+struct DoctorCommand {
+    #[arg(
+        value_name = "PATH",
+        default_value = ".",
+        help = "Repository or subdirectory to inspect (default: current directory)."
+    )]
+    path: PathBuf,
+}
+
 impl From<CacheModeOption> for CacheMode {
     fn from(mode: CacheModeOption) -> Self {
         match mode {
@@ -100,8 +120,10 @@ impl From<CacheModeOption> for CacheMode {
 }
 
 /// The diagnostic color policy selected by `--color` or `--no-color`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum ColorPolicy {
+    #[default]
     Auto,
     Always,
     Never,
@@ -150,6 +172,10 @@ enum ApplicationError {
     Report(#[source] crate::report::ReportError),
     #[error("could not serialize the report as JSON")]
     Render(#[source] serde_json::Error),
+    #[error("strict report policy rejected: {issues:?}")]
+    Strict { issues: Vec<StrictIssue> },
+    #[error("doctor found one or more failing checks")]
+    DoctorFailed,
 }
 
 impl From<ApplicationError> for ExitCategory {
@@ -161,6 +187,8 @@ impl From<ApplicationError> for ExitCategory {
                 crate::report::ReportError::Map(error) => error.into(),
             },
             ApplicationError::Render(_) => ExitCategory::Internal,
+            ApplicationError::Strict { .. } => ExitCategory::Analysis,
+            ApplicationError::DoctorFailed => ExitCategory::Repository,
         }
     }
 }
@@ -174,6 +202,8 @@ impl From<&ApplicationError> for ExitCategory {
                 crate::report::ReportError::Map(error) => error.into(),
             },
             ApplicationError::Render(_) => ExitCategory::Internal,
+            ApplicationError::Strict { .. } => ExitCategory::Analysis,
+            ApplicationError::DoctorFailed => ExitCategory::Repository,
         }
     }
 }
@@ -208,8 +238,10 @@ Examples:
     codeplat --no-cache .
     codeplat map --json
     codeplat history contributors .
+    codeplat capabilities --json
+    codeplat doctor --json
 
-See https://github.com/stormlightlabs/setaryb/issues for support and bug reports.
+See https://github.com/stormlightlabs/codeplat/issues for support and bug reports.
 
 Exit status:
     0  success
@@ -243,6 +275,12 @@ struct Cli {
 
 impl From<Cli> for CommandRequest {
     fn from(cli: Cli) -> Self {
+        let output_format =
+            cli.output
+                .format
+                .unwrap_or(if cli.output.json { OutputFormat::Json } else { OutputFormat::Markdown });
+        let color_policy = cli.color_policy();
+        let strict = cli.output.strict;
         let profile = cli.output.profile.into();
         let default_map_settings = cli.map_options.settings();
         let (command, history, map_settings) = match cli.command {
@@ -277,7 +315,7 @@ impl From<Cli> for CommandRequest {
                     ),
                 }
             }
-            Some(SubcommandName::Cache(_)) => (
+            Some(SubcommandName::Cache(_)) | Some(SubcommandName::Capabilities) | Some(SubcommandName::Doctor(_)) => (
                 CommandDescriptor::map(cli.path),
                 HistorySettings::default(),
                 default_map_settings,
@@ -286,7 +324,7 @@ impl From<Cli> for CommandRequest {
 
         let mut map = map_settings;
         map.profile = profile;
-        CommandRequest { command, history, map, profile }
+        CommandRequest { command, history, map, profile, output_format, color_policy, strict }
     }
 }
 
@@ -313,7 +351,7 @@ impl Cli {
     codeplat map
     codeplat map --json
 
-Support: https://github.com/stormlightlabs/setaryb/issues
+Support: https://github.com/stormlightlabs/codeplat/issues
 ")]
 struct MapCommand {
     #[command(flatten)]
@@ -409,7 +447,7 @@ impl MapOptions {
     codeplat history
     codeplat history contributors .
 
-Support: https://github.com/stormlightlabs/setaryb/issues
+Support: https://github.com/stormlightlabs/codeplat/issues
 ")]
 struct HistoryCommand {
     #[command(flatten)]
@@ -431,7 +469,7 @@ struct HistoryCommand {
     codeplat history churn
     codeplat history bugs --json
 
-Support: https://github.com/stormlightlabs/setaryb/issues
+Support: https://github.com/stormlightlabs/codeplat/issues
 ")]
 struct HistoryOperationCommand {
     #[command(flatten)]
@@ -540,6 +578,10 @@ struct OutputOptions {
     /// Evidence profile: compact (default) or bounded exhaustive evidence.
     #[arg(long, global = true, value_enum, default_value_t = ProfileOption::Compact)]
     profile: ProfileOption,
+
+    /// Fail after rendering when the report has stale, truncated, incomplete, unsupported, or partial evidence.
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    strict: bool,
 }
 
 impl OutputOptions {
@@ -580,6 +622,9 @@ pub struct CommandRequest {
     pub history: HistorySettings,
     pub map: MapSettings,
     pub profile: AnalysisProfile,
+    pub output_format: OutputFormat,
+    pub color_policy: ColorPolicy,
+    pub strict: bool,
 }
 
 /// Parse and execute the command line using the process environment and standard streams.
@@ -649,6 +694,21 @@ fn invoke<W: Write, E: Write>(
 ) -> anyhow::Result<()> {
     let output_format = cli.output_format()?;
     cli.validate()?;
+    if matches!(&cli.command, Some(SubcommandName::Capabilities)) {
+        let report = CapabilitiesReport::current();
+        let output = report.render(output_format).map_err(ApplicationError::Render)?;
+        write_stdout(stdout, output.as_bytes(), "capabilities report")?;
+        return Ok(());
+    }
+    if let Some(SubcommandName::Doctor(command)) = &cli.command {
+        let report = DoctorReport::run(command.path.clone());
+        let output = report.render(output_format).map_err(ApplicationError::Render)?;
+        write_stdout(stdout, output.as_bytes(), "doctor report")?;
+        if !report.is_ok() {
+            return Err(ApplicationError::DoctorFailed.into());
+        }
+        return Ok(());
+    }
     if let Some(SubcommandName::Cache(cache)) = &cli.command {
         if stderr_is_terminal {
             let _ = writeln!(stderr, "codeplat: reading cache metadata…");
@@ -662,10 +722,15 @@ fn invoke<W: Write, E: Write>(
     if stderr_is_terminal {
         let _ = writeln!(stderr, "codeplat: analyzing repository…");
     }
+    let strict = cli.output.strict;
     let report = Report::analyze(cli.into()).map_err(ApplicationError::Report)?;
     let output = report.render(output_format).map_err(ApplicationError::Render)?;
+    let strict_issues = report.quality.strict_issues.clone();
 
     write_stdout(stdout, output.as_bytes(), "report")?;
+    if strict && !strict_issues.is_empty() {
+        return Err(ApplicationError::Strict { issues: strict_issues }.into());
+    }
     Ok(())
 }
 
@@ -737,6 +802,7 @@ mod tests {
             color: ColorPolicy::Always,
             no_color: true,
             profile: ProfileOption::Compact,
+            strict: false,
         };
         assert_eq!(options.color_policy(), ColorPolicy::Never);
     }
@@ -763,6 +829,7 @@ mod tests {
             color: ColorPolicy::Auto,
             no_color: false,
             profile: ProfileOption::Compact,
+            strict: false,
         };
 
         let error = options.format().expect_err("options should conflict");
