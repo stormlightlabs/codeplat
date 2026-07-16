@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     fs::{self, File},
     io::Write,
@@ -619,6 +619,33 @@ fn default_command_combines_history_and_ranked_source_map() {
     assert!(value["history"]["bugs"].is_object());
     assert!(value["history"]["activity"].is_object());
     assert!(value["history"]["firefighting"].is_object());
+    let recommendations = value["reading_plan"]["recommendations"]
+        .as_array()
+        .expect("briefing reading plan");
+    assert!(recommendations.len() <= 10, "recommendations: {recommendations:?}");
+    if recommendations.len() < 5 {
+        assert!(value["reading_plan"]["shortfall"].is_object());
+    }
+    let paths = recommendations
+        .iter()
+        .map(|recommendation| recommendation["path"].as_str().expect("recommendation path"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(paths.len(), recommendations.len(), "reading-plan paths must be unique");
+    for (index, recommendation) in recommendations.iter().enumerate() {
+        assert_eq!(recommendation["ordinal"], index as u64 + 1);
+        assert!(matches!(
+            recommendation["purpose"].as_str(),
+            Some("start_here" | "architecture" | "runtime" | "tests" | "supporting_context")
+        ));
+        assert!(!recommendation["reason"].as_str().unwrap_or_default().is_empty());
+        assert!(!recommendation["evidence_kinds"].as_array().unwrap().is_empty());
+        assert!(recommendation["confidence"].is_string());
+    }
+    assert!(recommendations.iter().any(|recommendation| {
+        recommendation["evidence_kinds"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind == "focus"))
+    }));
     assert_eq!(value["map"]["query_pack"], "mixed");
     assert_eq!(value["map"]["cache"]["status"], "disabled");
     assert_eq!(value["map"]["selection"]["token_budget"], 120);
@@ -671,6 +698,20 @@ fn default_markdown_briefing_keeps_history_and_map_sections_readable() {
     assert!(markdown.contains("Query packs:"));
     assert!(markdown.contains("Tree-sitter"));
     assert!(markdown.contains("Bug keywords: `fix`, `bug`, `broken`"));
+    assert!(markdown.contains("## Repository overview"));
+    assert!(markdown.contains("## Reading plan"));
+    assert!(markdown.contains("### start_here"));
+    assert!(markdown.find("## Repository overview").unwrap() < markdown.find("## Reading plan").unwrap());
+    assert!(markdown.find("## Reading plan").unwrap() < markdown.find("## History analysis").unwrap());
+    let json = fixture.run(&["--no-cache", "--json"]);
+    let json_value: Value = serde_json::from_slice(&json.stdout).expect("default briefing JSON");
+    let default_recommendations = json_value["reading_plan"]["recommendations"]
+        .as_array()
+        .expect("default reading plan recommendations");
+    assert!(
+        (5..=10).contains(&default_recommendations.len()),
+        "default recommendations: {default_recommendations:?}"
+    );
     assert!(!markdown.contains("\\`, \\`"));
 }
 
@@ -872,6 +913,18 @@ fn map_reports_bounded_landmarks_project_roots_and_recursive_boundaries() {
             .iter()
             .any(|file| { file["path"] == "nested-repo/src/lib.rs" })
     );
+
+    let briefing = fixture.run(&["--no-cache", "--focus-path", "packages/app", "--json"]);
+    let briefing_value: Value = serde_json::from_slice(&briefing.stdout).expect("valid topology briefing JSON");
+    let recommendations = briefing_value["reading_plan"]["recommendations"]
+        .as_array()
+        .expect("topology reading plan");
+    assert!(recommendations.iter().any(|recommendation| {
+        recommendation["project_root"] == "packages/app"
+            && recommendation["evidence_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "focus"))
+    }));
 }
 
 #[test]
@@ -1387,6 +1440,7 @@ fn map_inventory_and_rust_findings_are_reported_semantically() {
         "map failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(value["reading_plan"].is_null());
     assert!(output.stderr.is_empty());
     assert_plain_report(&json);
     assert_eq!(value["schema_version"], 1);

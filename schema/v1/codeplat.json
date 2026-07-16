@@ -29,6 +29,7 @@
         "quality": { "$ref": "#/$defs/quality" },
         "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
         "limitations": { "type": "array", "items": { "$ref": "#/$defs/limitation" } },
+        "reading_plan": { "$ref": "#/$defs/reading_plan" },
         "history": { "type": ["object", "null"] },
         "map": { "type": ["object", "null"] },
         "explain": { "type": ["object", "null"] }
@@ -56,6 +57,54 @@
       "required": ["detail"],
       "properties": { "detail": { "type": "string" } },
       "additionalProperties": true
+    },
+    "reading_plan": {
+      "type": "object",
+      "required": ["recommendations"],
+      "properties": {
+        "recommendations": { "type": "array", "items": { "$ref": "#/$defs/reading_recommendation" } },
+        "omitted_project_roots": { "type": "array", "items": { "$ref": "#/$defs/reading_plan_root_omission" } },
+        "shortfall": { "$ref": "#/$defs/reading_plan_shortfall" },
+        "limitations": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "reading_recommendation": {
+      "type": "object",
+      "required": ["ordinal", "purpose", "path", "project_root", "reason", "evidence_kinds", "confidence"],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 1 },
+        "purpose": { "enum": ["start_here", "architecture", "runtime", "tests", "supporting_context"] },
+        "path": { "type": "string" },
+        "project_root": { "type": ["string", "null"] },
+        "reason": { "type": "string" },
+        "evidence_kinds": {
+          "type": "array",
+          "items": { "enum": ["landmark", "project_topology", "source_map", "graph", "focus", "history_overlap"] }
+        },
+        "confidence": { "enum": ["high", "medium", "low"] },
+        "limitations": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "reading_plan_root_omission": {
+      "type": "object",
+      "required": ["project_root", "reason"],
+      "properties": {
+        "project_root": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "reading_plan_shortfall": {
+      "type": "object",
+      "required": ["target_minimum", "returned", "reason"],
+      "properties": {
+        "target_minimum": { "type": "integer", "minimum": 1 },
+        "returned": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
     },
     "limits": {
       "type": "object",

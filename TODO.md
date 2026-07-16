@@ -1,13 +1,7 @@
 # Tickets: Codeplat V1
 
-Implementation tickets derived from [ROADMAP.md](ROADMAP.md). Work the frontier: any ticket whose blockers are
-complete. Use one fresh implementation context per ticket.
-
-**Last reviewed:** 2026-07-16
-
 ## Release blockers
 
-- The default briefing does not yet deliver the V1 reading-plan and concise-history experience.
 - Generated, vendored, and minified source can still consume analysis limits and degrade recommendations.
 - Go, Lua, and Zig do not yet have first-class structural-map support.
 - Compact quality and `--strict` still conflate expected bounded projection with actionable degradation.
@@ -17,13 +11,12 @@ complete. Use one fresh implementation context per ticket.
 ## Completed foundation
 
 Earlier completed tickets established the CLI/report contract, five history signals, seven language families,
-cache modes, bounded lexical maps, the integrated briefing, hostile-repository containment, report
-provenance/schema fixtures, history correctness, explainable lexical evidence, and repository landmarks/topology.
+cache modes, bounded lexical maps, the integrated briefing, the evidence-backed default reading plan,
+hostile-repository containment, report provenance/schema fixtures, history correctness, explainable lexical
+evidence, and repository landmarks/topology.
+
 The packaging work added metadata/licensing, minimal `gix` features, dependency policy, cross-platform/MSRV CI,
 checksummed artifacts, generated completions/man pages, and release documentation.
-
-The completed work remains covered by the existing unit and compiled-CLI suite. Historical implementation detail
-is available in Git history and `.sandbox` handoffs; this file now tracks only unfinished V1 work.
 
 ## 18. Build the default repository reading plan
 
@@ -34,27 +27,27 @@ than a flat ranked winner and long diagnostic sections. The same typed reading p
 
 **Acceptance criteria:**
 
-- [ ] The shared report model represents ordered recommendations with purpose, path, project root, reason,
+- [x] The shared report model represents ordered recommendations with purpose, path, project root, reason,
       evidence kinds, confidence, and relevant limitations.
-- [ ] A useful repository receives 5–10 unique recommendations when sufficient evidence exists, using applicable
+- [x] A useful repository receives 5–10 unique recommendations when sufficient evidence exists, using applicable
       `start_here`, `architecture`, `runtime`, `tests`, and `supporting_context` groups.
-- [ ] Selection combines landmarks, project topology, qualified lexical ranking, explicit focus, and bounded
+- [x] Selection combines landmarks, project topology, qualified lexical ranking, explicit focus, and bounded
       history overlap without adding framework guesses or opaque score-only explanations.
-- [ ] Monorepo plans cover relevant project roots without overriding explicit focus; omitted roots and short plans
+- [x] Monorepo plans cover relevant project roots without overriding explicit focus; omitted roots and short plans
       are explained instead of padded.
-- [ ] Markdown leads with repository overview and the reading plan. JSON ordering is deterministic and extends the
+- [x] Markdown leads with repository overview and the reading plan. JSON ordering is deterministic and extends the
       schema compatibility corpus without changing existing field meanings.
-- [ ] `map` and `explain` remain focused evidence tools and existing callers do not need to parse Markdown.
+- [x] `map` and `explain` remain focused evidence tools and existing callers do not need to parse Markdown.
 
 **Verification:**
 
-- Add compiled-CLI fixtures for a small project, focused task, Codeplat-like repository, and mixed monorepo.
-- Assert recommendation count, uniqueness, ordering, purpose, reasons, project-root coverage, and repeated-run
-  determinism in JSON.
-- Review Markdown manually for whether a new contributor can follow the proposed reading sequence.
-- `cargo fmt --all -- --check`
-- `cargo test --workspace --all-features`
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- [x] Add compiled-CLI fixtures for a small project, focused task, Codeplat-like repository, and mixed monorepo.
+- [x] Assert recommendation count, uniqueness, ordering, purpose, reasons, project-root coverage, and repeated-run
+      determinism in JSON.
+- [x] Review Markdown manually for whether a new contributor can follow the proposed reading sequence.
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo test --workspace --all-targets`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
 
 ## 19. Make the default history briefing concise and useful
 
@@ -283,7 +276,6 @@ and platform gate is green.
 
 ## Frontier
 
-- Ticket 18: Build the default repository reading plan.
 - Ticket 19: Make the default history briefing concise and useful.
 - Ticket 20: Keep generated, vendored, and minified source out of the default plan.
 - Ticket 21: Add first-class Go maps.

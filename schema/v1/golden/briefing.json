@@ -5,5 +5,54 @@
   "status": "analyzed",
   "summary": "historical v1 briefing",
   "findings": [],
-  "limitations": []
+  "limitations": [],
+  "reading_plan": {
+    "recommendations": [
+      {
+        "ordinal": 1,
+        "purpose": "start_here",
+        "path": "README.md",
+        "project_root": ".",
+        "reason": "repository orientation document",
+        "evidence_kinds": ["landmark"],
+        "confidence": "high"
+      },
+      {
+        "ordinal": 2,
+        "purpose": "architecture",
+        "path": "src/lib.rs",
+        "project_root": ".",
+        "reason": "source-map structural context",
+        "evidence_kinds": ["source_map"],
+        "confidence": "medium"
+      },
+      {
+        "ordinal": 3,
+        "purpose": "runtime",
+        "path": "Makefile",
+        "project_root": ".",
+        "reason": "recognized task entry point",
+        "evidence_kinds": ["landmark"],
+        "confidence": "high"
+      },
+      {
+        "ordinal": 4,
+        "purpose": "tests",
+        "path": "tests/cli.rs",
+        "project_root": ".",
+        "reason": "path is inside the test root",
+        "evidence_kinds": ["landmark", "source_map"],
+        "confidence": "high"
+      },
+      {
+        "ordinal": 5,
+        "purpose": "supporting_context",
+        "path": "Cargo.toml",
+        "project_root": ".",
+        "reason": "project manifest",
+        "evidence_kinds": ["landmark", "project_topology"],
+        "confidence": "high"
+      }
+    ]
+  }
 }

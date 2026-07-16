@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edges: usize) -> Vec<LexicalEdge> {
+pub fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edges: usize) -> Vec<LexicalEdge> {
     let mut definitions = BTreeMap::<(SourceLanguage, String), Vec<(String, SymbolVisibility)>>::new();
     for file in files {
         for symbol in &file.symbols {
@@ -130,6 +130,152 @@ pub(super) fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, m
     edges
 }
 
+pub fn rank_files(files: &[SourceFile], edges: &[LexicalEdge], settings: &MapSettings) -> Vec<FileRank> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let paths = files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+    let path_set = paths.iter().cloned().collect::<BTreeSet<_>>();
+    let mut outgoing = BTreeMap::<String, Vec<&LexicalEdge>>::new();
+    for edge in edges {
+        outgoing.entry(edge.source.clone()).or_default().push(edge);
+    }
+
+    let initial = 1.0 / paths.len() as f64;
+    let mut scores = paths
+        .iter()
+        .map(|path| (path.clone(), initial))
+        .collect::<BTreeMap<_, _>>();
+    for _ in 0..PAGE_RANK_ITERATIONS {
+        let mut next = paths
+            .iter()
+            .map(|path| (path.clone(), (1.0 - PAGE_RANK_DAMPING) * initial))
+            .collect::<BTreeMap<_, _>>();
+        let dangling = paths
+            .iter()
+            .filter(|path| outgoing.get(*path).is_none_or(Vec::is_empty))
+            .map(|path| scores[path])
+            .sum::<f64>();
+        let dangling_share = PAGE_RANK_DAMPING * dangling * initial;
+        for score in next.values_mut() {
+            *score += dangling_share;
+        }
+        for source in &paths {
+            let Some(source_edges) = outgoing.get(source) else {
+                continue;
+            };
+            let total_weight = source_edges.iter().map(|edge| edge_weight(edge)).sum::<f64>();
+            if total_weight == 0.0 {
+                continue;
+            }
+            for edge in source_edges {
+                if path_set.contains(&edge.target) {
+                    let contribution = PAGE_RANK_DAMPING * scores[source] * edge_weight(edge) / total_weight;
+                    *next.entry(edge.target.clone()).or_default() += contribution;
+                }
+            }
+        }
+        scores = next;
+    }
+
+    let mut ranking = files
+        .iter()
+        .map(|file| {
+            let text_matches = settings
+                .focuses
+                .iter()
+                .filter(|focus| file_matches_focus(file, focus))
+                .count();
+            let path_matches = settings
+                .focus_paths
+                .iter()
+                .filter(|focus_path| path_matches_focus(&file.path, focus_path))
+                .count();
+            let focus_matches = text_matches + path_matches;
+            let focus_boost = text_matches as f64 * 0.35 + path_matches as f64 * 0.7;
+            let score = scores[&file.path] + focus_boost;
+            FileRank { path: file.path.clone(), score: scaled_score(score), focus_matches }
+        })
+        .collect::<Vec<_>>();
+    ranking.sort_by(|left, right| right.score.cmp(&left.score).then_with(|| left.path.cmp(&right.path)));
+    ranking
+}
+
+pub fn select_snippets(
+    files: &[SourceFile], edges: &[LexicalEdge], ranking: &[FileRank], token_budget: usize, settings: &MapSettings,
+) -> MapSelection {
+    let mut reference_counts = BTreeMap::<(String, String), u64>::new();
+    for edge in edges {
+        *reference_counts
+            .entry((edge.target.clone(), edge.symbol.clone()))
+            .or_default() += 1;
+    }
+    let file_scores = ranking
+        .iter()
+        .map(|rank| (rank.path.as_str(), rank.score))
+        .collect::<BTreeMap<_, _>>();
+    let mut candidates = Vec::new();
+    for file in files {
+        let file_score = *file_scores.get(file.path.as_str()).unwrap_or(&0);
+        for symbol in file
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.role == SymbolRole::Definition)
+        {
+            let reference_count = reference_counts
+                .get(&(file.path.clone(), symbol.name.clone()))
+                .copied()
+                .unwrap_or_default();
+            let focus_boost = settings
+                .focuses
+                .iter()
+                .filter(|focus| symbol_matches_focus(symbol, focus))
+                .count() as u64
+                * 250_000;
+            let symbol_score = file_score
+                .saturating_add(reference_count.saturating_mul(1_000))
+                .saturating_add(focus_boost);
+            candidates.push(SnippetCandidate {
+                path: file.path.clone(),
+                language: file.language,
+                symbol: symbol.clone(),
+                score: symbol_score,
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| location_key(Some(&left.symbol.location)).cmp(&location_key(Some(&right.symbol.location))))
+            .then_with(|| left.symbol.name.cmp(&right.symbol.name))
+    });
+
+    let mut snippets = Vec::new();
+    let mut estimated_tokens = 0;
+    for candidate in candidates {
+        let remaining = token_budget.saturating_sub(estimated_tokens);
+        let Some((symbol, cost, truncated)) = fit_snippet(&candidate, remaining) else {
+            continue;
+        };
+        estimated_tokens += cost;
+        snippets.push(MapSnippet {
+            path: candidate.path,
+            language: candidate.language,
+            symbol,
+            score: candidate.score,
+            estimated_tokens: cost,
+            truncated,
+        });
+        if estimated_tokens >= token_budget {
+            break;
+        }
+    }
+
+    MapSelection { token_budget, estimated_tokens, snippets }
+}
+
 fn is_graph_definition(symbol: &SourceSymbol) -> bool {
     symbol.role == SymbolRole::Definition
         && matches!(
@@ -229,198 +375,6 @@ fn module_path_matches(path: &str, hints: &[String]) -> bool {
     })
 }
 
-pub(super) fn rank_files(files: &[SourceFile], edges: &[LexicalEdge], settings: &MapSettings) -> Vec<FileRank> {
-    if files.is_empty() {
-        return Vec::new();
-    }
-    let paths = files.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
-    let path_set = paths.iter().cloned().collect::<BTreeSet<_>>();
-    let mut outgoing = BTreeMap::<String, Vec<&LexicalEdge>>::new();
-    for edge in edges {
-        outgoing.entry(edge.source.clone()).or_default().push(edge);
-    }
-
-    let initial = 1.0 / paths.len() as f64;
-    let mut scores = paths
-        .iter()
-        .map(|path| (path.clone(), initial))
-        .collect::<BTreeMap<_, _>>();
-    for _ in 0..PAGE_RANK_ITERATIONS {
-        let mut next = paths
-            .iter()
-            .map(|path| (path.clone(), (1.0 - PAGE_RANK_DAMPING) * initial))
-            .collect::<BTreeMap<_, _>>();
-        let dangling = paths
-            .iter()
-            .filter(|path| outgoing.get(*path).is_none_or(Vec::is_empty))
-            .map(|path| scores[path])
-            .sum::<f64>();
-        let dangling_share = PAGE_RANK_DAMPING * dangling * initial;
-        for score in next.values_mut() {
-            *score += dangling_share;
-        }
-        for source in &paths {
-            let Some(source_edges) = outgoing.get(source) else {
-                continue;
-            };
-            let total_weight = source_edges.iter().map(|edge| edge_weight(edge)).sum::<f64>();
-            if total_weight == 0.0 {
-                continue;
-            }
-            for edge in source_edges {
-                if path_set.contains(&edge.target) {
-                    let contribution = PAGE_RANK_DAMPING * scores[source] * edge_weight(edge) / total_weight;
-                    *next.entry(edge.target.clone()).or_default() += contribution;
-                }
-            }
-        }
-        scores = next;
-    }
-
-    let mut ranking = files
-        .iter()
-        .map(|file| {
-            let text_matches = settings
-                .focuses
-                .iter()
-                .filter(|focus| file_matches_focus(file, focus))
-                .count();
-            let path_matches = settings
-                .focus_paths
-                .iter()
-                .filter(|focus_path| path_matches_focus(&file.path, focus_path))
-                .count();
-            let focus_matches = text_matches + path_matches;
-            let focus_boost = text_matches as f64 * 0.35 + path_matches as f64 * 0.7;
-            let score = scores[&file.path] + focus_boost;
-            FileRank { path: file.path.clone(), score: scaled_score(score), focus_matches }
-        })
-        .collect::<Vec<_>>();
-    ranking.sort_by(|left, right| right.score.cmp(&left.score).then_with(|| left.path.cmp(&right.path)));
-    ranking
-}
-
-fn lexical_weight(symbol: &str) -> f64 {
-    if is_generic_name(symbol) || symbol.starts_with('_') { 0.25 } else { 1.0 }
-}
-
-fn edge_weight(edge: &LexicalEdge) -> f64 {
-    let confidence = match edge.confidence {
-        ConfidenceTier::High => 1.0,
-        ConfidenceTier::Medium => 0.5,
-        ConfidenceTier::Low => 0.25,
-    };
-    let visibility = match edge.target_visibility {
-        SymbolVisibility::Public => 1.0,
-        SymbolVisibility::Internal => 0.8,
-        SymbolVisibility::Private => 0.35,
-        SymbolVisibility::Unknown => 0.7,
-    };
-    lexical_weight(&edge.symbol) * confidence * visibility
-}
-
-fn is_generic_name(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "data" | "default" | "error" | "item" | "key" | "main" | "new" | "result" | "self" | "value"
-    )
-}
-
-fn file_matches_focus(file: &SourceFile, focus: &str) -> bool {
-    let focus = focus.trim().to_ascii_lowercase();
-    !focus.is_empty()
-        && (file.path.to_ascii_lowercase().contains(&focus)
-            || file.symbols.iter().any(|symbol| {
-                symbol.name.to_ascii_lowercase().contains(&focus)
-                    || symbol.context.to_ascii_lowercase().contains(&focus)
-            }))
-}
-
-fn path_matches_focus(path: &str, focus_path: &str) -> bool {
-    let focus_path = focus_path.trim().replace('\\', "/");
-    let focus_path = focus_path.trim_start_matches("./");
-    !focus_path.is_empty() && (path == focus_path || path.starts_with(&format!("{focus_path}/")))
-}
-
-fn scaled_score(score: f64) -> u64 {
-    (score.max(0.0) * RANK_SCALE).round() as u64
-}
-
-pub(super) fn select_snippets(
-    files: &[SourceFile], edges: &[LexicalEdge], ranking: &[FileRank], token_budget: usize, settings: &MapSettings,
-) -> MapSelection {
-    let mut reference_counts = BTreeMap::<(String, String), u64>::new();
-    for edge in edges {
-        *reference_counts
-            .entry((edge.target.clone(), edge.symbol.clone()))
-            .or_default() += 1;
-    }
-    let file_scores = ranking
-        .iter()
-        .map(|rank| (rank.path.as_str(), rank.score))
-        .collect::<BTreeMap<_, _>>();
-    let mut candidates = Vec::new();
-    for file in files {
-        let file_score = *file_scores.get(file.path.as_str()).unwrap_or(&0);
-        for symbol in file
-            .symbols
-            .iter()
-            .filter(|symbol| symbol.role == SymbolRole::Definition)
-        {
-            let reference_count = reference_counts
-                .get(&(file.path.clone(), symbol.name.clone()))
-                .copied()
-                .unwrap_or_default();
-            let focus_boost = settings
-                .focuses
-                .iter()
-                .filter(|focus| symbol_matches_focus(symbol, focus))
-                .count() as u64
-                * 250_000;
-            let symbol_score = file_score
-                .saturating_add(reference_count.saturating_mul(1_000))
-                .saturating_add(focus_boost);
-            candidates.push(SnippetCandidate {
-                path: file.path.clone(),
-                language: file.language,
-                symbol: symbol.clone(),
-                score: symbol_score,
-            });
-        }
-    }
-    candidates.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.path.cmp(&right.path))
-            .then_with(|| location_key(Some(&left.symbol.location)).cmp(&location_key(Some(&right.symbol.location))))
-            .then_with(|| left.symbol.name.cmp(&right.symbol.name))
-    });
-
-    let mut snippets = Vec::new();
-    let mut estimated_tokens = 0;
-    for candidate in candidates {
-        let remaining = token_budget.saturating_sub(estimated_tokens);
-        let Some((symbol, cost, truncated)) = fit_snippet(&candidate, remaining) else {
-            continue;
-        };
-        estimated_tokens += cost;
-        snippets.push(MapSnippet {
-            path: candidate.path,
-            language: candidate.language,
-            symbol,
-            score: candidate.score,
-            estimated_tokens: cost,
-            truncated,
-        });
-        if estimated_tokens >= token_budget {
-            break;
-        }
-    }
-
-    MapSelection { token_budget, estimated_tokens, snippets }
-}
-
 fn symbol_matches_focus(symbol: &SourceSymbol, focus: &str) -> bool {
     let focus = focus.trim().to_ascii_lowercase();
     !focus.is_empty()
@@ -468,4 +422,50 @@ fn fit_snippet(candidate: &SnippetCandidate, budget: usize) -> Option<(SourceSym
     symbol.context = format!("{context}{marker}");
     let cost = utils::token_count(&format!("{prefix} {}", symbol.context));
     Some((symbol, cost, true))
+}
+
+fn lexical_weight(symbol: &str) -> f64 {
+    if is_generic_name(symbol) || symbol.starts_with('_') { 0.25 } else { 1.0 }
+}
+
+fn edge_weight(edge: &LexicalEdge) -> f64 {
+    let confidence = match edge.confidence {
+        ConfidenceTier::High => 1.0,
+        ConfidenceTier::Medium => 0.5,
+        ConfidenceTier::Low => 0.25,
+    };
+    let visibility = match edge.target_visibility {
+        SymbolVisibility::Public => 1.0,
+        SymbolVisibility::Internal => 0.8,
+        SymbolVisibility::Private => 0.35,
+        SymbolVisibility::Unknown => 0.7,
+    };
+    lexical_weight(&edge.symbol) * confidence * visibility
+}
+
+fn is_generic_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "data" | "default" | "error" | "item" | "key" | "main" | "new" | "result" | "self" | "value"
+    )
+}
+
+fn file_matches_focus(file: &SourceFile, focus: &str) -> bool {
+    let focus = focus.trim().to_ascii_lowercase();
+    !focus.is_empty()
+        && (file.path.to_ascii_lowercase().contains(&focus)
+            || file.symbols.iter().any(|symbol| {
+                symbol.name.to_ascii_lowercase().contains(&focus)
+                    || symbol.context.to_ascii_lowercase().contains(&focus)
+            }))
+}
+
+fn path_matches_focus(path: &str, focus_path: &str) -> bool {
+    let focus_path = focus_path.trim().replace('\\', "/");
+    let focus_path = focus_path.trim_start_matches("./");
+    !focus_path.is_empty() && (path == focus_path || path.starts_with(&format!("{focus_path}/")))
+}
+
+fn scaled_score(score: f64) -> u64 {
+    (score.max(0.0) * RANK_SCALE).round() as u64
 }

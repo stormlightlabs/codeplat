@@ -51,9 +51,11 @@ Git repository and keeps the selected scope inside that repository.
 
 ## Default briefing
 
-`codeplat [PATH]` combines all five history diagnostics with the ranked source
-map in one versioned Markdown or JSON report. The source map accepts the same
-focus, token-budget, exclusion, cache, and color controls described below:
+`codeplat [PATH]` starts with a repository overview and an ordered reading plan,
+then includes all five history diagnostics and the ranked source map in one
+versioned Markdown or JSON report.
+
+The source map accepts the same focus, token-budget, exclusion, cache, and color controls described below:
 
 ```sh
 codeplat --focus parser --focus-path src --map-tokens 500 .

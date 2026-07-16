@@ -47,6 +47,147 @@ impl Render {
         }
     }
 
+    pub fn briefing_overview(output: &mut String, map: &super::MapReport) {
+        writeln!(output).expect("writing to a string cannot fail");
+        writeln!(output, "## Repository overview").expect("writing to a string cannot fail");
+        writeln!(output).expect("writing to a string cannot fail");
+        writeln!(
+            output,
+            "Repository: `{}`",
+            utils::escape_inline_code(&map.repository_root)
+        )
+        .expect("writing to a string cannot fail");
+        writeln!(output, "Worktree: {}", map.worktree.state.label()).expect("writing to a string cannot fail");
+
+        let mut languages = map
+            .files
+            .iter()
+            .map(|file| file.language.display_label())
+            .collect::<Vec<_>>();
+        languages.sort_unstable();
+        languages.dedup();
+        writeln!(
+            output,
+            "Primary supported languages: {}",
+            if languages.is_empty() { "none detected".to_owned() } else { languages.join(", ") }
+        )
+        .expect("writing to a string cannot fail");
+        writeln!(
+            output,
+            "Project roots: {} detected; {} source files analyzed",
+            map.project_roots.len(),
+            map.inventory.analyzed
+        )
+        .expect("writing to a string cannot fail");
+
+        let landmarks = map
+            .landmarks
+            .iter()
+            .filter(|landmark| {
+                matches!(
+                    landmark.kind,
+                    super::LandmarkKind::AgentInstructions
+                        | super::LandmarkKind::ContributorInstructions
+                        | super::LandmarkKind::Readme
+                        | super::LandmarkKind::Manifest
+                        | super::LandmarkKind::WorkspaceRoot
+                        | super::LandmarkKind::PackageRoot
+                )
+            })
+            .take(8)
+            .collect::<Vec<_>>();
+        if landmarks.is_empty() {
+            writeln!(output, "Orientation landmarks: none detected in the selected scope.")
+                .expect("writing to a string cannot fail");
+        } else {
+            writeln!(output, "Orientation landmarks:").expect("writing to a string cannot fail");
+            for landmark in landmarks {
+                writeln!(
+                    output,
+                    "- **{}** `{}` — {}",
+                    landmark.kind.label(),
+                    utils::escape_inline_code(&landmark.path),
+                    utils::sanitize_text(&landmark.reason)
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
+    }
+
+    pub fn reading_plan_markdown(output: &mut String, plan: &super::ReadingPlan) {
+        writeln!(output).expect("writing to a string cannot fail");
+        writeln!(output, "## Reading plan").expect("writing to a string cannot fail");
+        writeln!(output).expect("writing to a string cannot fail");
+        if plan.recommendations.is_empty() {
+            writeln!(output, "No evidence-backed paths were selected for the reading plan.")
+                .expect("writing to a string cannot fail");
+        } else {
+            let mut current_purpose = None;
+            for recommendation in &plan.recommendations {
+                if current_purpose != Some(recommendation.purpose) {
+                    if current_purpose.is_some() {
+                        writeln!(output).expect("writing to a string cannot fail");
+                    }
+                    current_purpose = Some(recommendation.purpose);
+                    writeln!(output, "### {}", recommendation.purpose.label())
+                        .expect("writing to a string cannot fail");
+                    writeln!(output).expect("writing to a string cannot fail");
+                }
+                let root = recommendation
+                    .project_root
+                    .as_deref()
+                    .map(|root| format!(", project root `{}`", utils::escape_inline_code(root)))
+                    .unwrap_or_default();
+                let evidence = recommendation
+                    .evidence_kinds
+                    .iter()
+                    .map(|kind| kind.label())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(
+                    output,
+                    "{}. `{}`{} — {} ({} confidence; evidence: {})",
+                    recommendation.ordinal,
+                    utils::escape_inline_code(&recommendation.path),
+                    root,
+                    utils::sanitize_text(&recommendation.reason),
+                    recommendation.confidence.label(),
+                    evidence
+                )
+                .expect("writing to a string cannot fail");
+                for limitation in &recommendation.limitations {
+                    writeln!(output, "   - Limitation: {}", utils::sanitize_text(limitation))
+                        .expect("writing to a string cannot fail");
+                }
+            }
+        }
+        if let Some(shortfall) = &plan.shortfall {
+            writeln!(
+                output,
+                "Short plan: {} of {} minimum recommendations — {}",
+                shortfall.returned,
+                shortfall.target_minimum,
+                utils::sanitize_text(&shortfall.reason)
+            )
+            .expect("writing to a string cannot fail");
+        }
+        for omission in &plan.omitted_project_roots {
+            writeln!(
+                output,
+                "Omitted project root `{}` — {}",
+                utils::escape_inline_code(&omission.project_root),
+                utils::sanitize_text(&omission.reason)
+            )
+            .expect("writing to a string cannot fail");
+        }
+        if !plan.limitations.is_empty() {
+            writeln!(output, "Plan limitations:").expect("writing to a string cannot fail");
+            for limitation in &plan.limitations {
+                writeln!(output, "- {}", utils::sanitize_text(limitation)).expect("writing to a string cannot fail");
+            }
+        }
+    }
+
     pub fn history_markdown(output: &mut String, history: &super::HistoryReport) {
         writeln!(output).expect("writing to a string cannot fail");
         writeln!(output, "## History analysis").expect("writing to a string cannot fail");
