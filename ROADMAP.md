@@ -1,12 +1,12 @@
 ---
-title: "Setaryb: repository navigation CLI"
+title: "Codeplat: repository navigation CLI"
 status: "in-progress"
 updated: "2026-07-14"
 ---
 
 ## Objective
 
-Build `setaryb` (Setāreyāb, Persian for _astrolabe_): a read-only Rust CLI that helps a
+Build `codeplat` (code + _plat_, a plan or map of land): a read-only Rust CLI that helps a
 person or coding agent orient in a Git repository before reading arbitrary source files.
 
 Its default command produces a concise, evidence-backed briefing in Markdown or a stable
@@ -16,9 +16,9 @@ larger report.
 
 ## Users and Use Cases
 
-- A developer entering an unfamiliar repository can run `setaryb` and see which paths to inspect
+- A developer entering an unfamiliar repository can run `codeplat` and see which paths to inspect
   first, why they matter, and what caveats apply.
-- An agent can run `setaryb --json` or `setaryb map --json` and consume a versioned structural map
+- An agent can run `codeplat --json` or `codeplat map --json` and consume a versioned structural map
   without ANSI escapes or status chatter in stdout.
 - A maintainer can examine churn, contributor concentration, fix-related path overlap, delivery activity,
   and firefighting language without shelling out to Git.
@@ -27,7 +27,7 @@ larger report.
 
 ## Success Criteria
 
-- `setaryb [PATH]` produces a read-only integrated briefing in Markdown; `--json` yields the equivalent
+- `codeplat [PATH]` produces a read-only integrated briefing in Markdown; `--json` yields the equivalent
   structured document.
 - The source map supports Rust, JavaScript, TypeScript, Python, Ruby, Java, and C# with tests for
   definitions, references, signatures, locations, and malformed input.
@@ -58,7 +58,7 @@ larger report.
 - Feature implementations for Tickets 1 through 7 exist, and the local formatting, test, Clippy,
   documentation, and release-build checks pass. The suite currently contains 38 tests; audit-reopened
   acceptance boxes remain unchecked in `TODO.md`.
-- The default `setaryb [PATH]` command now renders the promised integrated briefing: one typed report
+- The default `codeplat [PATH]` command now renders the promised integrated briefing: one typed report
   contains all five history diagnostics and the ranked, cache-aware source map. The remaining audit
   hardening and release criteria are tracked by Tickets 9 through 14.
 - The **2026-07-14** audit found release-blocking trust-boundary, cache-validity,
@@ -74,12 +74,12 @@ larger report.
 
 ## Baseline
 
-The baseline is intentionally measured against Setaryb itself, not only tiny fixtures:
+The baseline is intentionally measured against Codeplat itself, not only tiny fixtures:
 
 - `cargo fmt --check`, `cargo test --all-features`, `cargo clippy --all-targets --all-features
 -- -D warnings`, and `cargo doc --no-deps` pass.
 - The release binary is approximately 20 MiB while `gix` still uses its broad default feature set.
-- The pre-Ticket-11 audit measured `setaryb map --no-cache --json` at 7,332,198 bytes for eight
+- The pre-Ticket-11 audit measured `codeplat map --no-cache --json` at 7,332,198 bytes for eight
   analyzed files. The compact profile now emits approximately 13 KB for the current self-map,
   and reports collection totals plus truncation reasons beside the bounded evidence.
 - The current self-map contains 11,630 symbols, 2,212 ambiguity findings, and 795 lexical edges;
@@ -96,20 +96,20 @@ malformed-tree, and ignored-vendor fixtures.
 The exact help text may evolve, but these stable operations define v1:
 
 ```text
-setaryb [OPTIONS] [PATH]
-setaryb map [OPTIONS] [PATH]
-setaryb history [OPTIONS] [PATH]
-setaryb history <churn|contributors|bugs|activity|firefighting> [OPTIONS] [PATH]
-setaryb explain [OPTIONS] <PATH-OR-SYMBOL> [PATH]
-setaryb cache <path|status|prune|clear>
-setaryb capabilities [--json]
-setaryb doctor [OPTIONS] [PATH]
+codeplat [OPTIONS] [PATH]
+codeplat map [OPTIONS] [PATH]
+codeplat history [OPTIONS] [PATH]
+codeplat history <churn|contributors|bugs|activity|firefighting> [OPTIONS] [PATH]
+codeplat explain [OPTIONS] <PATH-OR-SYMBOL> [PATH]
+codeplat cache <path|status|prune|clear>
+codeplat capabilities [--json]
+codeplat doctor [OPTIONS] [PATH]
 ```
 
 - The default command is the integrated briefing. It does not hide a catch-all subcommand.
 - `map` emits only repository-map findings and limitations.
 - `history` emits all five history findings; its children emit one focused diagnostic.
-- `PATH` defaults to the current directory. Setaryb discovers the enclosing Git repository and
+- `PATH` defaults to the current directory. Codeplat discovers the enclosing Git repository and
   scopes analysis to the selected directory within that repository.
 - `--format <markdown|json>` selects output, with Markdown as the default. `--json` is a
   standard explicit shorthand for `--format json`.
@@ -147,7 +147,7 @@ setaryb doctor [OPTIONS] [PATH]
 - Source-map analysis includes every Git-tracked eligible source file in scope, including a tracked file
   that happens to match an ignore pattern.
 - It also includes untracked, non-ignored eligible source files and labels them `untracked` in both formats.
-- Ignored untracked files are omitted by default. Setaryb uses the `ignore` crate for traversal and Git-style
+- Ignored untracked files are omitted by default. Codeplat uses the `ignore` crate for traversal and Git-style
   matching, but records the effective policy rather than treating ignored content as universally irrelevant.
 - Results identify the selected path, repository root, analyzed-path counts, omitted-path counts and reasons,
   and whether a file was tracked, modified, or untracked when that state affects interpretation.
@@ -230,7 +230,7 @@ map only if the report makes that limitation explicit.
 ### Caching
 
 - Cache parsed/tagged source-analysis inputs and reusable map-selection inputs in
-  `$XDG_CACHE_HOME/setaryb`, falling back to `~/.cache/setaryb`.
+  `$XDG_CACHE_HOME/codeplat`, falling back to `~/.cache/codeplat`.
 - Never create or alter state in the target repository.
 - Separate cache identity by canonical repository root, exact path, language-query-pack version,
   tool/schema version, and source-content fingerprint.
@@ -301,7 +301,7 @@ the integration suite; scale benchmarks remain release-verification work.
 
 ### Reproducible and enforceable reports
 
-- Every JSON report includes the Setaryb version, effective command/options, repository identity,
+- Every JSON report includes the Codeplat version, effective command/options, repository identity,
   resolved HEAD reference and object ID, capture/reference time, worktree snapshot state, grammar and
   query-pack versions, cache status, observed history range, and shallow/partial-history status.
 - A committed JSON Schema and golden compatibility corpus define schema version 1. Schema changes are
@@ -328,17 +328,17 @@ Monorepos are grouped by detected project root so the briefing exposes topology 
 
 ### Explainable recommendations
 
-Add `setaryb explain <PATH-OR-SYMBOL>` in Markdown and JSON. It decomposes a recommendation into bounded,
+Add `codeplat explain <PATH-OR-SYMBOL>` in Markdown and JSON. It decomposes a recommendation into bounded,
 typed evidence: focus matches, history overlap, graph edges, landmark role, ranking contributions, ambiguity,
-and omitted alternatives. This is an explanation of Setaryb's heuristic, not a claim about program semantics.
+and omitted alternatives. This is an explanation of Codeplat's heuristic, not a claim about program semantics.
 
-Add `setaryb capabilities --json` and `setaryb doctor` so automation and people can inspect supported
+Add `codeplat capabilities --json` and `codeplat doctor` so automation and people can inspect supported
 languages, query-pack versions, schema versions, cache location/health, active safety policy, and resource
 limits without analyzing a repository.
 
 ### Revision comparison
 
-Add `setaryb compare --base <REV> [--head <REV|worktree>] [PATH]` after report provenance is stable. It reports
+Add `codeplat compare --base <REV> [--head <REV|worktree>] [PATH]` after report provenance is stable. It reports
 bounded changes to landmarks, public definitions, dependency evidence, hotspots, ownership concentration, and
 recommended next reads. Comparison uses the same uncertainty labels and does not ingest Markdown as data.
 
@@ -355,7 +355,7 @@ recommended next reads. Comparison uses the same uncertainty labels and does not
 - `gix` 0.85 with only the discovery, revision/object traversal, worktree-status, and trust-safe features
   required by the final implementation. Disable default features and review the resulting feature tree;
   command, credential, transport, archive, worktree-mutation, and external-filter capabilities are not
-  accepted merely because Setaryb does not intentionally call them.
+  accepted merely because Codeplat does not intentionally call them.
 - `tree-sitter` 0.26 and mutually compatible official/upstream grammar crates for each first-class language.
   Grammar versions are pinned in `Cargo.lock` and upgraded only with query/fixture validation.
 - `ignore` 0.4 for path traversal and explicit Git-style ignore matching.
@@ -382,7 +382,7 @@ each extracted module needs a narrow typed boundary and the current black-box te
 
 ### Trust, privacy, and read-only behavior
 
-- Apply gix's repository trust model plus Setaryb's stricter hostile-input policy; same ownership does not
+- Apply gix's repository trust model plus Codeplat's stricter hostile-input policy; same ownership does not
   authorize repository-controlled programs or paths outside the selected scope.
 - Do not follow a path outside the requested repository scope through a symlink during worktree enumeration.
 - Do not contact remotes, read chat/editor state, collect analytics, prompt for credentials, or mutate Git,
@@ -527,7 +527,7 @@ uncertainty labels and must not turn the tool into a source editor or remote ser
 | Product focus         | Integrated default briefing plus focused `map` and `history` commands.                            |
 | Formats               | Markdown by default and stable JSON; both render one typed result.                                |
 | Markdown              | Output only; direct renderer, no Markdown parser dependency.                                      |
-| Project name          | `setaryb` / Setāreyāb.                                                                            |
+| Project name          | `codeplat`.                                                                                         |
 | First-class languages | Rust, JavaScript, TypeScript, Python, Ruby, Java, and C#.                                         |
 | V1+ languages         | F#, Go, Elixir, C, and C++.                                                                       |
 | Cache                 | On by default at the XDG user cache path, never project-local; `--no-cache` available.            |

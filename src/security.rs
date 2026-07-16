@@ -254,7 +254,7 @@ pub fn cache_root(repository_root: &Path) -> Result<Option<PathBuf>, CacheRootEr
     }
 }
 
-/// Resolve the configured Setaryb cache root without consulting a repository.
+/// Resolve the configured Codeplat cache root without consulting a repository.
 /// Cache-management commands use this so they never discover or modify a target worktree.
 pub fn configured_cache_root() -> Result<Option<PathBuf>, CacheRootError> {
     let Some(candidate) = cache_base_path() else {
@@ -392,7 +392,7 @@ fn cache_base_path() -> Option<PathBuf> {
     if !base.is_absolute() {
         return None;
     }
-    Some(base.join("setaryb"))
+    Some(base.join("codeplat"))
 }
 
 #[cfg(unix)]

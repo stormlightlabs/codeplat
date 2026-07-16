@@ -1,15 +1,19 @@
-# Setaryb
+# Codeplat
 
-Setaryb (Setāreyāb, Persian for “astrolabe”) is a CLI to help you orient yourself
-in a new codebase.
+Codeplat (“code” + “plat” - a plan or map of land) is a CLI to help you orient
+yourself in a new codebase.
 
-Its default command produces one integrated briefing, and two focused reports are
-available when you needs only one evidence family:
+Its produces an integrated briefing, or a focused report when you needs only one
+evidence family:
 
-- `map` inventories the current worktree and extracts structural maps for Rust, JavaScript,
-  JSX, TypeScript, TSX, Python, Ruby, Java, and C# source files.
-- `history` summarizes five Git-history signals: churn, contributors, bug-related clusters,
-  monthly activity, and firefighting language.
+- `codeplat map` inventories the current worktree and extracts structural maps for
+  Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, and C# files.
+- `codeplat history` summarizes five Git-history signals
+  1. churn
+  2. contributors
+  3. bug-related clusters
+  4. monthly activity
+  5. "firefighting"[^ff] language
 
 ## Quick start
 
@@ -22,36 +26,34 @@ cargo build --release
 Then run it from a Git worktree:
 
 ```sh
-setaryb
-setaryb --json
-setaryb map
-setaryb map --json
-setaryb map src --exclude 'src/generated/**' --json
-setaryb history
-setaryb history contributors src --json
+codeplat
+codeplat --json
+codeplat map
+codeplat map --json
+codeplat map src --exclude 'src/generated/**' --json
+codeplat history
+codeplat history contributors src --json
 ```
 
-`PATH` defaults to the current directory. `setaryb` discovers the enclosing
+`PATH` defaults to the current directory. `codeplat` discovers the enclosing
 Git repository and keeps the selected scope inside that repository.
 
 ## Default briefing
 
-`setaryb [PATH]` combines all five history diagnostics with the ranked source
+`codeplat [PATH]` combines all five history diagnostics with the ranked source
 map in one versioned Markdown or JSON report. The source map accepts the same
 focus, token-budget, exclusion, cache, and color controls described below:
 
 ```sh
-setaryb --focus parser --focus-path src --map-tokens 500 .
-setaryb --no-cache --json .
-setaryb --profile evidence --json .
+codeplat --focus parser --focus-path src --map-tokens 500 .
+codeplat --no-cache --json .
+codeplat --profile evidence --json .
 ```
 
 The report keeps history caveats, source-map limitations, query-pack provenance,
-partial-file diagnostics, and omitted-path reasons beside the evidence they
-qualify.
+partial-file diagnostics, and omitted-path reasons beside the evidence they qualify.
 
-This makes unsupported or partially parsed files actionable instead of silently
-dropping them.
+This makes unsupported or partially parsed files actionable instead of silently dropping them.
 
 The default `compact` profile returns selected snippets and bounded samples of
 files, symbols, edges, findings, omissions, and history evidence.
@@ -66,7 +68,7 @@ highest-ranked snippet or summaries.
 
 ## Commands
 
-### `setaryb map [OPTIONS] [PATH]`
+### `codeplat map [OPTIONS] [PATH]`
 
 The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, and C# source files. It reports:
 
@@ -84,25 +86,24 @@ The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, J
 Exclusions can be repeated:
 
 ```sh
-setaryb map --exclude 'src/generated/**' --exclude 'tests/fixtures/**'
+codeplat map --exclude 'src/generated/**' --exclude 'tests/fixtures/**'
 ```
 
 Map focus and cache controls are explicit:
 
 ```sh
-setaryb map --focus parser --focus-path src --map-tokens 500
-setaryb map --cache always
-setaryb map --cache files --cache-file src/parser.rs
-setaryb map --cache manual
-setaryb map --no-cache
-setaryb cache path
-setaryb cache status
-setaryb cache prune
-setaryb cache clear
+codeplat map --focus parser --focus-path src --map-tokens 500
+codeplat map --cache always
+codeplat map --cache files --cache-file src/parser.rs
+codeplat map --cache manual
+codeplat map --no-cache
+codeplat cache path
+codeplat cache status
+codeplat cache prune
+codeplat cache clear
 ```
 
-Profiles are selected with `--profile compact` (the default) or
-`--profile evidence`.
+Profiles are selected with `--profile compact|evidence`. Compact is the default.
 
 Compact analysis publishes these ceilings:
 
@@ -118,10 +119,10 @@ Compact analysis publishes these ceilings:
 - 30 seconds of analysis work,
 - 8 MiB rendered report.
 
-Cache records are stored under `$XDG_CACHE_HOME/setaryb` (or `~/.cache/setaryb`) and
+Cache records are stored under `$XDG_CACHE_HOME/codeplat` (or `~/.cache/codeplat`) and
 are are reusable across map scopes.
 
-### `setaryb history [OPERATION] [OPTIONS] [PATH]`
+### `codeplat history [OPERATION] [OPTIONS] [PATH]`
 
 History analysis uses committed Git data only. The available operations are:
 
@@ -138,7 +139,7 @@ The default history window is 365 days; recent contributor concentration uses 18
 Override the windows or keyword sets explicitly, for example:
 
 ```sh
-setaryb history bugs --window-days 30 --bug-keyword parser --json
+codeplat history bugs --window-days 30 --bug-keyword parser --json
 ```
 
 History output presents evidence and caveats. It does not treat churn, commit counts,
@@ -149,12 +150,15 @@ or commit-message matches as objective quality scores.
 Markdown is the default format. Use either `--format json` or `--json` for machine-readable output:
 
 ```sh
-setaryb map --format json
-setaryb history --json
+codeplat map --format json
+codeplat history --json
 ```
 
 JSON reports use `schema_version: 1`. Markdown and JSON are rendered from the same typed report model.
 Reports go to stdout without ANSI escape sequences and diagnostics go to stderr.
 
 Diagnostic color can be controlled with `--color auto|always|never` or `--no-color`.
+
 Color settings never change report stdout.
+
+[^ff]: https://newsroom.cisco.com/c/r/newsroom/en/us/a/y2024/m05/developers-spending-more-time-firefighting-issues-than-delivering-innovation.html

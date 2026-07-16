@@ -204,6 +204,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "codeplat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "gix",
+ "ignore",
+ "libc",
+ "owo-colors",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-c-sharp",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1756,30 +1780,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "setaryb"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "gix",
- "ignore",
- "libc",
- "owo-colors",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tree-sitter",
- "tree-sitter-c-sharp",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-typescript",
 ]
 
 [[package]]

@@ -1,3 +1,3 @@
 fn main() {
-    std::process::exit(setaryb::run());
+    std::process::exit(codeplat::run());
 }

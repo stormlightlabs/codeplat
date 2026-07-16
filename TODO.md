@@ -1,4 +1,4 @@
-# Tickets: Setaryb v1 repository navigation CLI
+# Tickets: Codeplat v1 repository navigation CLI
 
 Implementation tickets derived from [ROADMAP.md](ROADMAP.md).
 
@@ -6,17 +6,17 @@ Implementation tickets derived from [ROADMAP.md](ROADMAP.md).
 
 ## 1. Establish the CLI contract and verification foundation
 
-Created the typed command and report foundation that every Setaryb feature uses: the Clap command hierarchy,
+Created the typed command and report foundation that every Codeplat feature uses: the Clap command hierarchy,
 versioned report model, Markdown and JSON renderers, stdout/stderr policy, and black-box fixture-test harness.
 
 ## 2. Deliver the complete Git-history briefing
 
-Lets a user or agent inspect the five history signals through `setaryb history`
+Lets a user or agent inspect the five history signals through `codeplat history`
 and focused history commands, using gix only and returning structured evidence with limitations.
 
 ## 3. Deliver worktree inventory and a Rust source map
 
-Lets callers run `setaryb map` on a current worktree and obtain a Rust structural map with
+Lets callers run `codeplat map` on a current worktree and obtain a Rust structural map with
 symbol locations, declaration snippets, references, worktree-state labels, and honest language/parse limitations.
 
 ## 4. Add JavaScript and TypeScript map support
@@ -53,7 +53,7 @@ in the report model.
 
 **Verification:**
 
-- [x] Run `setaryb map --json` against Java, C#, and mixed-language fixtures;
+- [x] Run `codeplat map --json` against Java, C#, and mixed-language fixtures;
       assert definitions, references, and limitations.
 - [x] Review Markdown output for location and declaration-context readability.
 - [x] `cargo fmt --check`
@@ -82,7 +82,7 @@ budget work remains with Tickets 11 and 14.
       but remain available in output when selected or requested.
 - [x] `--map-tokens` defaults to 1,000 and selects structural snippets with location-preserving
       elision instead of full source bodies.
-- [x] Cache data lives only under a safe XDG Setaryb cache path and is isolated by canonical repository,
+- [x] Cache data lives only under a safe XDG Codeplat cache path and is isolated by canonical repository,
       exact path, query-pack content, tool/schema, and source-content fingerprint. Cache roots resolving
       inside the repository are rejected and retention is bounded by Ticket 10.
 - [x] `auto`, `always`, `files`, `manual`, and `--no-cache` work as specified; manual mode labels
@@ -103,7 +103,7 @@ budget work remains with Tickets 11 and 14.
 
 ## 8. Integrate the default briefing
 
-**What to build:** Replace the successful foundation placeholder with one integrated `setaryb [PATH]`
+**What to build:** Replace the successful foundation placeholder with one integrated `codeplat [PATH]`
 briefing that joins history and source-map findings through the shared report model. This ticket completes
 the product flow.
 
@@ -142,7 +142,7 @@ hardening follow-up remains tracked by Tickets 9 through 14.
 
 **Priority:** P0 release blocker
 
-**What to build:** Make every repository-derived path and Git configuration untrusted input. Setaryb
+**What to build:** Make every repository-derived path and Git configuration untrusted input. Codeplat
 must prove that analysis cannot escape the selected scope or execute repository-controlled programs,
 even for a malformed same-owner repository.
 
@@ -211,7 +211,7 @@ corruption, permissions, and concurrent writers.
       are independent of report scope, and are written with user-private permissions using atomic replace.
 - [x] Concurrent readers/writers cannot observe truncated JSON or lose the newest record. Per-repository
       count/age/size retention is bounded and deterministic.
-- [x] `setaryb cache path|status|prune|clear` reports and controls retention without touching the target
+- [x] `codeplat cache path|status|prune|clear` reports and controls retention without touching the target
       repository; `--no-cache` still performs no cache I/O.
 - [x] Regression tests prime a cache, edit source, exercise every mode, use duplicate basenames, pass an
       unmatched `--cache-file`, corrupt an entry, and run concurrent processes.
@@ -219,7 +219,7 @@ corruption, permissions, and concurrent writers.
 **Verification:**
 
 - [x] Run the cache fixture matrix under a temporary XDG directory and assert current symbols plus exact state counts.
-- [x] Inspect created directories/files for expected permissions and prove pruning never crosses the Setaryb cache root.
+- [x] Inspect created directories/files for expected permissions and prove pruning never crosses the Codeplat cache root.
 - [x] `cargo fmt --check`
 - [x] `cargo test --all-features`
 - [x] `cargo clippy --all-targets --all-features -- -D warnings`
@@ -257,7 +257,7 @@ The explicit evidence profile remains capped by the same work and output ceiling
       evidence and path scope require them.
 - [x] Long scans expose concise TTY-only stderr progress, stay quiet when non-interactive, honor interruption
       promptly, and cannot leave a partial cache entry or JSON document described as successful.
-- [ ] Benchmarks on Setaryb itself, a large ignored tree, high-ambiguity sources, and 10k/100k-commit fixtures
+- [ ] Benchmarks on Codeplat itself, a large ignored tree, high-ambiguity sources, and 10k/100k-commit fixtures
       enforce documented latency and output ceilings. The eight-file self-map is orders of magnitude smaller
       than the 7.33 MB audit baseline.
 
@@ -292,9 +292,9 @@ and turn schema version 1 into a real compatibility contract.
       removal, retyping, or semantic reuse without a schema-version change.
 - [ ] A documented strict policy lets callers fail on stale, truncated, incomplete, unsupported, or partial
       results without parsing prose; default mode still returns useful typed partial evidence.
-- [ ] `setaryb capabilities --json` reports schema/query-pack/language support and active limit defaults without
+- [ ] `codeplat capabilities --json` reports schema/query-pack/language support and active limit defaults without
       running repository analysis.
-- [ ] `setaryb doctor [PATH]` checks discovery, path-safety support, cache location/permissions, schema/query
+- [ ] `codeplat doctor [PATH]` checks discovery, path-safety support, cache location/permissions, schema/query
       availability, and effective limits without emitting source-derived evidence or changing repository state.
 
 **Verification:**
@@ -354,7 +354,7 @@ measure each first-class language against a conformance corpus.
       deduplicated by path/symbol identity, fan-out capped, and repeated ambiguity findings grouped.
 - [ ] Centrality excludes or sharply discounts locals, fields, generic identifiers, imports masquerading as
       definitions, and unresolved property names; raw tags remain available in the explicit evidence profile.
-- [ ] `setaryb explain <PATH-OR-SYMBOL>` decomposes focus, history, landmark, graph, ranking, ambiguity, and
+- [ ] `codeplat explain <PATH-OR-SYMBOL>` decomposes focus, history, landmark, graph, ranking, ambiguity, and
       omission contributions without describing lexical evidence as semantic truth.
 - [ ] Every first-class language has positive/negative conformance fixtures for definitions, references,
       imports/aliases, visibility, nesting, overloads/generics as applicable, malformed input, and conventional
@@ -413,7 +413,7 @@ evidence that should alter what they read next.
 
 **Acceptance criteria:**
 
-- [ ] `setaryb compare --base <REV> [--head <REV|worktree>] [PATH]` resolves and records both states without
+- [ ] `codeplat compare --base <REV> [--head <REV|worktree>] [PATH]` resolves and records both states without
       checkout, hooks, filters, network, or target-repository mutation.
 - [ ] Markdown and JSON report added/removed/changed landmarks, public definitions, qualified lexical evidence,
       history hotspots, ownership concentration, and recommended next reads with before/after provenance.
@@ -443,7 +443,7 @@ dependency/trust surface and reproducible cross-platform verification.
 **Acceptance criteria:**
 
 - [ ] `gix` disables default features and enables only the reviewed discovery/object/revision/index/status
-      capabilities Setaryb needs. `cargo tree -e features` is recorded, and executable/network/credential/
+      capabilities Codeplat needs. `cargo tree -e features` is recorded, and executable/network/credential/
       mutation surface is absent or unreachable with a regression proof.
 - [ ] Cargo metadata includes description, license, repository, README, Rust version, keywords, and categories;
       the repository contains the selected license and documented install/uninstall/cache-cleanup instructions.
@@ -455,7 +455,7 @@ dependency/trust surface and reproducible cross-platform verification.
       completions and man pages are generated from Clap; broken pipes are quiet and exit behavior follows CLI conventions.
 - [ ] The current large map/report modules are separated along existing inventory, query, graph, budget, cache,
       schema, and rendering responsibilities without changing the black-box contract or adding abstraction for its own sake.
-- [ ] The default Markdown and JSON briefings pass a manual usefulness review on a small project, Setaryb,
+- [ ] The default Markdown and JSON briefings pass a manual usefulness review on a small project, Codeplat,
       and a mixed-language monorepo. No known P0 finding is waived without a recorded rationale and expiry.
 
 **Verification:**

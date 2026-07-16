@@ -29,7 +29,7 @@ enum CacheOperation {
     Status,
     /// Remove expired and over-limit records.
     Prune,
-    /// Remove all Setaryb cache records.
+    /// Remove all Codeplat cache records.
     Clear,
 }
 
@@ -192,22 +192,22 @@ struct CacheCommandCli {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "setaryb",
+    name = "codeplat",
     version,
     about = "Read-only repository orientation for people and coding agents.",
-    long_about = "Setaryb produces a concise, evidence-backed repository briefing.
+    long_about = "Codeplat produces a concise, evidence-backed repository briefing.
 
 The default command combines Git-history signals with a ranked source map.
 
 Use `map` or `history` for focused reports.
 
 Examples:
-    setaryb .
-    setaryb --json .
-    setaryb --focus parser --focus-path src .
-    setaryb --no-cache .
-    setaryb map --json
-    setaryb history contributors .
+    codeplat .
+    codeplat --json .
+    codeplat --focus parser --focus-path src .
+    codeplat --no-cache .
+    codeplat map --json
+    codeplat history contributors .
 
 See https://github.com/stormlightlabs/setaryb/issues for support and bug reports.
 
@@ -310,8 +310,8 @@ impl Cli {
 
 #[derive(Debug, clap::Args)]
 #[command(after_help = "Examples:
-    setaryb map
-    setaryb map --json
+    codeplat map
+    codeplat map --json
 
 Support: https://github.com/stormlightlabs/setaryb/issues
 ")]
@@ -406,8 +406,8 @@ impl MapOptions {
 
 #[derive(Debug, clap::Args)]
 #[command(after_help = "Examples:
-    setaryb history
-    setaryb history contributors .
+    codeplat history
+    codeplat history contributors .
 
 Support: https://github.com/stormlightlabs/setaryb/issues
 ")]
@@ -428,8 +428,8 @@ struct HistoryCommand {
 
 #[derive(Debug, clap::Args)]
 #[command(after_help = "Examples:
-    setaryb history churn
-    setaryb history bugs --json
+    codeplat history churn
+    codeplat history bugs --json
 
 Support: https://github.com/stormlightlabs/setaryb/issues
 ")]
@@ -632,7 +632,7 @@ where
 
     let color_policy = cli.color_policy();
 
-    match invoke(cli, stdout, stderr, stderr_is_terminal).context("could not invoke Setaryb") {
+    match invoke(cli, stdout, stderr, stderr_is_terminal).context("could not invoke Codeplat") {
         Ok(()) => ExitCategory::Success,
         Err(error) => {
             let category = error
@@ -651,7 +651,7 @@ fn invoke<W: Write, E: Write>(
     cli.validate()?;
     if let Some(SubcommandName::Cache(cache)) = &cli.command {
         if stderr_is_terminal {
-            let _ = writeln!(stderr, "setaryb: reading cache metadata…");
+            let _ = writeln!(stderr, "codeplat: reading cache metadata…");
         }
         let report = crate::map::cache_control(cache.operation.into())
             .map_err(|error| ApplicationError::Report(crate::report::ReportError::Map(error)))?;
@@ -660,7 +660,7 @@ fn invoke<W: Write, E: Write>(
         return Ok(());
     }
     if stderr_is_terminal {
-        let _ = writeln!(stderr, "setaryb: analyzing repository…");
+        let _ = writeln!(stderr, "codeplat: analyzing repository…");
     }
     let report = Report::analyze(cli.into()).map_err(ApplicationError::Report)?;
     let output = report.render(output_format).map_err(ApplicationError::Render)?;
@@ -691,7 +691,7 @@ fn render_cache_control(report: &CacheControlReport, format: OutputFormat) -> Re
         }
         OutputFormat::Markdown => {
             let path = utils::escape_inline_code(report.path.as_deref().unwrap_or("not configured"));
-            let mut output = format!("# Setaryb cache {}\n\n", report.operation);
+            let mut output = format!("# Codeplat cache {}\n\n", report.operation);
             output.push_str(&format!("Path: `{path}`\n"));
             output.push_str(&format!("Exists: {}\n", report.exists));
             output.push_str(&format!(

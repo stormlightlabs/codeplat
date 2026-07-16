@@ -22,7 +22,7 @@ struct FixtureRepository {
 impl FixtureRepository {
     fn new() -> Self {
         let suffix = format!(
-            "setaryb-cli-{}-{}",
+            "codeplat-cli-{}-{}",
             std::process::id(),
             FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
@@ -44,11 +44,11 @@ impl FixtureRepository {
     }
 
     fn run(&self, arguments: &[&str]) -> Output {
-        self.command(arguments).output().expect("run setaryb fixture command")
+        self.command(arguments).output().expect("run codeplat fixture command")
     }
 
     fn command(&self, arguments: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codeplat"));
         command
             .args(arguments)
             .current_dir(&self.root)
@@ -72,7 +72,7 @@ struct HistoryFixtureRepository {
 impl HistoryFixtureRepository {
     fn new() -> Self {
         let suffix = format!(
-            "setaryb-history-{}-{}",
+            "codeplat-history-{}-{}",
             std::process::id(),
             FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
@@ -184,7 +184,7 @@ impl HistoryFixtureRepository {
     }
 
     fn run(&self, arguments: &[&str]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codeplat"));
         command
             .args(arguments)
             .current_dir(&self.root)
@@ -202,7 +202,7 @@ impl Drop for HistoryFixtureRepository {
 impl MapFixtureRepository {
     fn new() -> Self {
         let suffix = format!(
-            "setaryb-map-{}-{}",
+            "codeplat-map-{}-{}",
             std::process::id(),
             FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
@@ -260,7 +260,7 @@ impl MapFixtureRepository {
     }
 
     fn command(&self, arguments: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codeplat"));
         command
             .args(arguments)
             .current_dir(&self.root)
@@ -290,7 +290,7 @@ struct MixedMapFixtureRepository {
 impl MixedMapFixtureRepository {
     fn new() -> Self {
         let suffix = format!(
-            "setaryb-mixed-map-{}-{}",
+            "codeplat-mixed-map-{}-{}",
             std::process::id(),
             FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
@@ -361,7 +361,7 @@ impl MixedMapFixtureRepository {
     }
 
     fn run(&self, arguments: &[&str]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codeplat"));
         command
             .args(arguments)
             .current_dir(&self.root)
@@ -385,7 +385,7 @@ struct JavaCSharpMapFixtureRepository {
 impl JavaCSharpMapFixtureRepository {
     fn new() -> Self {
         let suffix = format!(
-            "setaryb-java-csharp-map-{}-{}",
+            "codeplat-java-csharp-map-{}-{}",
             std::process::id(),
             FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
@@ -443,7 +443,7 @@ impl JavaCSharpMapFixtureRepository {
     }
 
     fn run(&self, arguments: &[&str]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_setaryb"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codeplat"));
         command
             .args(arguments)
             .current_dir(&self.root)
@@ -567,6 +567,7 @@ fn root_map_and_history_help_are_complete() {
         assert!(output.status.success(), "help failed: {help}");
         assert!(output.stderr.is_empty());
         assert!(help.contains("Usage:"));
+        assert!(help.contains("Usage: codeplat"));
         assert!(help.contains("Examples:"));
         assert!(help.contains("--format <FORMAT>"));
         assert!(help.contains("--json"));
@@ -648,7 +649,7 @@ fn default_markdown_briefing_keeps_history_and_map_sections_readable() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     assert_plain_report(&markdown);
-    assert!(markdown.starts_with("# Setaryb briefing\n"));
+    assert!(markdown.starts_with("# Codeplat briefing\n"));
     assert!(markdown.contains("Status: Analyzed"));
     for section in [
         "## History analysis",
@@ -1384,7 +1385,7 @@ fn corrupt_cache_record_refreshes_and_cache_controls_do_not_touch_the_repository
     let fixture = MapFixtureRepository::new();
     let initial = fixture.run(&["map", "--json"]);
     assert!(initial.status.success());
-    let records = cache_json_files(&fixture.cache.join("setaryb"));
+    let records = cache_json_files(&fixture.cache.join("codeplat"));
     assert_eq!(records.len(), 7);
     write_file(&records[0], b"not valid JSON\n");
 
@@ -1409,7 +1410,7 @@ fn corrupt_cache_record_refreshes_and_cache_controls_do_not_touch_the_repository
     let status_json: Value = serde_json::from_slice(&status.stdout).expect("valid cache status JSON");
     assert_eq!(status_json["records"], 7);
     assert_eq!(status_json["repositories"], 1);
-    assert!(status_json["path"].as_str().unwrap().ends_with("setaryb"));
+    assert!(status_json["path"].as_str().unwrap().ends_with("codeplat"));
 
     let path = fixture.run(&["cache", "path", "--json"]);
     assert!(path.status.success());
@@ -1452,7 +1453,7 @@ fn cache_directories_and_records_are_user_private() {
     let fixture = MapFixtureRepository::new();
     let output = fixture.run(&["map", "--json"]);
     assert!(output.status.success());
-    let cache_root = fixture.cache.join("setaryb");
+    let cache_root = fixture.cache.join("codeplat");
     assert_eq!(fs::metadata(&cache_root).unwrap().permissions().mode() & 0o777, 0o700);
     for record in cache_json_files(&cache_root) {
         assert_eq!(fs::metadata(record).unwrap().permissions().mode() & 0o777, 0o600);
@@ -1488,7 +1489,7 @@ fn concurrent_cache_writers_leave_only_complete_json_records() {
         });
     }
 
-    let records = cache_json_files(&fixture.cache.join("setaryb"));
+    let records = cache_json_files(&fixture.cache.join("codeplat"));
     assert_eq!(records.len(), 7);
     for record in records {
         let bytes = fs::read(record).expect("read concurrent cache record");
@@ -2090,7 +2091,7 @@ fn markdown_snapshot_is_direct_and_readable() {
         + "\n";
     assert_eq!(
         stable_markdown,
-        "# Setaryb map\n\
+        "# Codeplat map\n\
          \n\
          Schema version: 1\n\
          Scope: `.`\n\

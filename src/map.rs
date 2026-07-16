@@ -18,7 +18,7 @@ use crate::security;
 const MAX_CONTEXT_CHARS: usize = 180;
 const DEFAULT_MAP_TOKENS: usize = 1_000;
 const CACHE_SCHEMA_VERSION: u16 = 2;
-const CACHE_TOOL_VERSION: &str = "setaryb-map-v8";
+const CACHE_TOOL_VERSION: &str = "codeplat-map-v8";
 const CACHE_MAX_RECORDS_PER_REPOSITORY: usize = 256;
 const CACHE_MAX_BYTES_PER_REPOSITORY: u64 = 32 * 1024 * 1024;
 const CACHE_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
@@ -448,7 +448,7 @@ struct CacheFileInfo {
     repository_id: Option<String>,
 }
 
-/// Inspect or mutate only Setaryb's configured cache root. This deliberately
+/// Inspect or mutate only Codeplat's configured cache root. This deliberately
 /// does not discover a Git repository or access a worktree.
 pub fn cache_control(command: CacheCommand) -> Result<CacheControlReport> {
     let root =
@@ -2912,7 +2912,7 @@ namespace Example.App {
 
     #[test]
     fn cache_pruning_is_count_bounded_and_path_deterministic() {
-        let root = std::env::temp_dir().join(format!("setaryb-cache-prune-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("codeplat-cache-prune-{}", std::process::id()));
         let repository = root.join("repositories").join("repo");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&repository).expect("create cache prune fixture");
