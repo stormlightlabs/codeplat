@@ -711,6 +711,168 @@ fn resource_bound_source_inputs_are_partial_and_typed() {
 }
 
 #[test]
+fn map_reports_bounded_landmarks_project_roots_and_recursive_boundaries() {
+    let fixture = FixtureRepository::new();
+    for directory in [
+        "packages/app/src",
+        "packages/app/tests",
+        "packages/python",
+        "packages/ruby",
+        "packages/java",
+        "packages/dotnet",
+        ".github/workflows",
+        "vendor/submodule",
+        "nested-repo/src",
+    ] {
+        fs::create_dir_all(fixture.root.join(directory)).expect("create topology fixture directory");
+    }
+    write_file(fixture.root.join("README.md"), b"topology fixture\n");
+    write_file(fixture.root.join("AGENTS.md"), b"agent instructions\n");
+    write_file(fixture.root.join("CONTRIBUTING.md"), b"contributor instructions\n");
+    write_file(
+        fixture.root.join("Cargo.toml"),
+        b"[workspace]\nmembers = [\"packages/app\"]\n",
+    );
+    write_file(fixture.root.join("Cargo.lock"), b"version = 3\n");
+    write_file(fixture.root.join("Makefile"), b"all:\n\ttrue\n");
+    write_file(fixture.root.join("CODEOWNERS"), b"* @maintainers\n");
+    write_file(fixture.root.join("LICENSE"), b"license\n");
+    write_file(fixture.root.join(".github/workflows/ci.yml"), b"name: CI\n");
+    write_file(
+        fixture.root.join(".gitmodules"),
+        b"[submodule \"vendor/submodule\"]\n\tpath = vendor/submodule\n\turl = https://example.invalid/submodule\n",
+    );
+    write_file(fixture.root.join("packages/app/package.json"), br#"{"name":"app"}"#);
+    write_file(
+        fixture.root.join("packages/python/pyproject.toml"),
+        b"[project]\nname = \"python\"\n",
+    );
+    write_file(
+        fixture.root.join("packages/ruby/Gemfile"),
+        b"source \"https://rubygems.org\"\n",
+    );
+    write_file(fixture.root.join("packages/java/pom.xml"), b"<project></project>\n");
+    write_file(
+        fixture.root.join("packages/dotnet/app.csproj"),
+        b"<Project></Project>\n",
+    );
+    write_file(fixture.root.join("packages/app/src/lib.rs"), b"pub fn app() {}\n");
+    write_file(
+        fixture.root.join("packages/app/tests/app.rs"),
+        b"#[test]\nfn app() {}\n",
+    );
+    write_file(
+        fixture.root.join("vendor/submodule/.git"),
+        b"gitdir: ../.git/modules/submodule\n",
+    );
+    write_file(
+        fixture.root.join("nested-repo/.git"),
+        b"gitdir: ../.git/worktrees/nested\n",
+    );
+    write_file(fixture.root.join("nested-repo/src/lib.rs"), b"pub fn nested() {}\n");
+    let repository = gix::open(&fixture.root).expect("open topology fixture for tracked instruction file");
+    let tree = write_tree(
+        &repository,
+        &[
+            ("AGENTS.md", "agent instructions\n"),
+            ("Cargo.toml", "[workspace]\nmembers = [\"packages/app\"]\n"),
+        ],
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time is after the Unix epoch")
+        .as_secs() as i64;
+    let commit = write_commit(
+        &repository,
+        tree,
+        &[],
+        "Topology Fixture",
+        "topology@example.com",
+        now,
+        "Topology fixture",
+    );
+    drop(repository);
+    write_file(fixture.root.join(".git/HEAD"), b"ref: refs/heads/main\n");
+    write_file(
+        fixture.root.join(".git/refs/heads/main"),
+        format!("{commit}\n").as_bytes(),
+    );
+
+    let output = fixture.run(&["map", "--no-cache", "--focus-path", "packages/app", "--json"]);
+    let value: Value = serde_json::from_str(&stdout(&output)).expect("valid topology JSON");
+    assert!(output.status.success(), "topology map failed: {:?}", output.stderr);
+    assert!(output.stderr.is_empty(), "topology stderr: {:?}", output.stderr);
+    assert!(
+        value["map"]["landmarks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|landmark| { landmark["kind"] == "agent_instructions" && landmark["path"] == "AGENTS.md" })
+    );
+    assert!(
+        value["map"]["landmarks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|landmark| { landmark["kind"] == "submodule" && landmark["path"] == "vendor/submodule" })
+    );
+    assert!(
+        value["map"]["landmarks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|landmark| { landmark["kind"] == "nested_repository" && landmark["path"] == "nested-repo" })
+    );
+    assert!(
+        value["map"]["project_roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|root| { root["path"] == "packages/app" && root["kind"] == "package" })
+    );
+    assert!(
+        value["map"]["project_roots"].as_array().unwrap().iter().any(|root| {
+            root["path"] == "packages/app"
+                && root["recommended_paths"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|path| path == "packages/app/src/lib.rs")
+        }),
+        "project roots: {}; landmarks: {}",
+        value["map"]["project_roots"],
+        value["map"]["landmarks"]
+    );
+    for collection in ["landmarks", "project_roots"] {
+        let summary = &value["map"]["collections"][collection];
+        assert!(summary["returned"].as_u64().unwrap() <= summary["total"].as_u64().unwrap());
+        assert!(summary["truncated"].is_boolean());
+    }
+    assert!(
+        !value["map"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| { file["path"] == "nested-repo/src/lib.rs" })
+    );
+
+    let recursive = fixture.run(&["map", "--recursive", "--no-cache", "--json"]);
+    let recursive_value: Value = serde_json::from_str(&stdout(&recursive)).expect("valid recursive topology JSON");
+    assert!(
+        recursive.status.success(),
+        "recursive map failed: {:?}",
+        recursive.stderr
+    );
+    assert!(
+        recursive_value["map"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| { file["path"] == "nested-repo/src/lib.rs" })
+    );
+}
+
+#[test]
 fn history_without_commits_uses_the_analysis_exit_category() {
     let fixture = FixtureRepository::new();
     let output = fixture.run(&["history", "--json"]);

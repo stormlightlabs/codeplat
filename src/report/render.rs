@@ -169,6 +169,8 @@ impl Render {
             || map.collections.edges.truncated
             || map.collections.ranking.truncated
             || map.collections.snippets.truncated
+            || map.collections.landmarks.truncated
+            || map.collections.project_roots.truncated
         {
             writeln!(
                 output,
@@ -183,6 +185,51 @@ impl Render {
                 utils::escape_inline_code(&map.exclusions.join("`, `"))
             )
             .expect("writing to a string cannot fail");
+        }
+
+        if !map.landmarks.is_empty() || !map.project_roots.is_empty() {
+            Render::section_heading(output, "Repository landmarks");
+            writeln!(
+                output,
+                "Landmarks: {} returned of {}; project roots: {} returned of {}",
+                map.collections.landmarks.returned,
+                map.collections.landmarks.total,
+                map.collections.project_roots.returned,
+                map.collections.project_roots.total
+            )
+            .expect("writing to a string cannot fail");
+            for root in &map.project_roots {
+                writeln!(
+                    output,
+                    "- Project root `{}` — {} — {}",
+                    utils::escape_inline_code(&root.path),
+                    root.kind.label(),
+                    utils::sanitize_text(&root.reason)
+                )
+                .expect("writing to a string cannot fail");
+                if !root.recommended_paths.is_empty() {
+                    writeln!(
+                        output,
+                        "  - Recommended source paths: `{}`",
+                        utils::escape_inline_code(&root.recommended_paths.join("`, `"))
+                    )
+                    .expect("writing to a string cannot fail");
+                }
+            }
+            for landmark in &map.landmarks {
+                writeln!(
+                    output,
+                    "- **{}** `{}` — {} [{}{}]",
+                    landmark.kind.label(),
+                    utils::escape_inline_code(&landmark.path),
+                    utils::sanitize_text(&landmark.reason),
+                    landmark.worktree_state.label(),
+                    landmark.project_root.as_deref().map_or(String::new(), |root| {
+                        format!(", project root `{}`", utils::escape_inline_code(root))
+                    })
+                )
+                .expect("writing to a string cannot fail");
+            }
         }
 
         if !map.files.is_empty()

@@ -100,6 +100,8 @@ pub struct ReportLimits {
     pub max_history_evidence: usize,
     pub max_elapsed_ms: u64,
     pub max_output_bytes: usize,
+    pub max_landmarks: usize,
+    pub max_project_roots: usize,
 }
 
 impl ReportLimits {
@@ -125,6 +127,14 @@ impl ReportLimits {
                 AnalysisProfile::Evidence => 120_000,
             },
             max_output_bytes: 8 * 1_024 * 1_024,
+            max_landmarks: match profile {
+                AnalysisProfile::Compact => 64,
+                AnalysisProfile::Evidence => 4_096,
+            },
+            max_project_roots: match profile {
+                AnalysisProfile::Compact => 32,
+                AnalysisProfile::Evidence => 1_024,
+            },
         }
     }
 }
@@ -198,6 +208,7 @@ pub enum WorktreeState {
     Tracked,
     Modified,
     Untracked,
+    Unknown,
 }
 
 impl WorktreeState {
@@ -206,6 +217,7 @@ impl WorktreeState {
             Self::Tracked => "tracked",
             Self::Modified => "modified",
             Self::Untracked => "untracked",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -648,6 +660,8 @@ pub struct EffectiveMapOptions {
     pub map_tokens: usize,
     pub cache_mode: CacheMode,
     pub cache_files: Vec<String>,
+    #[serde(default)]
+    pub recursive: bool,
 }
 
 impl Default for EffectiveMapOptions {
@@ -659,6 +673,7 @@ impl Default for EffectiveMapOptions {
             map_tokens: 1_000,
             cache_mode: CacheMode::Auto,
             cache_files: Vec::new(),
+            recursive: false,
         }
     }
 }
@@ -1018,6 +1033,7 @@ impl Report {
                 map_tokens: req.map.map_tokens,
                 cache_mode: req.map.cache_mode,
                 cache_files: req.map.cache_files.clone(),
+                recursive: req.map.recursive,
             },
             history: req.history.clone(),
         };
@@ -1208,6 +1224,10 @@ pub struct MapReport {
     pub selection: MapSelection,
     pub cache: MapCacheReport,
     #[serde(default)]
+    pub landmarks: Vec<Landmark>,
+    #[serde(default)]
+    pub project_roots: Vec<ProjectRoot>,
+    #[serde(default)]
     pub collections: MapCollections,
 }
 
@@ -1271,6 +1291,40 @@ impl MapReport {
                 .map(|rank| token_count(&rank.path).saturating_add(2))
                 .sum::<usize>(),
         );
+        let landmark_tokens = self
+            .landmarks
+            .iter()
+            .map(|landmark| {
+                token_count(landmark.kind.label())
+                    + token_count(&landmark.path)
+                    + token_count(&landmark.reason)
+                    + token_count(landmark.worktree_state.label())
+                    + landmark.project_root.as_deref().map_or(0, token_count)
+                    + 2
+            })
+            .sum::<usize>();
+        let project_root_tokens = self
+            .project_roots
+            .iter()
+            .map(|root| {
+                token_count(&root.path)
+                    + token_count(root.kind.label())
+                    + root
+                        .manifests
+                        .iter()
+                        .map(|manifest| token_count(manifest))
+                        .sum::<usize>()
+                    + root
+                        .recommended_paths
+                        .iter()
+                        .map(|path| token_count(path))
+                        .sum::<usize>()
+                    + 4
+            })
+            .sum::<usize>();
+        tokens = tokens
+            .saturating_add(landmark_tokens)
+            .saturating_add(project_root_tokens);
         tokens.saturating_add(
             self.selection
                 .snippets
@@ -1325,6 +1379,118 @@ pub struct MapCollections {
     pub edges: CollectionSummary,
     pub ranking: CollectionSummary,
     pub snippets: CollectionSummary,
+    #[serde(default)]
+    pub landmarks: CollectionSummary,
+    #[serde(default)]
+    pub project_roots: CollectionSummary,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandmarkKind {
+    Readme,
+    ContributorInstructions,
+    AgentInstructions,
+    Manifest,
+    Lockfile,
+    WorkspaceRoot,
+    PackageRoot,
+    BuildEntryPoint,
+    TaskEntryPoint,
+    TestRoot,
+    Ci,
+    Ownership,
+    License,
+    Submodule,
+    NestedRepository,
+    Unknown,
+}
+
+impl LandmarkKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Readme => "readme",
+            Self::ContributorInstructions => "contributor_instructions",
+            Self::AgentInstructions => "agent_instructions",
+            Self::Manifest => "manifest",
+            Self::Lockfile => "lockfile",
+            Self::WorkspaceRoot => "workspace_root",
+            Self::PackageRoot => "package_root",
+            Self::BuildEntryPoint => "build_entry_point",
+            Self::TaskEntryPoint => "task_entry_point",
+            Self::TestRoot => "test_root",
+            Self::Ci => "ci",
+            Self::Ownership => "ownership",
+            Self::License => "license",
+            Self::Submodule => "submodule",
+            Self::NestedRepository => "nested_repository",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub const fn priority(self) -> u8 {
+        match self {
+            Self::AgentInstructions => 100,
+            Self::Readme => 95,
+            Self::ContributorInstructions => 90,
+            Self::Manifest | Self::WorkspaceRoot | Self::PackageRoot => 85,
+            Self::Lockfile => 80,
+            Self::BuildEntryPoint | Self::TaskEntryPoint => 75,
+            Self::TestRoot => 70,
+            Self::Ci => 65,
+            Self::Ownership => 60,
+            Self::License => 50,
+            Self::Submodule | Self::NestedRepository => 45,
+            Self::Unknown => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRootKind {
+    Workspace,
+    Package,
+    Mixed,
+    #[default]
+    Unknown,
+}
+
+impl ProjectRootKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Package => "package",
+            Self::Mixed => "mixed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Landmark {
+    pub kind: LandmarkKind,
+    pub path: String,
+    pub reason: String,
+    pub project_root: Option<String>,
+    pub worktree_state: WorktreeState,
+    pub priority: u8,
+    #[serde(default)]
+    pub focus_matches: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectRoot {
+    pub path: String,
+    pub kind: ProjectRootKind,
+    pub reason: String,
+    pub manifests: Vec<String>,
+    #[serde(default)]
+    pub landmark_total: usize,
+    #[serde(default)]
+    pub recommendation_total: usize,
+    #[serde(default)]
+    pub recommended_paths: Vec<String>,
 }
 
 /// One file-level lexical dependency candidate.
@@ -1991,6 +2157,8 @@ fn report_quality(history: Option<&HistoryReport>, map: Option<&MapReport>) -> R
             report.collections.edges.truncated,
             report.collections.ranking.truncated,
             report.collections.snippets.truncated,
+            report.collections.landmarks.truncated,
+            report.collections.project_roots.truncated,
         ]
         .into_iter()
         .any(|value| value)

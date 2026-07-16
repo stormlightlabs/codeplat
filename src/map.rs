@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 use crate::cli::ExitCategory;
-use crate::security;
+use crate::{landmarks, security};
 use crate::{report::*, utils};
 
 const MAX_CONTEXT_CHARS: usize = 180;
@@ -413,6 +413,7 @@ pub struct MapSettings {
     pub map_tokens: usize,
     pub cache_mode: CacheMode,
     pub cache_files: Vec<String>,
+    pub recursive: bool,
     pub profile: AnalysisProfile,
 }
 
@@ -425,6 +426,7 @@ impl Default for MapSettings {
             map_tokens: DEFAULT_MAP_TOKENS,
             cache_mode: CacheMode::Auto,
             cache_files: Vec::new(),
+            recursive: false,
             profile: AnalysisProfile::Compact,
         }
     }
@@ -900,6 +902,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         );
     }
     let mut tracked_paths = BTreeSet::new();
+    let mut submodule_paths = BTreeSet::new();
     collect_tree_files(
         &repository,
         &repository
@@ -907,6 +910,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             .map_err(|error| MapError::analysis("resolving the repository HEAD tree", error))?,
         b"",
         &mut tracked_paths,
+        &mut submodule_paths,
         limits.max_files,
         limits.max_syntax_depth,
     )?;
@@ -916,13 +920,19 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     let mut candidates = BTreeMap::new();
     for path in tracked_paths
         .into_iter()
-        .filter(|path| in_scope(path, &scope.relative_path))
+        .filter(|path| in_scope(path, &scope.relative_path) && !submodule_paths.contains(path))
     {
         let state = if modified_paths.contains(&path) { WorktreeState::Modified } else { WorktreeState::Tracked };
         candidates.insert(path, Candidate { state, symlink: false });
     }
 
-    let (visible_paths, visible_errors) = walk_files(&scope.selected_path, repository_root, true, limits.max_files);
+    let (visible_paths, visible_errors) = walk_files(
+        &scope.selected_path,
+        repository_root,
+        true,
+        limits.max_files,
+        settings.recursive,
+    );
     for (path, symlink) in &visible_paths {
         if is_git_internal(path) || !in_scope(path, &scope.relative_path) {
             continue;
@@ -933,7 +943,13 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             .or_insert(Candidate { state: WorktreeState::Untracked, symlink: *symlink });
     }
 
-    let (all_paths, all_errors) = walk_files(&scope.selected_path, repository_root, false, limits.max_files);
+    let (all_paths, all_errors) = walk_files(
+        &scope.selected_path,
+        repository_root,
+        false,
+        limits.max_files,
+        settings.recursive,
+    );
     let visible_path_set: BTreeSet<_> = visible_paths.keys().cloned().collect();
     let mut omissions = Vec::new();
     for error in visible_errors.into_iter().chain(all_errors) {
@@ -986,6 +1002,22 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         cache_stats.unmatched = requested_cache_files.len().saturating_sub(cache_stats.matched);
     }
 
+    let landmark_states = candidates
+        .iter()
+        .map(|(path, candidate)| (path.clone(), candidate.state))
+        .collect::<BTreeMap<_, _>>();
+    let topology = landmarks::analyze(landmarks::LandmarkAnalysisOptions {
+        repository_root,
+        scope_root: &scope.selected_path,
+        scope_path: &scope.relative_path,
+        path_states: &landmark_states,
+        submodule_paths: &submodule_paths,
+        exclusions: exclusions.as_ref(),
+        limits: &limits,
+        recursive: settings.recursive,
+        focuses: &settings.focuses,
+        focus_paths: &settings.focus_paths,
+    });
     let inventory = inventory(&candidates);
     if candidates.len() > limits.max_files {
         let kept = candidates
@@ -1278,6 +1310,23 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
     cache_stats.refreshed.sort();
     cache_stats.stale.sort();
 
+    let mut project_roots = topology.project_roots;
+    let root_paths = project_roots.clone();
+    for root in &mut project_roots {
+        root.landmark_total = topology
+            .landmarks
+            .iter()
+            .filter(|landmark| landmark.project_root.as_deref() == Some(root.path.as_str()))
+            .count();
+        root.recommended_paths = ranking
+            .iter()
+            .filter(|rank| {
+                landmarks::project_root_for_path(&rank.path, &root_paths).as_deref() == Some(root.path.as_str())
+            })
+            .map(|rank| rank.path.clone())
+            .collect();
+        root.recommendation_total = root.recommended_paths.len();
+    }
     let mut report = MapReport {
         profile: settings.profile,
         repository_root: repository_root.to_string_lossy().into_owned(),
@@ -1297,7 +1346,11 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
         files,
         omissions,
         findings,
-        limitations,
+        limitations: {
+            let mut combined = limitations;
+            combined.extend(topology.limitations);
+            combined
+        },
         edges,
         ranking,
         selection,
@@ -1312,6 +1365,8 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             refreshed: cache_stats.refreshed,
             stale: cache_stats.stale,
         },
+        landmarks: topology.landmarks,
+        project_roots,
         collections: MapCollections {
             files: CollectionSummary::complete(0),
             symbols: CollectionSummary::complete(0),
@@ -1320,6 +1375,8 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
             edges: CollectionSummary::complete(0),
             ranking: CollectionSummary::complete(0),
             snippets: CollectionSummary::complete(0),
+            landmarks: CollectionSummary::complete(0),
+            project_roots: CollectionSummary::complete(0),
         },
     };
     bound_map_report(&mut report, settings.profile, &limits);
@@ -1334,8 +1391,19 @@ fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits: &R
     let edges_total = report.edges.len();
     let ranking_total = report.ranking.len();
     let snippets_total = report.selection.snippets.len();
-    let (file_limit, symbols_per_file, omission_limit, finding_limit, edge_limit, ranking_limit) = match profile {
-        AnalysisProfile::Compact => (32, 16, 8, 32, 32, 16),
+    let landmarks_total = report.landmarks.len();
+    let project_roots_total = report.project_roots.len();
+    let (
+        file_limit,
+        symbols_per_file,
+        omission_limit,
+        finding_limit,
+        edge_limit,
+        ranking_limit,
+        landmark_limit,
+        root_limit,
+    ) = match profile {
+        AnalysisProfile::Compact => (32, 16, 8, 32, 32, 16, 48, 16),
         AnalysisProfile::Evidence => (
             limits.max_files,
             limits.max_symbols_per_file,
@@ -1343,6 +1411,8 @@ fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits: &R
             limits.max_findings,
             limits.max_edges,
             limits.max_files,
+            limits.max_landmarks,
+            limits.max_project_roots,
         ),
     };
 
@@ -1368,6 +1438,12 @@ fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits: &R
         edge.candidates.truncate(limits.max_candidates_per_reference);
     }
     report.ranking.truncate(ranking_limit);
+    report.landmarks.truncate(landmark_limit);
+    report.project_roots.truncate(root_limit);
+    for root in &mut report.project_roots {
+        let recommendation_limit = if profile == AnalysisProfile::Compact { 16 } else { limits.max_files };
+        root.recommended_paths.truncate(recommendation_limit);
+    }
 
     let enforce_budget = profile == AnalysisProfile::Compact
         && (report.selection.token_budget < 256
@@ -1461,6 +1537,18 @@ fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits: &R
             profile,
             TruncationReason::OutputBudget,
         ),
+        landmarks: collection_summary(
+            landmarks_total,
+            report.landmarks.len(),
+            profile,
+            TruncationReason::CollectionLimit,
+        ),
+        project_roots: collection_summary(
+            project_roots_total,
+            report.project_roots.len(),
+            profile,
+            TruncationReason::CollectionLimit,
+        ),
     };
     if [
         report.collections.files.truncated,
@@ -1470,6 +1558,8 @@ fn bound_map_report(report: &mut MapReport, profile: AnalysisProfile, limits: &R
         report.collections.edges.truncated,
         report.collections.ranking.truncated,
         report.collections.snippets.truncated,
+        report.collections.landmarks.truncated,
+        report.collections.project_roots.truncated,
     ]
     .into_iter()
     .any(|truncated| truncated)
@@ -2106,8 +2196,8 @@ fn explicitly_excluded(exclusions: Option<&Gitignore>, path: &Path) -> bool {
 }
 
 fn collect_tree_files(
-    repository: &gix::Repository, tree_id: &gix::Id<'_>, prefix: &[u8], files: &mut BTreeSet<String>, max_files: usize,
-    max_depth: usize,
+    repository: &gix::Repository, tree_id: &gix::Id<'_>, prefix: &[u8], files: &mut BTreeSet<String>,
+    submodule_paths: &mut BTreeSet<String>, max_files: usize, max_depth: usize,
 ) -> Result<()> {
     let mut stack = vec![(tree_id.detach(), prefix.to_vec(), 0usize)];
     while let Some((tree_id, prefix, depth)) = stack.pop() {
@@ -2147,11 +2237,17 @@ fn collect_tree_files(
                 .map_err(|error| MapError::safety("decoding a tracked tree path", error))?;
             if entry.mode().is_tree() {
                 stack.push((entry.id().detach(), path.into_bytes(), depth.saturating_add(1)));
-            } else if !files.insert(path) {
-                return Err(MapError::safety(
-                    "decoding a tracked tree path",
-                    security::PathSafetyError { kind: security::PathSafetyKind::Collision },
-                ));
+            } else {
+                let is_submodule = entry.mode().is_commit();
+                if !files.insert(path.clone()) {
+                    return Err(MapError::safety(
+                        "decoding a tracked tree path",
+                        security::PathSafetyError { kind: security::PathSafetyKind::Collision },
+                    ));
+                }
+                if is_submodule {
+                    submodule_paths.insert(path);
+                }
             }
         }
     }
@@ -2214,7 +2310,7 @@ fn collect_modified_paths(
 }
 
 fn walk_files(
-    root: &Path, repository_root: &Path, standard_filters: bool, max_entries: usize,
+    root: &Path, repository_root: &Path, standard_filters: bool, max_entries: usize, recursive: bool,
 ) -> (BTreeMap<String, bool>, Vec<WalkIssue>) {
     let mut builder = WalkBuilder::new(root);
     builder
@@ -2227,7 +2323,7 @@ fn walk_files(
         if entry.depth() == 0 || !entry.file_type().is_some_and(|file_type| file_type.is_dir()) {
             return true;
         }
-        !pruned_directory(entry.path(), &filter_repository_root)
+        !pruned_directory(entry.path(), &filter_repository_root, recursive)
     });
     let mut files = BTreeMap::new();
     let mut errors = Vec::new();
@@ -2277,7 +2373,7 @@ fn walk_files(
     (files, errors)
 }
 
-fn pruned_directory(path: &Path, repository_root: &Path) -> bool {
+fn pruned_directory(path: &Path, repository_root: &Path, recursive: bool) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return true;
     };
@@ -2287,7 +2383,8 @@ fn pruned_directory(path: &Path, repository_root: &Path) -> bool {
     ) {
         return true;
     }
-    path != repository_root
+    (!recursive)
+        && path != repository_root
         && fs::symlink_metadata(path.join(".git")).is_ok_and(|metadata| metadata.is_dir() || metadata.is_file())
 }
 

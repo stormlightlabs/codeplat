@@ -332,25 +332,25 @@ navigation, using bounded presence-based evidence rather than speculative framew
 
 **Acceptance criteria:**
 
-- [ ] The integrated briefing identifies README/contributor/agent instructions, manifests and lockfiles,
+- [x] The integrated briefing identifies README/contributor/agent instructions, manifests and lockfiles,
       workspace/package roots, build/task entry points, test roots, CI, ownership files, licenses, submodules,
       and nested repositories within scope.
-- [ ] Every landmark includes a stable kind, path, detection reason, project-root association, and worktree
+- [x] Every landmark includes a stable kind, path, detection reason, project-root association, and worktree
       state. Unknown or conflicting files remain `unknown`; contents are read only within shared size/safety limits.
-- [ ] Monorepo output groups landmarks and source recommendations by detected project root without inventing
+- [x] Monorepo output groups landmarks and source recommendations by detected project root without inventing
       dependencies between packages.
-- [ ] Compact output returns a bounded, prioritized landmark set plus totals; the evidence profile can expose
+- [x] Compact output returns a bounded, prioritized landmark set plus totals; the evidence profile can expose
       the complete inventory through pagination.
-- [ ] Focus paths and explicit exclusions apply consistently, and submodules/nested repositories are boundaries
+- [x] Focus paths and explicit exclusions apply consistently, and submodules/nested repositories are boundaries
       unless the caller explicitly requests recursive analysis.
 
 **Verification:**
 
-- Exercise Rust, Node/TypeScript, Python, Ruby, Java, .NET, and mixed-monorepo landmark fixtures.
-- Assert AGENTS/README/build/test/CI/ownership priority and safe nested-repository/submodule behavior.
-- `cargo fmt --check`
-- `cargo test --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] Exercise Rust, Node/TypeScript, Python, Ruby, Java, .NET, and mixed-monorepo landmark fixtures.
+- [x] Assert AGENTS/README/build/test/CI/ownership priority and safe nested-repository/submodule behavior.
+- [x] `cargo fmt --check`
+- [x] `cargo test --all-features`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 16. Compare repository orientation across revisions
 

@@ -441,6 +441,10 @@ struct MapOptions {
     /// Disable all cache reads and writes.
     #[arg(long = "no-cache", action = ArgAction::SetTrue)]
     no_cache: bool,
+
+    /// Descend into nested repositories and checked-out submodules.
+    #[arg(long = "recursive", action = ArgAction::SetTrue)]
+    recursive: bool,
 }
 
 impl From<MapOptions> for MapSettings {
@@ -458,6 +462,7 @@ impl MapOptions {
             map_tokens: self.map_tokens,
             cache_mode: if self.no_cache { CacheMode::Disabled } else { self.cache_mode.into() },
             cache_files: self.cache_files.clone(),
+            recursive: self.recursive,
             profile: AnalysisProfile::Compact,
         }
     }

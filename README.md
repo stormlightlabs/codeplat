@@ -31,6 +31,7 @@ codeplat --json
 codeplat map
 codeplat map --json
 codeplat map src --exclude 'src/generated/**' --json
+codeplat map --recursive --json
 codeplat history
 codeplat history contributors src --json
 codeplat explain src/map.rs --json
@@ -83,6 +84,10 @@ The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, J
 - language- and import-aware lexical file edges with a resolution reason,
   confidence tier, candidate-group identity, and deterministic centrality ranking
 - optional explicit `--focus` and `--focus-path` boosts
+- repository landmarks for README and agent/contributor instructions, manifests and lockfiles,
+  project roots, build/task entry points, test roots, CI, ownership, licenses, submodules, and
+  nested repositories
+- monorepo project-root groups with bounded source recommendations
 - a bounded ranked selection controlled by `--map-tokens` (default: 1,000)
 - parse errors, query-pack failures, grouped ambiguous lexical references, and
   unsupported/partial evidence per affected file
@@ -103,6 +108,7 @@ codeplat map --cache always
 codeplat map --cache files --cache-file src/parser.rs
 codeplat map --cache manual
 codeplat map --no-cache
+codeplat map --recursive --no-cache
 codeplat cache path
 codeplat cache status
 codeplat cache prune
@@ -110,6 +116,9 @@ codeplat cache clear
 ```
 
 Profiles are selected with `--profile compact|evidence`. Compact is the default.
+
+Nested repositories and checked-out submodules are boundaries by default. Use `--recursive` when
+their source should be included; the boundary landmark remains in the report either way.
 
 Compact analysis publishes these ceilings:
 
@@ -124,6 +133,10 @@ Compact analysis publishes these ceilings:
 - 128 history evidence items per collection
 - 30 seconds of analysis work,
 - 8 MiB rendered report.
+
+Landmark output is capped at 64 compact landmarks and 32 compact project roots, with totals and
+truncation metadata preserved in JSON. Evidence mode raises those caps to the published report
+limits.
 
 Cache records are stored under `$XDG_CACHE_HOME/codeplat` (or `~/.cache/codeplat`) and
 are reusable across map scopes.

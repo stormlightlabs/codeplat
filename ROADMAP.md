@@ -76,6 +76,8 @@ larger report.
   evidence, confidence/reason metadata, stable candidate groups, grouped ambiguity, per-language parser/query
   reuse, preaggregated incoming counts, and the bounded `explain` command. Bare cross-file and cross-language
   matches no longer affect centrality without explicit evidence.
+- Ticket 15 now adds bounded, presence-based repository landmarks, detected workspace/package roots, grouped
+  source recommendations, safe submodule/nested-repository boundaries, and explicit `--recursive` traversal.
 - [Research notes](notes/README.md) capture the source material, Rust library boundaries, and
   the limits of Git-history and Tree-sitter-derived evidence.
 
@@ -332,11 +334,14 @@ editor, code generator, or semantic compiler.
 
 ### Repository landmarks
 
-Add a bounded landmarks section to the integrated briefing. It identifies files a human or agent commonly
+**Implementation status (2026-07-16):** The integrated briefing now emits bounded, typed landmarks and
+project-root groups from the shared map scope. It identifies files a human or agent commonly
 needs before source traversal: README and contributor instructions, `AGENTS.md`, manifests and lockfiles,
 workspace/package roots, build and task entry points, test roots, CI configuration, ownership files, licenses,
-submodules, and nested repositories. Each landmark includes a detection reason; unknown files are not guessed.
-Monorepos are grouped by detected project root so the briefing exposes topology before symbol detail.
+submodules, and nested repositories. Each landmark includes a stable kind, detection reason, worktree state,
+and project-root association; unknown or conflicting project-root roles remain `unknown`. Monorepos are grouped
+by detected project root so the briefing exposes topology before symbol detail. Nested repositories and checked-out
+submodules remain boundaries unless `--recursive` is explicitly supplied.
 
 ### Explainable recommendations
 
@@ -485,8 +490,8 @@ Keep language query files and test fixtures as first-class, versioned assets rat
    bounded-output, graph-signal, and machine-contract tickets with fixtures.
 8. **Distributable v1:** complete help and documentation, cross-platform output/exit compatibility,
    minimal dependency features, package metadata/licensing, CI, performance gates, and release artifacts.
-9. **Navigation depth:** add landmarks and explainability, followed by revision comparison; evaluate each
-   addition against compact-output and simplicity budgets before starting the next.
+9. **Navigation depth:** add explainability and revision comparison after the implemented landmark topology;
+   evaluate each addition against compact-output and simplicity budgets before starting the next.
 
 ## Deferred Milestones
 

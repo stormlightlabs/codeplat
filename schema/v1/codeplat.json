@@ -59,7 +59,7 @@
     },
     "limits": {
       "type": "object",
-      "required": ["max_files", "max_file_bytes", "max_total_bytes", "max_syntax_depth", "max_symbols_per_file", "max_symbols", "max_candidates_per_reference", "max_edges", "max_findings", "max_commits", "max_history_evidence", "max_elapsed_ms", "max_output_bytes"],
+      "required": ["max_files", "max_file_bytes", "max_total_bytes", "max_syntax_depth", "max_symbols_per_file", "max_symbols", "max_candidates_per_reference", "max_edges", "max_findings", "max_commits", "max_history_evidence", "max_elapsed_ms", "max_output_bytes", "max_landmarks", "max_project_roots"],
       "properties": {
         "max_files": { "type": "integer", "minimum": 1 },
         "max_file_bytes": { "type": "integer", "minimum": 1 },
@@ -73,7 +73,9 @@
         "max_commits": { "type": "integer", "minimum": 1 },
         "max_history_evidence": { "type": "integer", "minimum": 1 },
         "max_elapsed_ms": { "type": "integer", "minimum": 1 },
-        "max_output_bytes": { "type": "integer", "minimum": 1 }
+        "max_output_bytes": { "type": "integer", "minimum": 1 },
+        "max_landmarks": { "type": "integer", "minimum": 1 },
+        "max_project_roots": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": true
     },
