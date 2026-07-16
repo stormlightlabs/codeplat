@@ -126,8 +126,6 @@ hardening follow-up remains tracked by Tickets 9 through 14.
       checks cover the final command surface.
 - [ ] Read-only, no-network, no-hook/filter, no-editor/chat-context, no-project-cache, and symlink-scope
       safeguards are covered by regression tests and documentation.
-- [ ] README and roadmap accurately distinguish v1 support from the planned F#, Go, Elixir, C, and
-      C++ expansion.
 
 **Verification:**
 
@@ -246,80 +244,13 @@ and turn schema version 1 into a real compatibility contract.
 
 ## 13. Correct and strengthen Git-history evidence
 
-**Priority:** P0 correctness for scope/provenance; P1 for signal enrichment
-
-**What to build:** Make every history result obey its advertised scope and improve the article-derived
+Makes every history result obey its advertised scope and improve the article-derived
 signals without hiding their original evidence or caveats.
-
-**Blocked by:** Tickets 2 and 12
-
-**Implementation status (2026-07-16):** Scoped commit envelopes and activity, committed-HEAD `.mailmap`
-canonicalization, email-redacted compact contributor output, word-aware/substring keyword policies,
-matched-term evidence, current-HEAD size-normalized churn, and bounded focused scans are implemented.
-Rename continuity is explicitly reported as unavailable rather than silently implied.
-
-**Acceptance criteria:**
-
-- [x] `history activity PATH` and `commits_seen` count only commits affecting the selected scope. Any
-      intentionally repository-wide section carries a separate explicit scope instead of inheriting `PATH`.
-- [x] Contributor concentration applies `.mailmap` by default, records raw-to-canonical provenance, handles
-      missing/case-varied identity, and omits email from compact output unless explicitly requested.
-- [x] Bug/firefighting evidence records the matched term and uses word-aware matching by default, with an
-      explicit substring mode for compatibility; `fixture`, `prefix`, and `debug` are negative tests.
-- [x] Size-normalized churn is reported beside—not instead of—absolute churn, with the size basis and zero/
-      generated/binary-file behavior explicit.
-- [x] Rename-aware continuity is either implemented with evidence and limits or reported as unavailable;
-      a renamed hotspot never silently appears to have no earlier history.
-- [x] Focused operations decode and diff only required data, preserve deterministic ties, and expose bounded
-      totals/evidence according to Ticket 11.
-
-**Verification:**
-
-- Run scoped activity, alias/mailmap, keyword-boundary, rename, and normalized-churn fixtures in both formats.
-- Compare compact results with manually established fixture truth, including negative keyword cases.
-- `cargo fmt --check`
-- `cargo test --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 14. Make lexical maps high-signal and explainable
 
-**Priority:** P0 quality gate for the v1 map
-
-**What to build:** Replace global bare-name fan-out with bounded, confidence-aware lexical evidence and
+Replaces global bare-name fan-out with bounded, confidence-aware lexical evidence and
 measure each first-class language against a conformance corpus.
-
-**Blocked by:** Tickets 4, 5, 6, 7, and 11
-
-**Implementation status (2026-07-16):** Language-scoped candidate indexing, explicit same-file and import/module
-evidence, typed visibility/evidence tags, confidence-aware edges, stable candidate groups, grouped ambiguity,
-preaggregated incoming counts, per-language parser/query reuse, and the bounded `explain` command are implemented.
-Raw tags remain available while locals, fields, imports-as-definitions, generic identifiers, and unresolved
-property references are kept out of graph centrality.
-
-**Acceptance criteria:**
-
-- [x] Candidate matching is constrained by language plus import/module/scope information where available.
-      Same-file and cross-language bare-name matches do not affect centrality without explicit evidence.
-- [x] Each retained edge carries a resolution reason and confidence tier. Candidate groups are interned,
-      deduplicated by path/symbol identity, fan-out capped, and repeated ambiguity findings grouped.
-- [x] Centrality excludes or sharply discounts locals, fields, generic identifiers, imports masquerading as
-      definitions, and unresolved property names; raw tags remain available in the explicit evidence profile.
-- [x] `codeplat explain <PATH-OR-SYMBOL>` decomposes focus, history, landmark, graph, ranking, ambiguity, and
-      omission contributions without describing lexical evidence as semantic truth.
-- [x] Every first-class language has positive/negative conformance fixtures for definitions, references,
-      imports/aliases, visibility, nesting, overloads/generics as applicable, malformed input, and conventional
-      extensionless entry files. The declared Java field capability and empty-map provenance are accurate.
-- [x] Parsers and compiled queries are reused per language, incoming counts are preaggregated, and the focused
-      graph regression tests prevent candidate-copy and edge-rescan amplification.
-
-**Verification:**
-
-- [x] Assert graph candidates, confidence reasons, grouped ambiguity, and ranking against hand-reviewed mixed-language fixtures.
-- [x] Run the self-map and verify core analyzer files outrank repeated field names under the default profile.
-- [x] Record bounded output and candidate fan-out behavior in the compact/evidence regression suite.
-- [x] `cargo fmt --check`
-- [x] `cargo test --all-features`
-- [x] `cargo clippy --all-targets --all-features -- -D warnings`
 
 ## 15. Add repository landmarks and project topology
 
