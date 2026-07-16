@@ -54,7 +54,7 @@ The Rust 2024 implementation already provides:
 - all five history evidence families, bounded compact/evidence profiles, typed provenance, schema-version-1
   compatibility fixtures, concise typed history observations, repository landmarks, project roots, cache controls,
   and explainable lexical edges;
-- first-class Rust, JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, and C# query packs;
+- first-class Rust, JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, C#, and Go query packs;
 - hostile-path and external-filter defenses, no-follow worktree reads, restrictive `gix` features, bounded work
   and output, package metadata, generated completions/man pages, and cross-platform release CI configuration.
 
@@ -67,7 +67,7 @@ and identified product-usability work that is being addressed incrementally:
   none;
 - compact projection is now separated from actionable quality: hard limits, incomplete history, unsafe paths, and
   relevant unsupported/partial source drive strict policy, while unrelated omissions remain discoverable;
-- Go, Lua, and Zig recur in the real project corpus but currently receive no structural map;
+- Lua and Zig recur in the real project corpus but currently receive no structural map;
 - minified or generated files are now classified before compact parsing, with bounded evidence samples and safe
   explicit overrides for focused inspection.
 

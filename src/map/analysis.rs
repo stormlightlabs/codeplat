@@ -504,7 +504,7 @@ pub fn analyze(path: &Path, settings: &MapSettings) -> Result<MapReport> {
                 .to_owned(),
             "Reference names can have multiple lexical definition candidates; ambiguity is reported rather than treated as a semantic call edge."
                 .to_owned(),
-            "JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, and C# use explicit grammar variants; query-pack provenance is reported per language."
+            "JavaScript/JSX, TypeScript/TSX, Python, Ruby, Java, C#, and Go use explicit grammar variants; query-pack provenance is reported per language."
                 .to_owned(),
             "Tracked files are eligible even when ignore rules match them, except deterministic generated/vendor/minified classifications; exact focus paths can opt in within the safety limits."
                 .to_owned(),

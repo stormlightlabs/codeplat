@@ -32,6 +32,10 @@ pub fn c_sharp_language() -> tree_sitter::Language {
     tree_sitter_c_sharp::LANGUAGE.into()
 }
 
+pub fn go_language() -> tree_sitter::Language {
+    tree_sitter_go::LANGUAGE.into()
+}
+
 pub fn support_for_path(path: &Path) -> Option<&'static LanguageSupport> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     LANGUAGE_SUPPORT

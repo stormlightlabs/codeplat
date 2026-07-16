@@ -7,7 +7,7 @@ It produces an integrated briefing, or a focused report when you need only one
 evidence family:
 
 - `codeplat map` inventories the current worktree and extracts structural maps for
-  Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, and C# files.
+  Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, C#, and Go files.
 - `codeplat history` summarizes five Git-history signals
   1. churn
   2. contributors
@@ -85,12 +85,13 @@ highest-ranked snippet or summaries.
 
 ### `codeplat map [OPTIONS] [PATH]`
 
-The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, and C# source files. It reports:
+The map command supports Rust, JavaScript, JSX, TypeScript, TSX, Python, Ruby, Java, C#, and Go source files. It reports:
 
 - tracked, modified, and untracked worktree state
 - the selected language variant and file extension (`javascript_jsx` and `typescript_tsx` are explicit)
 - definitions and lexical references with symbol kind, visibility, syntactic
   evidence, enclosing scope, 1-based source locations, and compact declaration context
+- Go package and receiver scopes, import aliases, exported visibility, and `_test.go` declarations
 - language- and import-aware lexical file edges with a resolution reason,
   confidence tier, candidate-group identity, and deterministic centrality ranking
 - optional explicit `--focus` and `--focus-path` boosts

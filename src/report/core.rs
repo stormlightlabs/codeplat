@@ -271,6 +271,7 @@ pub enum SourceLanguage {
     Python,
     Ruby,
     Java,
+    Go,
     #[serde(rename = "c_sharp")]
     CSharp,
 }
@@ -286,6 +287,7 @@ impl SourceLanguage {
             Self::Python => "python",
             Self::Ruby => "ruby",
             Self::Java => "java",
+            Self::Go => "go",
             Self::CSharp => "c_sharp",
         }
     }
@@ -300,6 +302,7 @@ impl SourceLanguage {
             Self::Python => "Python",
             Self::Ruby => "Ruby",
             Self::Java => "Java",
+            Self::Go => "Go",
             Self::CSharp => "C#",
         }
     }
@@ -480,6 +483,7 @@ impl MapFindingKind {
 pub enum LexicalResolutionReason {
     #[default]
     SameFileExplicit,
+    SameModule,
     ImportedModule,
     ImportedName,
 }
@@ -488,6 +492,7 @@ impl LexicalResolutionReason {
     pub const fn label(self) -> &'static str {
         match self {
             Self::SameFileExplicit => "same_file_explicit",
+            Self::SameModule => "same_module",
             Self::ImportedModule => "imported_module",
             Self::ImportedName => "imported_name",
         }

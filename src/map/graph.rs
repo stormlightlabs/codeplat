@@ -30,6 +30,19 @@ pub fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edge
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let modules = files
+        .iter()
+        .map(|file| {
+            (
+                file.path.clone(),
+                file.symbols
+                    .iter()
+                    .filter(|symbol| symbol.role == SymbolRole::Definition && symbol.kind == SymbolKind::Module)
+                    .map(|symbol| symbol.name.clone())
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut edges = Vec::new();
     'files: for file in files {
@@ -48,11 +61,8 @@ pub fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edge
                 .filter(|(path, _)| path == &file.path)
                 .cloned()
                 .collect::<Vec<_>>();
-            let imported = imports
-                .get(&file.path)
-                .into_iter()
-                .flatten()
-                .find(|(name, _)| name == &symbol.name);
+            let file_imports = imports.get(&file.path).into_iter().flatten().collect::<Vec<_>>();
+            let exact_import = file_imports.iter().find(|(name, _)| name == &symbol.name);
             let (candidates, reason, confidence) = if !same_file.is_empty() {
                 if symbol.evidence != SymbolEvidence::BareReference {
                     (
@@ -63,27 +73,33 @@ pub fn build_lexical_edges(files: &[SourceFile], max_candidates: usize, max_edge
                 } else {
                     continue;
                 }
+            } else if let Some(module_candidates) = same_module_candidates(file, all_candidates, &modules) {
+                (
+                    module_candidates,
+                    LexicalResolutionReason::SameModule,
+                    ConfidenceTier::High,
+                )
             } else {
-                let Some((_, hints)) = imported else {
-                    // A cross-file bare name is not evidence of a dependency.
-                    continue;
-                };
-                let module_candidates = all_candidates
+                let imported_module_candidates = all_candidates
                     .iter()
-                    .filter(|(path, _)| module_path_matches(path, hints))
+                    .filter(|(path, _)| file_imports.iter().any(|(_, hints)| module_path_matches(path, hints)))
                     .cloned()
                     .collect::<Vec<_>>();
-                if module_candidates.is_empty() {
+                if !imported_module_candidates.is_empty() {
+                    (
+                        imported_module_candidates,
+                        LexicalResolutionReason::ImportedModule,
+                        ConfidenceTier::High,
+                    )
+                } else {
+                    let Some(_) = exact_import else {
+                        // A cross-file name without package or import evidence is not a dependency.
+                        continue;
+                    };
                     (
                         all_candidates.clone(),
                         LexicalResolutionReason::ImportedName,
                         ConfidenceTier::Medium,
-                    )
-                } else {
-                    (
-                        module_candidates,
-                        LexicalResolutionReason::ImportedModule,
-                        ConfidenceTier::High,
                     )
                 }
             };
@@ -352,6 +368,7 @@ fn normalize_module_hint(value: &str) -> String {
         .trim_end_matches(".rs")
         .trim_end_matches(".java")
         .trim_end_matches(".cs")
+        .trim_end_matches(".go")
         .replace("::", "/")
         .trim_matches('/')
         .to_ascii_lowercase()
@@ -371,7 +388,13 @@ fn module_path_matches(path: &str, hints: &[String]) -> bool {
             .trim_start_matches("crate/")
             .trim_start_matches("self/")
             .trim_start_matches("super/");
-        direct_match || normalized == module || normalized.ends_with(&format!("/{module}"))
+        let imported_directory = hint.rsplit('/').next().unwrap_or(hint);
+        let path_parent = repository_parent(&normalized);
+        direct_match
+            || normalized == module
+            || normalized.ends_with(&format!("/{module}"))
+            || path_parent == imported_directory
+            || path_parent.ends_with(&format!("/{imported_directory}"))
     })
 }
 
@@ -468,4 +491,33 @@ fn path_matches_focus(path: &str, focus_path: &str) -> bool {
 
 fn scaled_score(score: f64) -> u64 {
     (score.max(0.0) * RANK_SCALE).round() as u64
+}
+
+fn same_module_candidates(
+    source: &SourceFile, candidates: &[(String, SymbolVisibility)], modules: &BTreeMap<String, BTreeSet<String>>,
+) -> Option<Vec<(String, SymbolVisibility)>> {
+    if source.language != SourceLanguage::Go {
+        return None;
+    }
+    let source_modules = modules.get(&source.path)?;
+    if source_modules.is_empty() {
+        return None;
+    }
+    let source_parent = repository_parent(&source.path);
+    let matches = candidates
+        .iter()
+        .filter(|(path, _)| {
+            path != &source.path
+                && repository_parent(path) == source_parent
+                && modules
+                    .get(path)
+                    .is_some_and(|target_modules| !source_modules.is_disjoint(target_modules))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    (!matches.is_empty()).then_some(matches)
+}
+
+fn repository_parent(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(parent, _)| parent)
 }

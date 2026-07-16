@@ -283,6 +283,49 @@ struct RootInfo {
     roles: Vec<ManifestRole>,
 }
 
+struct LandmarkCollector<'a> {
+    landmarks: Vec<Landmark>,
+    seen: BTreeSet<(LandmarkKind, String)>,
+    focuses: &'a [String],
+    focus_paths: &'a [String],
+}
+
+impl<'a> LandmarkCollector<'a> {
+    fn new(focuses: &'a [String], focus_paths: &'a [String]) -> Self {
+        Self { landmarks: Vec::new(), seen: BTreeSet::new(), focuses, focus_paths }
+    }
+
+    fn add(
+        &mut self, kind: LandmarkKind, path: String, reason: String, project_root: Option<String>,
+        worktree_state: WorktreeState,
+    ) {
+        if !self.seen.insert((kind, path.clone())) {
+            return;
+        }
+        self.landmarks.push(Landmark {
+            kind,
+            path: path.clone(),
+            reason,
+            project_root,
+            worktree_state,
+            priority: kind.priority(),
+            focus_matches: focus_matches(&path, kind, self.focuses, self.focus_paths),
+        });
+    }
+
+    fn into_landmarks(self) -> Vec<Landmark> {
+        self.landmarks
+    }
+}
+
+pub fn project_root_for_path(path: &str, roots: &[ProjectRoot]) -> Option<String> {
+    roots
+        .iter()
+        .filter(|root| root.path == "." || path == root.path || path.starts_with(&format!("{}/", root.path)))
+        .max_by_key(|root| root.path.len())
+        .map(|root| root.path.clone())
+}
+
 fn detect_project_roots(
     repository_root: &Path, scope_root: &Path, scope_path: &str, path_states: &BTreeMap<String, WorktreeState>,
     exclusions: Option<&Gitignore>, limits: &ReportLimits, limitations: &mut Vec<String>,
@@ -374,6 +417,7 @@ fn inspect_manifest(
             }
         }
         "pnpm-workspace.yaml" | "pnpm-workspace.yml" | "lerna.json" | "nx.json" => ManifestRole::Workspace,
+        "go.work" => ManifestRole::Workspace,
         "pom.xml" | "settings.gradle" | "settings.gradle.kts" => {
             if text.contains("<modules>") || text.contains("include(") {
                 ManifestRole::Workspace
@@ -382,7 +426,7 @@ fn inspect_manifest(
             }
         }
         "pyproject.toml" | "setup.py" | "setup.cfg" | "gemfile" | "gemspec" | "build.gradle" | "build.gradle.kts"
-        | "composer.json" | "mix.exs" => ManifestRole::Package,
+        | "composer.json" | "mix.exs" | "go.mod" => ManifestRole::Package,
         _ if basename.ends_with(".csproj") || basename.ends_with(".sln") => ManifestRole::Package,
         _ => ManifestRole::Unknown,
     }
@@ -485,41 +529,6 @@ fn detect_nested_repositories(
     (nested, limitations)
 }
 
-struct LandmarkCollector<'a> {
-    landmarks: Vec<Landmark>,
-    seen: BTreeSet<(LandmarkKind, String)>,
-    focuses: &'a [String],
-    focus_paths: &'a [String],
-}
-
-impl<'a> LandmarkCollector<'a> {
-    fn new(focuses: &'a [String], focus_paths: &'a [String]) -> Self {
-        Self { landmarks: Vec::new(), seen: BTreeSet::new(), focuses, focus_paths }
-    }
-
-    fn add(
-        &mut self, kind: LandmarkKind, path: String, reason: String, project_root: Option<String>,
-        worktree_state: WorktreeState,
-    ) {
-        if !self.seen.insert((kind, path.clone())) {
-            return;
-        }
-        self.landmarks.push(Landmark {
-            kind,
-            path: path.clone(),
-            reason,
-            project_root,
-            worktree_state,
-            priority: kind.priority(),
-            focus_matches: focus_matches(&path, kind, self.focuses, self.focus_paths),
-        });
-    }
-
-    fn into_landmarks(self) -> Vec<Landmark> {
-        self.landmarks
-    }
-}
-
 fn focus_matches(path: &str, kind: LandmarkKind, focuses: &[String], focus_paths: &[String]) -> usize {
     let lower_path = path.to_ascii_lowercase();
     let text_matches = focuses
@@ -537,14 +546,6 @@ fn focus_matches(path: &str, kind: LandmarkKind, focuses: &[String], focus_paths
         })
         .count();
     text_matches + path_matches
-}
-
-pub fn project_root_for_path(path: &str, roots: &[ProjectRoot]) -> Option<String> {
-    roots
-        .iter()
-        .filter(|root| root.path == "." || path == root.path || path.starts_with(&format!("{}/", root.path)))
-        .max_by_key(|root| root.path.len())
-        .map(|root| root.path.clone())
 }
 
 fn state_for_path(path: &str, states: &BTreeMap<String, WorktreeState>) -> WorktreeState {
@@ -629,31 +630,22 @@ fn is_manifest(name: &str) -> bool {
             | "pnpm-workspace.yml"
             | "lerna.json"
             | "nx.json"
+            | "go.mod"
+            | "go.work"
     ) || name.ends_with(".csproj")
         || name.ends_with(".sln")
 }
 
 fn manifest_family(name: &str) -> &str {
-    if name == "cargo.toml" {
-        "rust"
-    } else if matches!(
-        name,
-        "package.json" | "pnpm-workspace.yaml" | "pnpm-workspace.yml" | "lerna.json" | "nx.json"
-    ) {
-        "node"
-    } else if matches!(name, "pyproject.toml" | "setup.py" | "setup.cfg") {
-        "python"
-    } else if matches!(name, "gemfile" | "gemspec") {
-        "ruby"
-    } else if matches!(
-        name,
-        "pom.xml" | "build.gradle" | "build.gradle.kts" | "settings.gradle" | "settings.gradle.kts"
-    ) {
-        "jvm"
-    } else if name.ends_with(".csproj") || name.ends_with(".sln") {
-        "dotnet"
-    } else {
-        "other"
+    match name {
+        "cargo.toml" => "rust",
+        "package.json" | "pnpm-workspace.yaml" | "pnpm-workspace.yml" | "lerna.json" | "nx.json" => "node",
+        "go.mod" | "go.work" => "go",
+        "pyproject.toml" | "setup.py" | "setup.cfg" => "python",
+        "gemfile" | "gemspec" => "ruby",
+        "pom.xml" | "build.gradle" | "build.gradle.kts" | "settings.gradle" | "settings.gradle.kts" => "jvm",
+        name if name.ends_with(".csproj") || name.ends_with(".sln") => "dotnet",
+        _ => "other",
     }
 }
 
@@ -668,8 +660,8 @@ fn is_lockfile(name: &str) -> bool {
             | "poetry.lock"
             | "uv.lock"
             | "gemfile.lock"
-            | "composer.lock"
             | "go.sum"
+            | "composer.lock"
     )
 }
 
@@ -741,9 +733,22 @@ mod tests {
         assert!(is_readme("readme.md"));
         assert!(is_agent_instructions("agents.md"));
         assert!(is_manifest("cargo.toml"));
+        assert!(is_manifest("go.mod"));
         assert!(is_lockfile("pnpm-lock.yaml"));
+        assert!(is_lockfile("go.sum"));
         assert!(is_test_directory("__tests__"));
-        assert_eq!(manifest_family("package.json"), "node");
+        for (manifest, family) in [
+            ("cargo.toml", "rust"),
+            ("package.json", "node"),
+            ("go.mod", "go"),
+            ("pyproject.toml", "python"),
+            ("gemfile", "ruby"),
+            ("pom.xml", "jvm"),
+            ("app.csproj", "dotnet"),
+            ("unknown.manifest", "other"),
+        ] {
+            assert_eq!(manifest_family(manifest), family);
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 ## Release blockers
 
 - Generated, vendored, and minified source can still consume analysis limits and degrade recommendations.
-- Go, Lua, and Zig do not yet have first-class structural-map support.
+- Lua and Zig do not yet have first-class structural-map support.
 - Scale benchmarks do not yet enforce latency/output ceilings for ignored trees, high ambiguity, and deep history.
 - The configured Linux, macOS, Windows, Rust 1.85, and dependency-policy jobs need a green release-candidate run.
 
@@ -93,16 +93,16 @@ first-class languages.
 
 **Acceptance criteria:**
 
-- [ ] A reviewed upstream Go Tree-sitter grammar and versioned query pack are registered with minimal features.
-- [ ] Definitions cover packages, functions, methods, types, structs, interfaces, fields, constants, variables,
+- [x] A reviewed upstream Go Tree-sitter grammar and versioned query pack are registered with minimal features.
+- [x] Definitions cover packages, functions, methods, types, structs, interfaces, fields, constants, variables,
       and common test declarations with accurate locations and declaration context.
-- [ ] References/import evidence covers imports and aliases, calls, type uses, selectors, and same-package evidence
+- [x] References/import evidence covers imports and aliases, calls, type uses, selectors, and same-package evidence
       without claiming type resolution.
-- [ ] Exported capitalization, receiver scope, package context, `_test.go`, malformed input, generics, duplicate
+- [x] Exported capitalization, receiver scope, package context, `_test.go`, malformed input, generics, duplicate
       names, and ambiguous candidates have positive and negative conformance fixtures.
-- [ ] Go participates in mixed-language ranking, capabilities, provenance, cache identity, limitations, Markdown,
+- [x] Go participates in mixed-language ranking, capabilities, provenance, cache identity, limitations, Markdown,
       and JSON; the generic reading-plan contract can consume its ranked evidence without language-specific logic.
-- [ ] README/help/roadmap language lists match implemented support.
+- [x] README/help/roadmap language lists match implemented support.
 
 **Verification:**
 
@@ -257,6 +257,5 @@ and platform gate is green.
 
 ## Frontier
 
-- Ticket 21: Add first-class Go maps.
 - Ticket 22: Add first-class Lua maps.
 - Ticket 23: Add first-class Zig maps.

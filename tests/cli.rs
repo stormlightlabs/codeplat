@@ -414,6 +414,7 @@ impl MixedMapFixtureRepository {
         let tracked_files = [
             (".gitignore", "src/ignored.js\n"),
             ("README.md", "mixed-language source map fixture\n"),
+            ("go.mod", "module example.com/fixture\n\ngo 1.24\n"),
             ("src/lib.rs", "pub fn parse() { let value = 1; let _ = value; }\n"),
             ("src/broken.js", "export function broken( {\n"),
             (
@@ -438,6 +439,21 @@ impl MixedMapFixtureRepository {
                 "module Billing\n  class Service\n    def run(value)\n      helper(value)\n    end\n  end\nend\n\ndef build\n  Service.new\nend\n",
             ),
             ("src/broken.rb", "def broken(\nend\n"),
+            (
+                "src/service.go",
+                "package fixture\n\nimport \"fmt\"\n\ntype Service[T any] struct {\n    Value T\n    hidden int\n}\n\ntype Runner interface {\n    Run() error\n}\n\nconst Exported = 1\nvar localValue = 2\n\nfunc NewService[T any](value T) *Service[T] {\n    fmt.Println(value)\n    return &Service[T]{Value: value}\n}\n\nfunc (service *Service[T]) Run() error { return nil }\n",
+            ),
+            (
+                "src/service_test.go",
+                "package fixture\n\nfunc TestNewService(t *testing.T) {\n    NewService(1)\n}\n",
+            ),
+            ("src/duplicate_one.go", "package fixture\nfunc Duplicate() {}\n"),
+            ("src/duplicate_two.go", "package fixture\nfunc Duplicate() {}\n"),
+            (
+                "src/duplicate_use.go",
+                "package fixture\nfunc useDuplicate() { Duplicate() }\n",
+            ),
+            ("src/broken.go", "package fixture\nfunc Broken( {\n"),
         ];
         let repository = gix::init(&root).expect("initialize mixed map fixture repository");
         let tree = write_tree(&repository, &tracked_files);
@@ -1221,6 +1237,18 @@ fn capabilities_are_available_without_repository_analysis() {
             .iter()
             .any(|language| language["language"] == "java")
     );
+    let go = value["languages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|language| language["language"] == "go")
+        .expect("Go capability");
+    assert_eq!(go["extensions"], serde_json::json!(["go"]));
+    assert_eq!(go["grammar"], "tree-sitter-go");
+    assert_eq!(go["grammar_version"], "0.25.0");
+    assert_eq!(go["query_pack"], "go-v1");
+    assert_eq!(go["definitions"], true);
+    assert_eq!(go["references"], true);
 }
 
 #[test]
@@ -1284,7 +1312,7 @@ fn strict_quality_uses_complete_counts_when_compact_samples_are_truncated() {
     for index in 0..8 {
         write_file(fixture.root.join(format!("a{index}.rs")), b"\0binary");
     }
-    write_file(fixture.root.join("z.go"), b"package unsupported\n");
+    write_file(fixture.root.join("z.lua"), b"return unsupported\n");
 
     let output = fixture.run(&["map", "--strict", "--no-cache", "--json"]);
     let value: Value = serde_json::from_slice(&output.stdout).expect("strict compact report is valid JSON");
@@ -1331,7 +1359,7 @@ fn compact_projection_is_reported_without_becoming_actionable_quality() {
 #[test]
 fn irrelevant_unsupported_source_does_not_poison_a_briefing_but_focus_does() {
     let fixture = ClassificationFixtureRepository::new();
-    write_file(fixture.root.join("src/unsupported.go"), b"package unsupported\n");
+    write_file(fixture.root.join("src/unsupported.lua"), b"return unsupported\n");
 
     let briefing = fixture.run(&["--strict", "--no-cache", "--json"]);
     let briefing_value: Value = serde_json::from_slice(&briefing.stdout).expect("briefing JSON");
@@ -1347,14 +1375,14 @@ fn irrelevant_unsupported_source_does_not_poison_a_briefing_but_focus_does() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|path| path == "src/unsupported.go")
+            .any(|path| path == "src/unsupported.lua")
     );
 
     let focused = fixture.run(&[
         "map",
         "--strict",
         "--focus-path",
-        "src/unsupported.go",
+        "src/unsupported.lua",
         "--no-cache",
         "--json",
     ]);
@@ -2684,6 +2712,7 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     assert_eq!(json["map"]["query_packs"]["typescript_tsx"], "typescript-v1");
     assert_eq!(json["map"]["query_packs"]["python"], "python-v1");
     assert_eq!(json["map"]["query_packs"]["ruby"], "ruby-v1");
+    assert_eq!(json["map"]["query_packs"]["go"], "go-v1");
 
     let files = json["map"]["files"].as_array().expect("mixed map files");
     for (path, language, extension) in [
@@ -2694,6 +2723,8 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
         ("src/component.tsx", "typescript_tsx", "tsx"),
         ("src/service.py", "python", "py"),
         ("src/service.rb", "ruby", "rb"),
+        ("src/service.go", "go", "go"),
+        ("src/service_test.go", "go", "go"),
     ] {
         let file = files
             .iter()
@@ -2785,7 +2816,34 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
             .iter()
             .any(|symbol| { symbol["name"] == "Service" && symbol["role"] == "reference" })
     );
-    for path in ["src/broken.py", "src/broken.rb"] {
+    let go = files
+        .iter()
+        .find(|file| file["path"] == "src/service.go")
+        .expect("Go file");
+    assert!(go["symbols"].as_array().expect("Go symbols").iter().any(|symbol| {
+        symbol["name"] == "Service"
+            && symbol["kind"] == "struct"
+            && symbol["role"] == "definition"
+            && symbol["visibility"] == "public"
+    }));
+    assert!(go["symbols"].as_array().expect("Go symbols").iter().any(|symbol| {
+        symbol["name"] == "NewService" && symbol["kind"] == "function" && symbol["role"] == "definition"
+    }));
+    let go_test = files
+        .iter()
+        .find(|file| file["path"] == "src/service_test.go")
+        .expect("Go test file");
+    assert!(
+        go_test["symbols"]
+            .as_array()
+            .expect("Go test symbols")
+            .iter()
+            .any(|symbol| {
+                symbol["name"] == "TestNewService" && symbol["kind"] == "function" && symbol["role"] == "definition"
+            })
+    );
+
+    for path in ["src/broken.py", "src/broken.rb", "src/broken.go"] {
         let file = files
             .iter()
             .find(|file| file["path"] == path)
@@ -2830,12 +2888,90 @@ fn mixed_language_map_is_explicit_deterministic_and_keeps_other_findings() {
     assert!(markdown_stdout.contains("TypeScript (TSX) files"));
     assert!(markdown_stdout.contains("Python files"));
     assert!(markdown_stdout.contains("Ruby files"));
+    assert!(markdown_stdout.contains("Go files"));
     assert!(markdown_stdout.contains("src/broken.py"));
     assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Python file"));
     assert!(markdown_stdout.contains("src/broken.rb"));
     assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Ruby file"));
+    assert!(markdown_stdout.contains("src/broken.go"));
+    assert!(markdown_stdout.contains("Tree-sitter reported parse errors in this Go file"));
     assert!(markdown_stdout.contains("query-pack provenance"));
     assert_plain_report(&markdown_stdout);
+}
+
+#[test]
+fn go_map_supports_focus_package_edges_ambiguity_provenance_and_reading_plans() {
+    let fixture = MixedMapFixtureRepository::new();
+    let map = fixture.run(&[
+        "map",
+        "--profile",
+        "evidence",
+        "--no-cache",
+        "--focus-path",
+        "src/service.go",
+        "--json",
+    ]);
+    let value: Value = serde_json::from_slice(&map.stdout).expect("valid focused Go map JSON");
+    assert!(
+        map.status.success(),
+        "focused Go map failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+    assert!(map.stderr.is_empty());
+    assert_eq!(value["map"]["query_packs"]["go"], "go-v1");
+    assert_eq!(value["provenance"]["languages"]["go"]["grammar"], "tree-sitter-go");
+    assert_eq!(value["provenance"]["languages"]["go"]["query_pack"], "go-v1");
+    assert_eq!(value["map"]["ranking"][0]["path"], "src/service.go");
+    let go_file = value["map"]["files"]
+        .as_array()
+        .expect("focused map files")
+        .iter()
+        .find(|file| file["path"] == "src/service.go")
+        .expect("focused Go file");
+    assert!(
+        go_file["symbols"]
+            .as_array()
+            .expect("focused Go symbols")
+            .iter()
+            .any(|symbol| {
+                symbol["name"] == "Run"
+                    && symbol["kind"] == "method"
+                    && symbol["role"] == "definition"
+                    && symbol["scope"] == serde_json::json!(["fixture", "Service"])
+            })
+    );
+    assert!(value["map"]["edges"].as_array().expect("Go edges").iter().any(|edge| {
+        edge["source"] == "src/service_test.go"
+            && edge["target"] == "src/service.go"
+            && edge["symbol"] == "NewService"
+            && edge["resolution_reason"] == "same_module"
+    }));
+    assert!(
+        value["map"]["findings"]
+            .as_array()
+            .expect("Go findings")
+            .iter()
+            .any(|finding| {
+                finding["kind"] == "ambiguous_reference"
+                    && finding["detail"].as_str().unwrap_or_default().contains("Duplicate")
+            })
+    );
+
+    let briefing = fixture.run(&["--no-cache", "--focus-path", "src/service.go", "--json"]);
+    let briefing_value: Value = serde_json::from_slice(&briefing.stdout).expect("valid focused Go briefing JSON");
+    assert!(briefing.status.success());
+    assert!(
+        briefing_value["reading_plan"]["recommendations"]
+            .as_array()
+            .expect("Go reading plan")
+            .iter()
+            .any(|recommendation| {
+                recommendation["path"] == "src/service.go"
+                    && recommendation["evidence_kinds"]
+                        .as_array()
+                        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "source_map"))
+            })
+    );
 }
 
 #[test]

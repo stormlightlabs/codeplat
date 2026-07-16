@@ -225,17 +225,88 @@ pub fn symbol_from_capture(
 ) -> SourceSymbol {
     let declaration = declaration_node(node, support.declaration_kinds);
     let scope_start = if role == SymbolRole::Definition { declaration.parent() } else { node.parent() };
-    let kind = symbol_kind(capture_name);
+    let name = text_for_node(node, source);
+    let kind = language_symbol_kind(node, declaration, capture_name, support.language);
     SourceSymbol {
-        name: text_for_node(node, source),
+        name: name.clone(),
         kind,
         role,
-        scope: scope_for_node(scope_start, source, support.scope_kinds),
+        scope: language_scope(node, declaration, scope_start, source, support),
         location: SourceLocation::from(node),
         context: context_snippet(node, source, support.declaration_kinds),
-        visibility: visibility_for_node(declaration, role, source),
+        visibility: visibility_for_node(declaration, role, source, support.language, kind, &name),
         evidence: evidence_for_node(node, capture_name, role, kind),
     }
+}
+
+fn language_symbol_kind(
+    node: Node<'_>, declaration: Node<'_>, capture_name: &str, language: SourceLanguage,
+) -> SymbolKind {
+    let kind = symbol_kind(capture_name);
+    if language != SourceLanguage::Go {
+        return kind;
+    }
+    if kind == SymbolKind::Type {
+        return match declaration.child_by_field_name("type").map(|node| node.kind()) {
+            Some("struct_type") => SymbolKind::Struct,
+            Some("interface_type") => SymbolKind::Interface,
+            _ => SymbolKind::Type,
+        };
+    }
+    if kind == SymbolKind::Field && is_call_like(node) {
+        return SymbolKind::Method;
+    }
+    kind
+}
+
+fn language_scope(
+    node: Node<'_>, declaration: Node<'_>, scope_start: Option<Node<'_>>, source: &[u8], support: &LanguageSupport,
+) -> Vec<String> {
+    let mut scopes = scope_for_node(scope_start, source, support.scope_kinds);
+    if support.language != SourceLanguage::Go {
+        return scopes;
+    }
+
+    if declaration.kind() == "method_declaration"
+        && let Some(receiver) = declaration.child_by_field_name("receiver")
+        && let Some(receiver_type) = first_descendant_of_kind(receiver, "type_identifier")
+    {
+        let receiver_type = text_for_node(receiver_type, source);
+        if !scopes.contains(&receiver_type) {
+            scopes.insert(0, receiver_type);
+        }
+    }
+    if let Some(package) = go_package_name(node, source)
+        && scopes.first() != Some(&package)
+    {
+        scopes.insert(0, package);
+    }
+    scopes
+}
+
+fn go_package_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut root = node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .find(|child| child.kind() == "package_clause")
+        .and_then(|package| first_descendant_of_kind(package, "package_identifier"))
+        .map(|package| text_for_node(package, source))
+}
+
+fn first_descendant_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut stack = vec![node];
+    while let Some(candidate) = stack.pop() {
+        if candidate.kind() == kind {
+            return Some(candidate);
+        }
+        let mut cursor = candidate.walk();
+        let children = candidate.named_children(&mut cursor).collect::<Vec<_>>();
+        stack.extend(children.into_iter().rev());
+    }
+    None
 }
 
 pub fn evidence_for_node(node: Node<'_>, capture_name: &str, role: SymbolRole, kind: SymbolKind) -> SymbolEvidence {
@@ -244,10 +315,10 @@ pub fn evidence_for_node(node: Node<'_>, capture_name: &str, role: SymbolRole, k
     }
     if capture_name.ends_with(".type") || kind == SymbolKind::Type {
         SymbolEvidence::TypeReference
-    } else if capture_name.ends_with(".field") || kind == SymbolKind::Field {
-        SymbolEvidence::MemberReference
     } else if capture_name.ends_with(".method") || kind == SymbolKind::Method || is_call_like(node) {
         SymbolEvidence::Call
+    } else if capture_name.ends_with(".field") || kind == SymbolKind::Field {
+        SymbolEvidence::MemberReference
     } else {
         SymbolEvidence::BareReference
     }
@@ -281,9 +352,23 @@ pub fn is_call_like(node: Node<'_>) -> bool {
     false
 }
 
-pub fn visibility_for_node(node: Node<'_>, role: SymbolRole, source: &[u8]) -> SymbolVisibility {
+pub fn visibility_for_node(
+    node: Node<'_>, role: SymbolRole, source: &[u8], language: SourceLanguage, kind: SymbolKind, name: &str,
+) -> SymbolVisibility {
     if role == SymbolRole::Reference {
         return SymbolVisibility::Unknown;
+    }
+    if language == SourceLanguage::Go && !matches!(kind, SymbolKind::Module | SymbolKind::Import) {
+        let local_declaration = !matches!(kind, SymbolKind::Field | SymbolKind::Method)
+            && ancestor_has_kind(node, &["function_declaration", "method_declaration"]);
+        if local_declaration {
+            return SymbolVisibility::Internal;
+        }
+        return if name.chars().next().is_some_and(char::is_uppercase) {
+            SymbolVisibility::Public
+        } else {
+            SymbolVisibility::Internal
+        };
     }
     let declaration = context_snippet(node, source, &[]).to_ascii_lowercase();
     let starts_with = declaration.trim_start();
@@ -304,6 +389,16 @@ pub fn visibility_for_node(node: Node<'_>, role: SymbolRole, source: &[u8]) -> S
     } else {
         SymbolVisibility::Unknown
     }
+}
+
+fn ancestor_has_kind(mut node: Node<'_>, kinds: &[&str]) -> bool {
+    while let Some(parent) = node.parent() {
+        if kinds.contains(&parent.kind()) {
+            return true;
+        }
+        node = parent;
+    }
+    false
 }
 
 pub fn symbol_kind(capture_name: &str) -> SymbolKind {
@@ -358,6 +453,14 @@ pub fn scope_for_node(start: Option<Node<'_>>, source: &[u8], scope_kinds: &[&st
 
 pub fn context_snippet(node: Node<'_>, source: &[u8], declaration_kinds: &[&str]) -> String {
     let declaration = declaration_node(node, declaration_kinds);
+    let declaration = if matches!(
+        declaration.kind(),
+        "type_spec" | "type_alias" | "const_spec" | "var_spec"
+    ) {
+        declaration.parent().unwrap_or(declaration)
+    } else {
+        declaration
+    };
     let declaration = if is_import_declaration_kind(declaration.kind()) {
         nearest_import_statement(declaration).unwrap_or(declaration)
     } else {

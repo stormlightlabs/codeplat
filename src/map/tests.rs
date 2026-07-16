@@ -306,6 +306,153 @@ namespace Example.App {
 }
 
 #[test]
+fn go_query_pack_extracts_packages_declarations_references_visibility_and_scopes() {
+    let source = br#"
+package service
+
+import (
+    "fmt"
+    api "example.com/project/client"
+)
+
+type Identifier = string
+type Box[T any] struct {
+    Value T
+    hidden int
+}
+type Runner interface {
+    Run(Identifier) error
+    hiddenRun()
+}
+
+const ExportedConstant = 1
+const localConstant = 2
+var ExportedVariable Identifier
+var localVariable Identifier
+
+func Build[T any](value T) *Box[T] {
+    var LocalOnly Identifier
+    LocalShort := value
+    fmt.Println(value)
+    helper()
+    return &Box[T]{Value: value}
+}
+
+func helper() {}
+
+func (box *Box[T]) Process(input Identifier) {
+    api.Send(input)
+    helper()
+}
+"#;
+    let parsed = parse_source(source, &GO_SUPPORT);
+
+    assert_eq!(parsed.status, FileAnalysisStatus::Complete, "{parsed:?}");
+    assert!(parsed.findings.is_empty(), "{parsed:?}");
+    for (name, kind) in [
+        ("service", SymbolKind::Module),
+        ("fmt", SymbolKind::Import),
+        ("api", SymbolKind::Import),
+        ("Identifier", SymbolKind::Type),
+        ("Box", SymbolKind::Struct),
+        ("Runner", SymbolKind::Interface),
+        ("Value", SymbolKind::Field),
+        ("Run", SymbolKind::Method),
+        ("ExportedConstant", SymbolKind::Const),
+        ("ExportedVariable", SymbolKind::Variable),
+        ("Build", SymbolKind::Function),
+        ("Process", SymbolKind::Method),
+    ] {
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .any(|symbol| { symbol.name == name && symbol.kind == kind && symbol.role == SymbolRole::Definition }),
+            "missing {kind:?} definition {name}: {parsed:?}"
+        );
+    }
+
+    let build = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Build" && symbol.role == SymbolRole::Definition)
+        .expect("Go function definition");
+    assert_eq!(build.scope, vec!["service"]);
+    assert_eq!(build.visibility, SymbolVisibility::Public);
+    assert!(build.context.starts_with("func Build[T any]"));
+
+    let process = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Process" && symbol.role == SymbolRole::Definition)
+        .expect("Go method definition");
+    assert_eq!(process.scope, vec!["service", "Box"]);
+    assert_eq!(process.visibility, SymbolVisibility::Public);
+
+    let hidden = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "hidden" && symbol.role == SymbolRole::Definition)
+        .expect("unexported Go field");
+    assert_eq!(hidden.scope, vec!["service", "Box"]);
+    assert_eq!(hidden.visibility, SymbolVisibility::Internal);
+    let local = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "LocalOnly" && symbol.role == SymbolRole::Definition)
+        .expect("function-local Go variable");
+    assert_eq!(local.visibility, SymbolVisibility::Internal);
+    let local_short = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "LocalShort" && symbol.role == SymbolRole::Definition)
+        .expect("short Go variable declaration");
+    assert_eq!(local_short.kind, SymbolKind::Variable);
+    assert_eq!(local_short.visibility, SymbolVisibility::Internal);
+
+    for (name, evidence) in [
+        ("Println", SymbolEvidence::Call),
+        ("Send", SymbolEvidence::Call),
+        ("helper", SymbolEvidence::Call),
+        ("Identifier", SymbolEvidence::TypeReference),
+    ] {
+        assert!(
+            parsed.symbols.iter().any(|symbol| {
+                symbol.name == name && symbol.role == SymbolRole::Reference && symbol.evidence == evidence
+            }),
+            "missing {evidence:?} reference {name}: {parsed:?}"
+        );
+    }
+}
+
+#[test]
+fn malformed_go_is_partial_and_test_declarations_remain_available() {
+    let valid = parse_source(
+        b"package service\nfunc TestBuild(t *testing.T) { Build(1) }\n",
+        &GO_SUPPORT,
+    );
+    assert_eq!(valid.status, FileAnalysisStatus::Complete, "{valid:?}");
+    assert!(valid.symbols.iter().any(|symbol| {
+        symbol.name == "TestBuild" && symbol.kind == SymbolKind::Function && symbol.role == SymbolRole::Definition
+    }));
+
+    let malformed = parse_source(b"package service\nfunc Broken( {\n", &GO_SUPPORT);
+    assert_eq!(malformed.status, FileAnalysisStatus::Partial);
+    assert!(
+        malformed
+            .findings
+            .iter()
+            .any(|finding| finding.kind == MapFindingKind::ParseError)
+    );
+    assert!(
+        malformed
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("Go file"))
+    );
+}
+
+#[test]
 fn javascript_typescript_and_jsx_extensions_select_explicit_language_variants() {
     assert_eq!(
         support_for_path(Path::new("module.js")).unwrap().language,
@@ -346,6 +493,10 @@ fn javascript_typescript_and_jsx_extensions_select_explicit_language_variants() 
     assert_eq!(
         support_for_path(Path::new("Service.cs")).unwrap().language,
         SourceLanguage::CSharp
+    );
+    assert_eq!(
+        support_for_path(Path::new("service_test.go")).unwrap().language,
+        SourceLanguage::Go
     );
     assert!(support_for_path(Path::new("module.vue")).is_none());
 }
@@ -400,6 +551,71 @@ fn lexical_edges_require_explicit_same_file_or_import_evidence_and_group_ambigui
         LexicalResolutionReason::ImportedModule
     );
     assert_eq!(rust_imported_edge.confidence, ConfidenceTier::High);
+
+    let go_same_package = build_lexical_edges(
+        &[
+            file(
+                "service/caller.go",
+                SourceLanguage::Go,
+                parse_source(b"package service\nfunc caller() { Build() }", &GO_SUPPORT),
+            ),
+            file(
+                "service/build.go",
+                SourceLanguage::Go,
+                parse_source(b"package service\nfunc Build() {}", &GO_SUPPORT),
+            ),
+        ],
+        32,
+        32,
+    );
+    let go_edge = go_same_package.first().expect("Go same-package edge");
+    assert_eq!(go_edge.symbol, "Build");
+    assert_eq!(go_edge.resolution_reason, LexicalResolutionReason::SameModule);
+    assert_eq!(go_edge.confidence, ConfidenceTier::High);
+
+    let go_different_directories = build_lexical_edges(
+        &[
+            file(
+                "one/caller.go",
+                SourceLanguage::Go,
+                parse_source(b"package service\nfunc caller() { Build() }", &GO_SUPPORT),
+            ),
+            file(
+                "two/build.go",
+                SourceLanguage::Go,
+                parse_source(b"package service\nfunc Build() {}", &GO_SUPPORT),
+            ),
+        ],
+        32,
+        32,
+    );
+    assert!(go_different_directories.is_empty());
+
+    let go_imported = build_lexical_edges(
+        &[
+            file(
+                "cmd/app/main.go",
+                SourceLanguage::Go,
+                parse_source(
+                    b"package main\nimport client \"example.com/project/internal/client\"\nfunc main() { client.Build() }",
+                    &GO_SUPPORT,
+                ),
+            ),
+            file(
+                "internal/client/build.go",
+                SourceLanguage::Go,
+                parse_source(b"package client\nfunc Build() {}", &GO_SUPPORT),
+            ),
+        ],
+        32,
+        32,
+    );
+    let imported_go_edge = go_imported.first().expect("Go import-path edge");
+    assert_eq!(imported_go_edge.symbol, "Build");
+    assert_eq!(
+        imported_go_edge.resolution_reason,
+        LexicalResolutionReason::ImportedModule
+    );
 
     let javascript_caller = file(
         "src/caller.js",
